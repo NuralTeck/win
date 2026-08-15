@@ -1,0 +1,31 @@
+{
+  "name": "whatsapp-engine",
+  "version": "1.0.0",
+  "description": "High-Traffic WhatsApp Entry Logger with Express REST API & Supabase Bulk Buffer",
+  "main": "bot_engine.js",
+  "bin": "bot_engine.js",
+  "scripts": {
+    "start": "node bot_engine.js",
+    "pkg": "pkg . --targets node18-win-x64 --output dist/whatsapp_engine.exe"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "pkg": "^5.8.1"
+  },
+  "pkg": {
+    "scripts": "bot_engine.js",
+    "assets": [
+      "node_modules/@whiskeysockets/baileys/**/*"
+    ]
+  },
+  "author": "Antigravity Engineering",
+  "license": "ISC"
+}

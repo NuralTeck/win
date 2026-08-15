@@ -1,0 +1,91 @@
+# ==========================================
+# Flutter / Dart / Pub
+# ==========================================
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+/build/
+/coverage/
+**/doc/api/
+
+# Windows Desktop Ephemeral & Build Files
+windows/flutter/ephemeral/
+windows/flutter/generated_plugins.cmake
+windows/flutter/generated_plugin_registrant.h
+windows/flutter/generated_plugin_registrant.cc
+
+# Symbolication & Obfuscation
+app.*.symbols
+app.*.map.json
+
+# Android / iOS / Linux / macOS builds
+/android/app/debug
+/android/app/profile
+/android/app/release
+**/ios/Flutter/.last_build_id
+linux/flutter/ephemeral/
+macos/Flutter/ephemeral/
+
+# ==========================================
+# Node.js / WhatsApp Engine
+# ==========================================
+node_modules/
+**/node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+
+# WhatsApp Baileys Auth Session & Credentials (SENSITIVE)
+auth_info_baileys/
+**/auth_info_baileys/
+*.auth
+*session*
+
+# ==========================================
+# Python & Scratch Files
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+.pytest_cache/
+scripts/parsed_result_matrix.csv
+fix_db.py
+fix_timestamps.py
+test_parser.js
+
+# ==========================================
+# Local Databases, Logs & Secrets
+# ==========================================
+*.db
+*.sqlite
+*.sqlite3
+*.log
+.env
+.env.*
+!.env.example
+
+# ==========================================
+# IDE & System Files
+# ==========================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.class
+.idea/
+*.iml
+*.ipr
+*.iws
+.history
+.atom/
+.build/
+.buildlog/
+.svn/
+.swiftpm/
