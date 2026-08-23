@@ -934,7 +934,7 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
               children: [
                 Center(
                   child: Text(
-                    'NAGALAND TICKETCORE — OWNER HISAB STATEMENT',
+                    'PHANTOM MANAGEMENT — OWNER HISAB STATEMENT',
                     style: AppTypography.titleLg.copyWith(fontWeight: FontWeight.bold, color: AppColors.primary),
                   ),
                 ),

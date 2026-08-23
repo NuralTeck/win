@@ -19,6 +19,14 @@ class _CustomerSetupScreenState extends ConsumerState<CustomerSetupScreen> {
   final Set<String> _visiblePasswords = {};
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(sellerCustomerViewModelProvider.notifier).loadSellers();
+    });
+  }
+
+  @override
   void dispose() {
     _searchCtrl.dispose();
     super.dispose();

@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
@@ -340,11 +341,23 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
       children: [
         Expanded(
           child: _kpiCard(
-            title: 'TOTAL PROCESSED',
+            title: 'TOTAL TICKETS BOOKED',
             value: status.processedCount.toString(),
-            subtitle: 'Entries saved to Supabase',
+            subtitle: 'Valid entries saved to Local Database',
             icon: Icons.done_all_rounded,
             color: Colors.greenAccent,
+            onReset: () async {
+              await _engineService.resetProcessedCount();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('🔄 Booked tickets counter reset to 0!'),
+                    backgroundColor: Color(0xFF22C55E),
+                    duration: Duration(seconds: 2),
+                  ),
+                );
+              }
+            },
           ),
         ),
         const SizedBox(width: 16),
@@ -387,6 +400,7 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
     required String subtitle,
     required IconData icon,
     required Color color,
+    VoidCallback? onReset,
   }) {
     return Container(
       padding: const EdgeInsets.all(20),
@@ -411,13 +425,50 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  title,
-                  style: AppTypography.labelSm.copyWith(
-                    color: AppColors.textSecondary,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.0,
-                  ),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.0,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    if (onReset != null)
+                      InkWell(
+                        onTap: onReset,
+                        borderRadius: BorderRadius.circular(6),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withAlpha(15),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: Colors.white24),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.restart_alt_rounded, size: 13, color: Colors.greenAccent),
+                              SizedBox(width: 3),
+                              Text(
+                                'RESET',
+                                style: TextStyle(
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.w900,
+                                  color: Colors.greenAccent,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
                 const SizedBox(height: 4),
                 Text(
@@ -445,10 +496,6 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
   }
 
   Widget _buildQrScanCard(String qrDataUrl) {
-    // Decode base64 image data url (e.g. data:image/png;base64,...)
-    final base64Str = qrDataUrl.split(',').last;
-    final imageBytes = base64Decode(base64Str);
-
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -472,11 +519,9 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
               color: Colors.white,
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Image.memory(
-              imageBytes,
-              width: 200,
-              height: 200,
-              fit: BoxFit.contain,
+            child: StableQrDisplay(
+              qrDataUrl: qrDataUrl,
+              size: 200,
             ),
           ),
           const SizedBox(width: 32),
@@ -564,6 +609,43 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
                 Row(
                   children: [
                     InkWell(
+                      onTap: () {
+                        final logs = _engineService.logsNotifier.value;
+                        if (logs.isEmpty) return;
+                        final fullText = logs
+                            .map((l) => '[${l.time}] [${l.level.toUpperCase()}] ${l.message}')
+                            .join('\n');
+                        Clipboard.setData(ClipboardData(text: fullText));
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            backgroundColor: AppColors.success,
+                            content: Text('📋 All console logs copied to clipboard!'),
+                            duration: Duration(seconds: 2),
+                          ),
+                        );
+                      },
+                      borderRadius: BorderRadius.circular(4),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white10,
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: const Row(
+                          children: [
+                            Icon(Icons.copy_all_rounded, size: 13, color: Colors.cyanAccent),
+                            SizedBox(width: 4),
+                            Text(
+                              'Copy Logs',
+                              style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    InkWell(
                       onTap: () => _engineService.clearLogs(),
                       borderRadius: BorderRadius.circular(4),
                       child: Container(
@@ -602,69 +684,71 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
             ),
           ),
 
-          // Terminal Output Stream
+          // Terminal Output Stream (Selectable Text Area)
           Expanded(
-            child: ValueListenableBuilder<List<WhatsAppEngineLogItem>>(
-              valueListenable: _engineService.logsNotifier,
-              builder: (context, logs, _) {
-                WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+            child: SelectionArea(
+              child: ValueListenableBuilder<List<WhatsAppEngineLogItem>>(
+                valueListenable: _engineService.logsNotifier,
+                builder: (context, logs, _) {
+                  WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
 
-                if (logs.isEmpty) {
-                  return const Center(
-                    child: Text(
-                      'Waiting for incoming messages stream...',
-                      style: TextStyle(
-                        color: Colors.white38,
-                        fontFamily: 'monospace',
-                        fontSize: 13,
-                      ),
-                    ),
-                  );
-                }
-
-                return ListView.builder(
-                  controller: _logScrollController,
-                  padding: const EdgeInsets.all(16),
-                  itemCount: logs.length,
-                  itemBuilder: (context, index) {
-                    final item = logs[index];
-                    Color msgColor = Colors.white70;
-                    if (item.level == 'error') msgColor = Colors.redAccent;
-                    if (item.level == 'warn') msgColor = Colors.amberAccent;
-                    if (item.level == 'success') msgColor = Colors.greenAccent;
-
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 2),
-                      child: RichText(
-                        text: TextSpan(
-                          style: const TextStyle(
-                            fontFamily: 'monospace',
-                            fontSize: 12,
-                            height: 1.4,
-                          ),
-                          children: [
-                            TextSpan(
-                              text: '[${item.time}] ',
-                              style: const TextStyle(color: Colors.white38),
-                            ),
-                            TextSpan(
-                              text: '[${item.level.toUpperCase()}] ',
-                              style: TextStyle(
-                                color: msgColor,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                            TextSpan(
-                              text: item.message,
-                              style: TextStyle(color: msgColor),
-                            ),
-                          ],
+                  if (logs.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        'Waiting for incoming messages stream...',
+                        style: TextStyle(
+                          color: Colors.white38,
+                          fontFamily: 'monospace',
+                          fontSize: 13,
                         ),
                       ),
                     );
-                  },
-                );
-              },
+                  }
+
+                  return ListView.builder(
+                    controller: _logScrollController,
+                    padding: const EdgeInsets.all(16),
+                    itemCount: logs.length,
+                    itemBuilder: (context, index) {
+                      final item = logs[index];
+                      Color msgColor = Colors.white70;
+                      if (item.level == 'error') msgColor = Colors.redAccent;
+                      if (item.level == 'warn') msgColor = Colors.amberAccent;
+                      if (item.level == 'success') msgColor = Colors.greenAccent;
+
+                      return Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: SelectableText.rich(
+                          TextSpan(
+                            style: const TextStyle(
+                              fontFamily: 'monospace',
+                              fontSize: 12,
+                              height: 1.4,
+                            ),
+                            children: [
+                              TextSpan(
+                                text: '[${item.time}] ',
+                                style: const TextStyle(color: Colors.white38),
+                              ),
+                              TextSpan(
+                                text: '[${item.level.toUpperCase()}] ',
+                                style: TextStyle(
+                                  color: msgColor,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              TextSpan(
+                                text: item.message,
+                                style: TextStyle(color: msgColor),
+                              ),
+                            ],
+                          ),
+                        ),
+                      );
+                    },
+                  );
+                },
+              ),
             ),
           ),
         ],
@@ -678,5 +762,66 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
     final h = (m / 60).floor();
     if (h > 0) return '${h}h ${m % 60}m';
     return '${m}m ${s}s';
+  }
+}
+
+class StableQrDisplay extends StatefulWidget {
+  final String qrDataUrl;
+  final double size;
+
+  const StableQrDisplay({
+    super.key,
+    required this.qrDataUrl,
+    this.size = 200,
+  });
+
+  @override
+  State<StableQrDisplay> createState() => _StableQrDisplayState();
+}
+
+class _StableQrDisplayState extends State<StableQrDisplay> {
+  Uint8List? _cachedBytes;
+  String? _lastQrUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    _decodeImage();
+  }
+
+  @override
+  void didUpdateWidget(covariant StableQrDisplay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.qrDataUrl != widget.qrDataUrl) {
+      _decodeImage();
+    }
+  }
+
+  void _decodeImage() {
+    if (_lastQrUrl == widget.qrDataUrl && _cachedBytes != null) return;
+    try {
+      final base64Str = widget.qrDataUrl.split(',').last;
+      _cachedBytes = base64Decode(base64Str);
+      _lastQrUrl = widget.qrDataUrl;
+    } catch (_) {}
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_cachedBytes == null) {
+      return SizedBox(
+        width: widget.size,
+        height: widget.size,
+        child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
+    return Image.memory(
+      _cachedBytes!,
+      key: ValueKey(_lastQrUrl),
+      width: widget.size,
+      height: widget.size,
+      fit: BoxFit.contain,
+      gaplessPlayback: true,
+    );
   }
 }

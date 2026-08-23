@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -11,7 +12,6 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/widgets/app_button.dart';
 import '../../../core/database/database_service.dart';
-import '../../../core/database/supabase_service.dart';
 import '../../../core/services/pattern_matcher_service.dart';
 import '../viewmodels/ticket_sales_viewmodel.dart';
 import '../../shared/models/ticket_sale_model.dart';
@@ -20,6 +20,9 @@ import '../../sellers/viewmodels/seller_customer_viewmodel.dart';
 import '../../settings/viewmodels/draw_time_viewmodel.dart';
 import '../widgets/booking_history_dialog.dart';
 import '../widgets/pattern_resolver_dialog.dart';
+import '../widgets/ai_photo_review_dialog.dart';
+import '../widgets/raw_text_ticket_parser_dialog.dart';
+import '../services/gemini_scanner_service.dart';
 
 /// Data structure for live Counter Booking items
 class CounterBookingRow {
@@ -83,12 +86,19 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
   final FocusNode _sellerFocusNode = FocusNode();
   final FocusNode _seriesFocusNode = FocusNode();
   final FocusNode _ticketNoFocusNode = FocusNode();
+  String _selectedSeriesFilter = 'All';
   Set<String> _selectedRowIds = {};
+  List<Map<String, dynamic>> _pendingPhotos = [];
+  Timer? _pendingPhotosTimer;
 
   @override
   void initState() {
     super.initState();
     PatternMatcherService.instance.initialize();
+    _loadPendingPhotos();
+    _pendingPhotosTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (mounted) _loadPendingPhotos();
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
         final sellerState = ref.read(sellerCustomerViewModelProvider);
@@ -104,6 +114,19 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
         }
       }
     });
+  }
+
+  Future<void> _loadPendingPhotos() async {
+    try {
+      final photos = await DatabaseService.instance.getPendingPhotoBookings();
+      if (mounted && photos.length != _pendingPhotos.length) {
+        setState(() {
+          _pendingPhotos = photos;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading pending photos: $e');
+    }
   }
 
   bool _matchesShift(String drawName, String selectedShift) {
@@ -139,10 +162,6 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
       final rawIso = s.drawDate.toIso8601String();
       final rawYmd = rawIso.length >= 10 ? rawIso.substring(0, 10) : '';
 
-      final saleDateLocal = s.saleDate.toLocal();
-      final saleRawIso = s.saleDate.toIso8601String();
-      final saleRawYmd = saleRawIso.length >= 10 ? saleRawIso.substring(0, 10) : '';
-
       // Strictly match by Draw Date only (so tickets for 13/8 or 14/8 only appear on their respective draw dates)
       final isSameDate = (sDate.year == _selectedDate.year &&
               sDate.month == _selectedDate.month &&
@@ -176,6 +195,28 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
         sellerName: cleanSeller,
         quantity: s.quantity,
       ));
+    }
+
+    // 🎯 Prioritize missing/empty series tickets at the VERY TOP
+    newRows.sort((a, b) {
+      final aMissing = a.series == '?' || a.series.trim().isEmpty || a.series.toUpperCase() == 'MISSING' || a.series.toUpperCase() == 'UNKNOWN' || a.series == '—' || a.series == '-' || a.series.toLowerCase() == 'none';
+      final bMissing = b.series == '?' || b.series.trim().isEmpty || b.series.toUpperCase() == 'MISSING' || b.series.toUpperCase() == 'UNKNOWN' || b.series == '—' || b.series == '-' || b.series.toLowerCase() == 'none';
+
+      if (aMissing && !bMissing) return -1;
+      if (!aMissing && bMissing) return 1;
+      return 0;
+    });
+
+    // Re-assign Sl numbers sequentially after sorting
+    for (int i = 0; i < newRows.length; i++) {
+      newRows[i] = newRows[i].copyWith(sl: i + 1);
+    }
+
+    if (_bookingRows.length == newRows.length &&
+        _bookingRows.isNotEmpty &&
+        newRows.isNotEmpty &&
+        _bookingRows.first.id == newRows.first.id) {
+      return; // Already in sync, avoid needless table repaint
     }
 
     setState(() {
@@ -279,6 +320,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
 
   @override
   void dispose() {
+    _pendingPhotosTimer?.cancel();
     _keyboardFocusNode.dispose();
     _sellerFocusNode.dispose();
     _seriesFocusNode.dispose();
@@ -343,15 +385,14 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
     return price.toStringAsFixed(2);
   }
 
-  void _updatePriceForSeries(String val) {
+  double _calculatePriceForSeries(String val) {
     final seriesEntered = val.trim().toUpperCase();
-    if (seriesEntered.isEmpty) return;
+    if (seriesEntered.isEmpty) return 0.0;
 
     final seriesState = ref.read(seriesPriceViewModelProvider);
     double calculatedPrice = seriesState.getPriceForSeries(seriesEntered);
 
     if (calculatedPrice <= 0) {
-      // Fetch Series 100 price dynamically from System Configuration database (No hardcoding!)
       double config100Price = 0.0;
       final activeSeries = seriesState.seriesList.where((s) => s.isActive).toList();
       if (activeSeries.isNotEmpty) {
@@ -363,18 +404,21 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
         }
       }
 
-      if (config100Price > 0) {
-        final singleSeriesRate = config100Price >= 100 ? (config100Price / 100.0) : config100Price;
-        final digits = seriesEntered.replaceAll(RegExp(r'\D'), '');
-        final multiplier = double.tryParse(digits) ?? 1.0;
-        calculatedPrice = (multiplier > 0 ? multiplier : 1.0) * singleSeriesRate;
-      }
-    }
+      final singleSeriesRate = config100Price > 0
+          ? (config100Price >= 100 ? (config100Price / 100.0) : config100Price)
+          : 6.0; // Standard Dear Lottery rate ₹6/ticket
 
+      final digits = seriesEntered.replaceAll(RegExp(r'\D'), '');
+      final multiplier = double.tryParse(digits) ?? 1.0;
+      calculatedPrice = (multiplier > 0 ? multiplier : 1.0) * singleSeriesRate;
+    }
+    return calculatedPrice;
+  }
+
+  void _updatePriceForSeries(String val) {
+    final calculatedPrice = _calculatePriceForSeries(val);
     if (calculatedPrice > 0) {
-      setState(() {
-        _amountCtrl.text = _formatPrice(calculatedPrice);
-      });
+      _amountCtrl.text = _formatPrice(calculatedPrice);
     }
   }
 
@@ -460,7 +504,10 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
       return;
     }
 
-    final double amount = double.tryParse(_amountCtrl.text.trim()) ?? 0.0;
+    double amount = _calculatePriceForSeries(seriesEntered);
+    if (amount <= 0) {
+      amount = double.tryParse(_amountCtrl.text.trim()) ?? 0.0;
+    }
 
     // User Directive: Allow all ticket entries unconditionally (even for duplicate ticket numbers or names)
 
@@ -525,6 +572,173 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
     );
   }
 
+  Future<void> _editRow(CounterBookingRow row) async {
+    final initialSeries = row.series == '?' ? '' : row.series;
+    final initialPrice = row.amount > 0 ? row.amount : (initialSeries.isNotEmpty ? _calculatePriceForSeries(initialSeries) : 0.0);
+    final seriesCtrl = TextEditingController(text: initialSeries);
+    final ticketNoCtrl = TextEditingController(text: row.ticketNo);
+    final sellerCtrl = TextEditingController(text: row.sellerName);
+    final amountCtrl = TextEditingController(text: _formatPrice(initialPrice));
+    String? dialogError;
+
+    await showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) {
+          return AlertDialog(
+            backgroundColor: AppColors.surfaceContainerHigh,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: AppColors.border),
+            ),
+            title: Row(
+              children: [
+                const Icon(Icons.edit_note_rounded, color: AppColors.primary, size: 24),
+                const SizedBox(width: 10),
+                const Text('Edit Booked Ticket Entry', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              ],
+            ),
+            content: SizedBox(
+              width: 440,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (dialogError != null) ...[
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: Colors.red.withValues(alpha: 0.4)),
+                      ),
+                      child: Text(dialogError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                    ),
+                    const SizedBox(height: 12),
+                  ],
+                  Row(
+                    children: [
+                      Expanded(
+                        flex: 40,
+                        child: TextField(
+                          controller: seriesCtrl,
+                          style: AppTypography.bodySm,
+                          decoration: const InputDecoration(
+                            labelText: 'Series *',
+                            hintText: 'e.g. 12 or 6',
+                            prefixIcon: Icon(Icons.confirmation_number_outlined, size: 18),
+                          ),
+                          onChanged: (val) {
+                            final calcPrice = _calculatePriceForSeries(val);
+                            if (calcPrice > 0) {
+                              amountCtrl.text = _formatPrice(calcPrice);
+                            }
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        flex: 60,
+                        child: TextField(
+                          controller: ticketNoCtrl,
+                          maxLength: 5,
+                          style: AppTypography.bodySm,
+                          decoration: const InputDecoration(
+                            labelText: 'Ticket Number (5-Digits) *',
+                            hintText: 'e.g. 69476',
+                            prefixIcon: Icon(Icons.numbers, size: 18),
+                            counterText: '',
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: sellerCtrl,
+                    style: AppTypography.bodySm,
+                    decoration: const InputDecoration(
+                      labelText: 'Customer / Seller Name *',
+                      prefixIcon: Icon(Icons.person_outline, size: 18),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: amountCtrl,
+                    keyboardType: TextInputType.number,
+                    style: AppTypography.bodySm,
+                    decoration: const InputDecoration(
+                      labelText: 'Rate / Amount (₹) *',
+                      prefixIcon: Icon(Icons.currency_rupee, size: 18),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.black,
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+                onPressed: () async {
+                  final newSeries = seriesCtrl.text.trim().toUpperCase();
+                  final newTicketNo = ticketNoCtrl.text.trim();
+                  final newSeller = sellerCtrl.text.trim();
+                  final newAmt = double.tryParse(amountCtrl.text.trim()) ?? 0.0;
+
+                  if (newTicketNo.length != 5) {
+                    setDialogState(() => dialogError = 'Ticket Number must be exactly 5 digits!');
+                    return;
+                  }
+                  if (newSeller.isEmpty) {
+                    setDialogState(() => dialogError = 'Customer / Seller name cannot be empty.');
+                    return;
+                  }
+
+                  // Update SQLite only
+                  await DatabaseService.instance.updateTicketSaleFields(
+                    id: row.id,
+                    oldSeries: row.series,
+                    oldTicketNo: row.ticketNo,
+                    newSeries: newSeries.isNotEmpty ? newSeries : '?',
+                    newTicketNo: newTicketNo,
+                    newSellerName: newSeller,
+                    newAmount: newAmt,
+                  );
+
+                  // Update local state list
+                  setState(() {
+                    final idx = _bookingRows.indexWhere((r) => r.id == row.id || (r.series == row.series && r.ticketNo == row.ticketNo));
+                    if (idx != -1) {
+                      _bookingRows[idx] = _bookingRows[idx].copyWith(
+                        series: newSeries.isNotEmpty ? newSeries : '?',
+                        ticketNo: newTicketNo,
+                        sellerName: newSeller,
+                        amount: newAmt,
+                      );
+                    }
+                  });
+
+                  await ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  _showSnackbar('✅ Updated Ticket #$newSeries-$newTicketNo successfully!', AppColors.success);
+                },
+                child: const Text('Save Changes', style: TextStyle(fontWeight: FontWeight.bold)),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
   Future<void> _deleteRow(CounterBookingRow row) async {
     setState(() {
       _selectedRowIds.remove(row.id);
@@ -532,14 +746,12 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
       _reindexRows();
     });
 
-    // 🗑️ PERMANENT DELETE FROM SQLITE DB AND SUPABASE CLOUD DB
+    // 🗑️ DELETE FROM SQLITE DB ONLY
     await DatabaseService.instance.deleteTicketSale(row.id);
-    await SupabaseService.instance.deleteCloudTicketSale(row.id);
     await DatabaseService.instance.deleteTicketSaleBySeriesAndNumber(row.series, row.ticketNo);
-    await SupabaseService.instance.deleteCloudTicketSaleBySeriesAndNumber(row.series, row.ticketNo);
     await ref.read(ticketSalesViewModelProvider.notifier).loadSales();
 
-    _showSnackbar('🗑️ Ticket #${row.series}-${row.ticketNo} deleted permanently from Database & Cloud!', AppColors.info);
+    _showSnackbar('🗑️ Ticket #${row.series}-${row.ticketNo} deleted permanently from Database!', AppColors.info);
   }
 
   bool get _isAllSelected =>
@@ -609,17 +821,228 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
         _reindexRows();
       });
 
-      // 🗑️ PERMANENT DELETE FROM SQLITE DB AND SUPABASE CLOUD DB FOR ALL SELECTED ROWS
+      // 🗑️ DELETE FROM SQLITE ONLY
       await DatabaseService.instance.deleteTicketSalesByIds(idsToDelete);
-      await SupabaseService.instance.deleteCloudTicketSalesByIds(idsToDelete);
       for (final row in selectedRows) {
         await DatabaseService.instance.deleteTicketSaleBySeriesAndNumber(row.series, row.ticketNo);
-        await SupabaseService.instance.deleteCloudTicketSaleBySeriesAndNumber(row.series, row.ticketNo);
       }
       await ref.read(ticketSalesViewModelProvider.notifier).loadSales();
 
-      _showSnackbar('🗑️ Deleted $count selected ticket(s) permanently from Database & Cloud!', AppColors.success);
+      _showSnackbar('🗑️ Deleted $count selected ticket(s) permanently from Database!', AppColors.success);
     }
+  }
+
+  bool _rowHasMissingSeries(CounterBookingRow r) {
+    return r.series == '?' ||
+        r.series.trim().isEmpty ||
+        r.series.toUpperCase() == 'MISSING' ||
+        r.series.toUpperCase() == 'UNKNOWN' ||
+        r.series == '—' ||
+        r.series == '-' ||
+        r.series.toLowerCase() == 'none';
+  }
+
+  int get _missingSeriesCount => _bookingRows.where(_rowHasMissingSeries).length;
+
+  void _selectAllMissingSeries() {
+    setState(() {
+      final missingIds = _bookingRows.where(_rowHasMissingSeries).map((r) => r.id).toSet();
+      _selectedRowIds = missingIds;
+    });
+    _showSnackbar('Selected ${_selectedRowIds.length} tickets with missing series!', AppColors.info);
+  }
+
+  Future<void> _bulkSetSeriesDialog() async {
+    if (_selectedRowIds.isEmpty) {
+      _showSnackbar('Please select at least one ticket first!', AppColors.warning);
+      return;
+    }
+
+    final seriesState = ref.read(seriesPriceViewModelProvider);
+    final availableSeries = seriesState.availableSeriesNames;
+    String selectedSeries = availableSeries.isNotEmpty ? availableSeries.first : '12';
+    final customSeriesCtrl = TextEditingController(text: selectedSeries);
+    final count = _selectedRowIds.length;
+    String? dialogError;
+
+    await showDialog(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setDialogState) {
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 520,
+              padding: const EdgeInsets.all(28),
+              decoration: BoxDecoration(
+                color: const Color(0xFF111827),
+                borderRadius: BorderRadius.circular(24),
+                border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.5), width: 2),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.85),
+                    blurRadius: 36,
+                    spreadRadius: 6,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Header
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.amberAccent.withValues(alpha: 0.4)),
+                        ),
+                        child: const Icon(Icons.flash_on_rounded, color: Colors.amberAccent, size: 28),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'BULK SET SERIES',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Assign Series to $count selected tickets in 1-Click',
+                              style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close_rounded, color: AppColors.textSecondary),
+                        onPressed: () => Navigator.pop(dialogCtx),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  const Divider(color: AppColors.border, height: 1),
+                  const SizedBox(height: 20),
+
+                  // Quick Series Chips
+                  Text(
+                    'Select Target Series:',
+                    style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: availableSeries.map((s) {
+                      final isSel = selectedSeries.toUpperCase() == s.toUpperCase();
+                      return ChoiceChip(
+                        label: Text(s, style: TextStyle(fontWeight: FontWeight.bold, color: isSel ? Colors.black : Colors.white)),
+                        selected: isSel,
+                        selectedColor: Colors.amberAccent,
+                        backgroundColor: AppColors.surfaceContainerHigh,
+                        onSelected: (val) {
+                          if (val) {
+                            setDialogState(() {
+                              selectedSeries = s;
+                              customSeriesCtrl.text = s;
+                            });
+                          }
+                        },
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Custom Series Text Field
+                  Text(
+                    'Or Type Series Name / Code:',
+                    style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary),
+                  ),
+                  const SizedBox(height: 6),
+                  TextField(
+                    controller: customSeriesCtrl,
+                    textCapitalization: TextCapitalization.characters,
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                    decoration: InputDecoration(
+                      hintText: 'e.g. 12, 24, 83L, 60...',
+                      filled: true,
+                      fillColor: AppColors.surfaceContainerLow,
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(10),
+                        borderSide: const BorderSide(color: Colors.amberAccent, width: 2),
+                      ),
+                    ),
+                    onChanged: (val) {
+                      setDialogState(() {
+                        selectedSeries = val.trim().toUpperCase();
+                      });
+                    },
+                  ),
+                  if (dialogError != null) ...[
+                    const SizedBox(height: 8),
+                    Text(dialogError!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
+                  ],
+                  const SizedBox(height: 24),
+
+                  // Apply Button
+                  ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.amberAccent,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    ),
+                    icon: const Icon(Icons.check_circle_rounded, size: 20),
+                    label: Text(
+                      'APPLY SERIES "${selectedSeries.isEmpty ? '?' : selectedSeries}" TO ALL $count TICKETS',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                    ),
+                    onPressed: () async {
+                      final finalSeries = customSeriesCtrl.text.trim().toUpperCase();
+                      if (finalSeries.isEmpty) {
+                        setDialogState(() => dialogError = 'Please enter a valid series name!');
+                        return;
+                      }
+
+                      final targetIds = _selectedRowIds.toList();
+                      final calculatedPrice = _calculatePriceForSeries(finalSeries);
+
+                      // Bulk update in SQLite only
+                      await DatabaseService.instance.updateTicketSalesSeriesBulk(
+                        ids: targetIds,
+                        newSeries: finalSeries,
+                        newPricePerTicket: calculatedPrice > 0 ? calculatedPrice : null,
+                      );
+
+                      // Reload in table
+                      await ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+
+                      setState(() {
+                        _selectedRowIds.clear();
+                      });
+
+                      if (dialogCtx.mounted) Navigator.pop(dialogCtx);
+                      _showSnackbar('🎉 Successfully updated Series to "$finalSeries" for $count tickets!', AppColors.success);
+                    },
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   void _reindexRows() {
@@ -946,7 +1369,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                   children: [
                     Center(
                       child: Text(
-                        'NAGALAND TICKETCORE',
+                        'PHANTOM MANAGEMENT',
                         style: AppTypography.labelMd.copyWith(
                           fontWeight: FontWeight.bold,
                           color: AppColors.primary,
@@ -955,7 +1378,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                     ),
                     Center(
                       child: Text(
-                        'Official Lottery POS Counter',
+                        'Official POS Booking Counter',
                         style: AppTypography.labelSm.copyWith(
                           color: AppColors.textSecondary,
                         ),
@@ -963,7 +1386,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                     ),
                     const SizedBox(height: 12),
                     Text(
-                      'Lottery: $_selectedLottery',
+                      'Draw Shift: $_selectedLottery',
                       style: AppTypography.bodySm.copyWith(
                         color: AppColors.textPrimary,
                       ),
@@ -1054,6 +1477,375 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Future<void> _scanTicketPhotoWithAi(String effectiveLottery) async {
+    try {
+      final apiKey = await DatabaseService.instance.getGeminiApiKey();
+
+      // Step 1: Prompt for Customer / Party Name if not already set on counter
+      String targetCustomer = _sellerName.trim();
+      if (targetCustomer.isEmpty) {
+        final sellerState = ref.read(sellerCustomerViewModelProvider);
+        final sellers = sellerState.sellers.where((s) => s.isActive).toList();
+        final nameCtrl = TextEditingController();
+        if (!mounted) return;
+
+        final chosenCustomer = await showDialog<String>(
+          context: context,
+          useRootNavigator: true,
+          builder: (dialogCtx) => AlertDialog(
+            backgroundColor: AppColors.surfaceContainerHigh,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: AppColors.border),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.person_pin_rounded, color: AppColors.primary, size: 24),
+                SizedBox(width: 10),
+                Text('Customer / Party Name', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+              ],
+            ),
+            content: SizedBox(
+              width: 380,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Kripya is photo/parche ke customer/seller ka naam select ya type karein:',
+                    style: TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                  ),
+                  const SizedBox(height: 14),
+                  Autocomplete<String>(
+                    optionsBuilder: (textEditingValue) {
+                      if (textEditingValue.text.isEmpty) {
+                        return sellers.map((s) => s.name);
+                      }
+                      final q = textEditingValue.text.toLowerCase();
+                      return sellers
+                          .where((s) => s.name.toLowerCase().contains(q) || s.accessKey.toLowerCase().contains(q))
+                          .map((s) => s.name);
+                    },
+                    onSelected: (selection) {
+                      nameCtrl.text = selection;
+                    },
+                    fieldViewBuilder: (ctx, fieldCtrl, focusNode, onFieldSubmitted) {
+                      return TextField(
+                        controller: fieldCtrl,
+                        focusNode: focusNode,
+                        autofocus: true,
+                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                        decoration: InputDecoration(
+                          hintText: 'e.g. Sanjit ji',
+                          filled: true,
+                          fillColor: AppColors.surfaceContainerLowest,
+                          prefixIcon: const Icon(Icons.person, color: AppColors.primary, size: 18),
+                          border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        onChanged: (val) => nameCtrl.text = val,
+                        onSubmitted: (_) {
+                          Navigator.pop(dialogCtx, nameCtrl.text.trim());
+                        },
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogCtx, 'Walk-in Customer'),
+                child: const Text('Walk-in Customer', style: TextStyle(color: AppColors.textSecondary)),
+              ),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.black,
+                ),
+                icon: const Icon(Icons.check, size: 16),
+                label: const Text('Continue to Scan Photo', style: TextStyle(fontWeight: FontWeight.bold)),
+                onPressed: () {
+                  final n = nameCtrl.text.trim();
+                  Navigator.pop(dialogCtx, n.isNotEmpty ? n : 'Walk-in Customer');
+                },
+              ),
+            ],
+          ),
+        );
+
+        if (chosenCustomer == null) return; // User cancelled
+        targetCustomer = chosenCustomer;
+      }
+
+      final result = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['jpg', 'jpeg', 'png', 'webp', 'bmp'],
+        withData: true,
+      );
+
+      if (result == null || result.files.isEmpty) return;
+
+      final pickedFile = result.files.first;
+      Uint8List? fileBytes = pickedFile.bytes;
+      if (fileBytes == null && pickedFile.path != null) {
+        fileBytes = await File(pickedFile.path!).readAsBytes();
+      }
+
+      if (fileBytes == null || fileBytes.isEmpty) {
+        _showSnackbar('Could not read image file bytes.', AppColors.error);
+        return;
+      }
+
+      if (!mounted) return;
+
+      List<GeminiScannedItem> scannedTickets = [];
+
+      // Check if online AI scan is possible
+      final bool hasApiKey = apiKey != null && apiKey.trim().isNotEmpty;
+      if (hasApiKey) {
+        BuildContext? progressDialogCtx;
+        showDialog(
+          context: context,
+          barrierDismissible: false,
+          useRootNavigator: true,
+          builder: (ctx) {
+            progressDialogCtx = ctx;
+            return const Dialog(
+              backgroundColor: AppColors.surfaceContainerHigh,
+              child: Padding(
+                padding: EdgeInsets.all(24),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(color: Colors.purpleAccent),
+                    SizedBox(width: 20),
+                    Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Scanning Photo with Gemini Vision AI...',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                        ),
+                        SizedBox(height: 4),
+                        Text(
+                          'Extracting 5-digit ticket numbers and series...',
+                          style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+
+        try {
+          scannedTickets = await GeminiScannerService.instance.scanImage(
+            imageBytes: fileBytes,
+            defaultSeller: targetCustomer,
+          );
+        } catch (scanErr) {
+          debugPrint('⚠️ [SCAN NOTE] Online Gemini scan skipped or failed: $scanErr');
+        } finally {
+          if (progressDialogCtx != null && progressDialogCtx!.mounted) {
+            Navigator.of(progressDialogCtx!, rootNavigator: true).pop();
+          }
+        }
+      }
+
+      await Future.delayed(const Duration(milliseconds: 150));
+      if (!mounted) return;
+
+      // Open Confirmation & Review Modal (Works 100% Offline with full Image preview & editing)
+      final saved = await showDialog<bool>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AiPhotoReviewDialog(
+          imageBytes: fileBytes!,
+          initialItems: scannedTickets,
+          activeShift: effectiveLottery,
+          activeDate: _selectedDate,
+          defaultSeller: targetCustomer,
+        ),
+      );
+
+      if (saved == true && mounted) {
+        await _loadExistingSalesIntoTable();
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnackbar('Error picking image: $e', AppColors.error);
+      }
+    }
+  }
+
+  Future<void> _openPendingPhotoReview(Map<String, dynamic> photoData) async {
+    try {
+      final String photoId = photoData['id'] ?? '';
+      final String imageBase64 = photoData['imageBase64'] ?? '';
+      final String buyerName = photoData['buyerName'] ?? 'Walk-in Customer';
+      final String drawShift = photoData['drawShift'] ?? _selectedLottery;
+      final String rawJson = photoData['parsedTicketsJson'] ?? '[]';
+
+      if (imageBase64.isEmpty) {
+        _showSnackbar('No image data found for this photo.', AppColors.error);
+        return;
+      }
+
+      final imageBytes = base64Decode(imageBase64);
+      final List<GeminiScannedItem> items = [];
+
+      try {
+        final List dynamicList = jsonDecode(rawJson);
+        for (final d in dynamicList) {
+          final tkt = d['ticketNo']?.toString() ?? '';
+          final ser = d['series']?.toString() ?? '12';
+          final amt = (d['amount'] as num?)?.toDouble() ?? 0.0;
+          final qty = (d['quantity'] as num?)?.toInt() ?? 1;
+          items.add(GeminiScannedItem(
+            series: ser,
+            ticketNo: tkt,
+            amount: amt,
+            quantity: qty,
+            sellerName: buyerName,
+          ));
+        }
+      } catch (jsonErr) {
+        debugPrint('JSON parse error for pending photo: $jsonErr');
+      }
+
+      if (!mounted) return;
+
+      final saved = await showDialog<bool>(
+        context: context,
+        useRootNavigator: true,
+        builder: (ctx) => AiPhotoReviewDialog(
+          imageBytes: imageBytes,
+          initialItems: items,
+          activeShift: drawShift,
+          activeDate: _selectedDate,
+          defaultSeller: buyerName,
+          pendingPhotoId: photoId,
+        ),
+      );
+
+      await _loadPendingPhotos();
+      if (saved == true && mounted) {
+        await _loadExistingSalesIntoTable();
+      }
+    } catch (e) {
+      if (mounted) {
+        _showSnackbar('Error reviewing photo: $e', AppColors.error);
+      }
+    }
+  }
+
+  Future<void> _openPendingPhotoApprovalQueue() async {
+    await _loadPendingPhotos();
+    if (!mounted) return;
+
+    if (_pendingPhotos.isEmpty) {
+      _showSnackbar('No pending photos in WhatsApp queue.', AppColors.info);
+      return;
+    }
+
+    if (_pendingPhotos.length == 1) {
+      // Directly open review modal for the 1 photo
+      await _openPendingPhotoReview(_pendingPhotos.first);
+      return;
+    }
+
+    // Multiple photos pending -> show queue selection list
+    showDialog(
+      context: context,
+      useRootNavigator: true,
+      builder: (dialogCtx) => AlertDialog(
+        backgroundColor: AppColors.surfaceContainerHigh,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.border),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.amber.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.photo_library_rounded, color: Colors.amber, size: 22),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              'Pending WhatsApp Photos (${_pendingPhotos.length})',
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: 500,
+          height: 380,
+          child: ListView.separated(
+            itemCount: _pendingPhotos.length,
+            separatorBuilder: (_, _) => const Divider(color: AppColors.border, height: 1),
+            itemBuilder: (ctx, i) {
+              final p = _pendingPhotos[i];
+              final buyer = p['buyerName'] ?? 'Walk-in Customer';
+              final shift = p['drawShift'] ?? 'Dear 1 PM';
+              final phone = p['senderPhone'] ?? '';
+              final timeStr = p['createdAt'] != null ? DateFormat('hh:mm a').format(DateTime.tryParse(p['createdAt']) ?? DateTime.now()) : '';
+
+              return ListTile(
+                leading: Container(
+                  width: 44,
+                  height: 44,
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceContainerLowest,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  clipBehavior: Clip.antiAlias,
+                  child: p['imageBase64'] != null && (p['imageBase64'] as String).isNotEmpty
+                      ? Image.memory(base64Decode(p['imageBase64']), fit: BoxFit.cover)
+                      : const Icon(Icons.image, color: AppColors.textSecondary),
+                ),
+                title: Text(
+                  buyer,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+                subtitle: Text(
+                  'Shift: $shift | $phone | $timeStr',
+                  style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                ),
+                trailing: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  ),
+                  icon: const Icon(Icons.visibility, size: 14),
+                  label: const Text('Review', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  onPressed: () {
+                    Navigator.pop(dialogCtx);
+                    _openPendingPhotoReview(p);
+                  },
+                ),
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogCtx),
+            child: const Text('Close', style: TextStyle(color: AppColors.textSecondary)),
+          ),
+        ],
       ),
     );
   }
@@ -1231,9 +2023,40 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
         ? _selectedLottery
         : lotteryList.first;
 
-    final filteredBookingRows = _tableSearchQuery.isEmpty
+    // 🎯 Series Count Breakdown
+    final Map<String, int> seriesBreakdown = {};
+    for (final r in _bookingRows) {
+      final s = (r.series.trim().isEmpty || r.series == '?' || r.series.toUpperCase() == 'MISSING') ? 'No Series' : r.series;
+      seriesBreakdown[s] = (seriesBreakdown[s] ?? 0) + (r.quantity > 0 ? r.quantity : 1);
+    }
+
+    // 🎯 Safe List of Filter Options (Prevents DropdownButton crash)
+    final List<String> seriesFilterOptions = ['All'];
+    for (final s in availableSeries) {
+      if (!seriesFilterOptions.contains(s)) seriesFilterOptions.add(s);
+    }
+    for (final s in seriesBreakdown.keys) {
+      if (!seriesFilterOptions.contains(s)) seriesFilterOptions.add(s);
+    }
+
+    final effectiveSeriesFilter = seriesFilterOptions.contains(_selectedSeriesFilter)
+        ? _selectedSeriesFilter
+        : 'All';
+
+    // 🎯 Step 1: Filter by Series
+    final seriesFiltered = effectiveSeriesFilter == 'All'
         ? _bookingRows
         : _bookingRows.where((row) {
+            if (effectiveSeriesFilter == 'No Series') {
+              return row.series == '?' || row.series.trim().isEmpty || row.series.toUpperCase() == 'MISSING' || row.series.toUpperCase() == 'UNKNOWN';
+            }
+            return row.series.trim().toLowerCase() == effectiveSeriesFilter.trim().toLowerCase();
+          }).toList();
+
+    // 🎯 Step 2: Filter by Search Query
+    final rawFiltered = _tableSearchQuery.isEmpty
+        ? seriesFiltered
+        : seriesFiltered.where((row) {
             final q = _tableSearchQuery.toLowerCase();
             final seriesMatch = row.series.toLowerCase().contains(q);
             final tktMatch = row.ticketNo.toLowerCase().contains(q);
@@ -1242,12 +2065,22 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
             return seriesMatch || tktMatch || sellerMatch || combinedMatch;
           }).toList();
 
+    // 🎯 Keep missing/empty series at the VERY TOP of the display table
+    final filteredBookingRows = List<CounterBookingRow>.from(rawFiltered)..sort((a, b) {
+      final aMissing = a.series == '?' || a.series.trim().isEmpty || a.series.toUpperCase() == 'MISSING' || a.series.toUpperCase() == 'UNKNOWN' || a.series == '—' || a.series == '-' || a.series.toLowerCase() == 'none';
+      final bMissing = b.series == '?' || b.series.trim().isEmpty || b.series.toUpperCase() == 'MISSING' || b.series.toUpperCase() == 'UNKNOWN' || b.series == '—' || b.series == '-' || b.series.toLowerCase() == 'none';
+
+      if (aMissing && !bMissing) return -1;
+      if (!aMissing && bMissing) return 1;
+      return 0;
+    });
+
     return KeyboardListener(
       focusNode: _keyboardFocusNode,
       autofocus: true,
       onKeyEvent: (evt) => _handleKeyEvent(evt, availableSeries),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(24),
+        padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1310,7 +2143,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  'LOTTERY BOOKING COUNTER',
+                                  'TICKET BOOKING COUNTER',
                                   style: AppTypography.titleLg.copyWith(
                                     fontWeight: FontWeight.w800,
                                     letterSpacing: 1.1,
@@ -1332,6 +2165,100 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                           runSpacing: 8,
                           crossAxisAlignment: WrapCrossAlignment.center,
                           children: [
+                            if (_pendingPhotos.isNotEmpty)
+                              ElevatedButton.icon(
+                                onPressed: _openPendingPhotoApprovalQueue,
+                                icon: const Icon(
+                                  Icons.photo_library_rounded,
+                                  size: 16,
+                                  color: Colors.black,
+                                ),
+                                label: Text(
+                                  '📸 WhatsApp Photos (${_pendingPhotos.length} Pending)',
+                                  style: const TextStyle(
+                                    color: Colors.black,
+                                    fontWeight: FontWeight.bold,
+                                    fontSize: 12,
+                                  ),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.amberAccent.shade400,
+                                  foregroundColor: Colors.black,
+                                  elevation: 3,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 14,
+                                    vertical: 10,
+                                  ),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                              ),
+                            ElevatedButton.icon(
+                              onPressed: () => _scanTicketPhotoWithAi(effectiveSelectedLottery),
+                              icon: const Icon(
+                                Icons.document_scanner_rounded,
+                                size: 16,
+                                color: Colors.white,
+                              ),
+                              label: const Text(
+                                '📸 Scan Photo / Parcha (AI)',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.purple.shade700,
+                                foregroundColor: Colors.white,
+                                elevation: 2,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 10,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                            ),
+                            ElevatedButton.icon(
+                              onPressed: () {
+                                showDialog(
+                                  context: context,
+                                  builder: (ctx) => RawTextTicketParserDialog(
+                                    activeShift: effectiveSelectedLottery,
+                                    activeDate: _selectedDate,
+                                    defaultSeller: _sellerInputCtrl.text.trim(),
+                                  ),
+                                );
+                              },
+                              icon: const Icon(
+                                Icons.content_paste_rounded,
+                                size: 16,
+                                color: Colors.white,
+                              ),
+                              label: const Text(
+                                '📋 Paste & Auto-Parse Text',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF0284C7),
+                                foregroundColor: Colors.white,
+                                elevation: 2,
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 14,
+                                  vertical: 10,
+                                ),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                            ),
                             OutlinedButton.icon(
                               onPressed: () {
                                 showDialog(
@@ -1544,7 +2471,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                           mainAxisSize: MainAxisSize.min,
                           children: [
                             Text(
-                              'Lottery : ',
+                              'Draw Shift : ',
                               style: AppTypography.bodySm.copyWith(
                                 fontWeight: FontWeight.bold,
                                 color: AppColors.textSecondary,
@@ -1812,7 +2739,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                                          onChanged: (val) {
                                            final trimmed = val.trim();
                                            if (trimmed.isNotEmpty) {
-                                             setState(() => _sellerName = trimmed);
+                                             _sellerName = trimmed;
                                            }
                                          },
                                          onSubmitted: (val) => _onSellerSubmitted(val),
@@ -2203,14 +3130,24 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
 
                   // 5. Booking Items Data Table (UNLIMITED MULTI-ROW SUPPORT WITH BULK SELECTION)
                   if (!_showLedgerHistory) ...[
-                    if (_selectedRowIds.isNotEmpty)
+                    if (_selectedRowIds.isNotEmpty || _missingSeriesCount > 0)
                       Container(
                         margin: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
                         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                         decoration: BoxDecoration(
-                          color: Colors.red.withAlpha(30),
+                          color: const Color(0xFF1E293B),
                           borderRadius: AppDecorations.radiusDefault,
-                          border: Border.all(color: Colors.redAccent, width: 1.5),
+                          border: Border.all(
+                            color: _selectedRowIds.isNotEmpty ? Colors.amberAccent : Colors.amber.withValues(alpha: 0.4),
+                            width: 1.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withValues(alpha: 0.4),
+                              blurRadius: 10,
+                              offset: const Offset(0, 3),
+                            ),
+                          ],
                         ),
                         child: Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -2224,24 +3161,55 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                                 ),
                                 const SizedBox(width: 8),
                                 Text(
-                                  '${_selectedRowIds.length} of ${_bookingRows.length} Tickets Selected',
+                                  _selectedRowIds.isNotEmpty
+                                      ? '${_selectedRowIds.length} of ${_bookingRows.length} Tickets Selected'
+                                      : 'Quick Actions:',
                                   style: AppTypography.titleMd.copyWith(
                                     fontWeight: FontWeight.bold,
                                     color: Colors.white,
                                   ),
                                 ),
+                                if (_missingSeriesCount > 0) ...[
+                                  const SizedBox(width: 12),
+                                  ActionChip(
+                                    avatar: const Icon(Icons.warning_amber_rounded, size: 16, color: Colors.amberAccent),
+                                    label: Text(
+                                      'Select All $_missingSeriesCount No-Series Tickets',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.amberAccent),
+                                    ),
+                                    backgroundColor: Colors.amber.withValues(alpha: 0.15),
+                                    side: BorderSide(color: Colors.amberAccent.withValues(alpha: 0.5)),
+                                    onPressed: _selectAllMissingSeries,
+                                  ),
+                                ],
                               ],
                             ),
-                            ElevatedButton.icon(
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.redAccent,
-                                foregroundColor: Colors.white,
-                                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                            if (_selectedRowIds.isNotEmpty)
+                              Row(
+                                children: [
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.amberAccent,
+                                      foregroundColor: Colors.black,
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                    ),
+                                    icon: const Icon(Icons.flash_on_rounded, size: 18),
+                                    label: Text('BULK SET SERIES (${_selectedRowIds.length})', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                    onPressed: _bulkSetSeriesDialog,
+                                  ),
+                                  const SizedBox(width: 10),
+                                  ElevatedButton.icon(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.redAccent,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                                    ),
+                                    icon: const Icon(Icons.delete_sweep_rounded, size: 18),
+                                    label: Text('DELETE (${_selectedRowIds.length})'),
+                                    onPressed: _bulkDeleteSelected,
+                                  ),
+                                ],
                               ),
-                              icon: const Icon(Icons.delete_sweep_rounded),
-                              label: Text('BULK DELETE (${_selectedRowIds.length})'),
-                              onPressed: _bulkDeleteSelected,
-                            ),
                           ],
                         ),
                       ),
@@ -2298,8 +3266,52 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                               ),
                             ),
                           ),
-                          if (_tableSearchQuery.isNotEmpty) ...[
-                            const SizedBox(width: 14),
+                          const SizedBox(width: 12),
+                          // 🎯 Series Filter Dropdown
+                          Container(
+                            height: 38,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            decoration: BoxDecoration(
+                              color: AppColors.surfaceContainerHigh,
+                              borderRadius: AppDecorations.radiusDefault,
+                              border: Border.all(
+                                color: _selectedSeriesFilter != 'All' ? AppColors.primary : AppColors.border,
+                                width: _selectedSeriesFilter != 'All' ? 1.5 : 1.0,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                const Icon(Icons.filter_list_rounded, size: 16, color: AppColors.primary),
+                                const SizedBox(width: 6),
+                                DropdownButtonHideUnderline(
+                                  child: DropdownButton<String>(
+                                    value: effectiveSeriesFilter,
+                                    dropdownColor: AppColors.surfaceContainerHighest,
+                                    icon: const Icon(Icons.arrow_drop_down, color: AppColors.primary),
+                                    style: AppTypography.bodySm.copyWith(
+                                      fontWeight: FontWeight.bold,
+                                      color: effectiveSeriesFilter != 'All' ? AppColors.primary : AppColors.textPrimary,
+                                    ),
+                                    items: seriesFilterOptions.map((ser) {
+                                      final count = ser == 'All' ? _bookingRows.length : (seriesBreakdown[ser] ?? 0);
+                                      return DropdownMenuItem<String>(
+                                        value: ser,
+                                        child: Text(ser == 'All' ? 'All Series ($count)' : 'Series $ser ($count)'),
+                                      );
+                                    }).toList(),
+                                    onChanged: (val) {
+                                      if (val != null) {
+                                        setState(() => _selectedSeriesFilter = val);
+                                      }
+                                    },
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          if (_tableSearchQuery.isNotEmpty || _selectedSeriesFilter != 'All') ...[
+                            const SizedBox(width: 12),
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                               decoration: BoxDecoration(
@@ -2320,25 +3332,21 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                       ),
                     ),
                     Container(
-                      constraints: const BoxConstraints(
-                        minHeight: 300,
-                        maxHeight: 850,
-                      ),
                       child: filteredBookingRows.isEmpty
                           ? Center(
                               child: Padding(
-                                padding: const EdgeInsets.all(40.0),
+                                padding: const EdgeInsets.symmetric(vertical: 36.0, horizontal: 20.0),
                                 child: Column(
                                   mainAxisAlignment: MainAxisAlignment.center,
                                   children: [
                                     Icon(
                                       _tableSearchQuery.isNotEmpty ? Icons.search_off_rounded : Icons.inbox,
-                                      size: 48,
+                                      size: 44,
                                       color: AppColors.textSecondary.withAlpha(
                                         100,
                                       ),
                                     ),
-                                    const SizedBox(height: 12),
+                                    const SizedBox(height: 10),
                                     Text(
                                       _tableSearchQuery.isNotEmpty
                                           ? 'No booked tickets matching "${_tableSearchCtrl.text}"'
@@ -2362,124 +3370,176 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                                 ),
                               ),
                             )
-                          : SingleChildScrollView(
-                              child: Table(
-                                columnWidths: const {
-                                  0: FlexColumnWidth(0.5),
-                                  1: FlexColumnWidth(0.6),
-                                  2: FlexColumnWidth(2.2),
-                                  3: FlexColumnWidth(1.6),
-                                  4: FlexColumnWidth(1.8),
-                                  5: FlexColumnWidth(1.4),
-                                  6: FlexColumnWidth(1.2),
-                                  7: FlexColumnWidth(1.0),
-                                },
-                                border: const TableBorder(
-                                  horizontalInside: BorderSide(
-                                    color: AppColors.border,
-                                    width: 0.8,
+                          : Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                // ⚡ Sticky Fixed Header
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  decoration: const BoxDecoration(
+                                    color: AppColors.surfaceContainerHigh,
+                                    border: Border(bottom: BorderSide(color: AppColors.border, width: 1.2)),
                                   ),
-                                ),
-                                children: [
-                                  TableRow(
-                                    decoration: const BoxDecoration(
-                                      color: AppColors.surfaceContainerHigh,
-                                    ),
+                                  child: Row(
                                     children: [
-                                      Container(
-                                        alignment: Alignment.center,
+                                      SizedBox(
+                                        width: 36,
                                         child: Checkbox(
                                           value: _isAllSelected,
                                           onChanged: (_) => _toggleSelectAll(),
                                           activeColor: AppColors.primary,
                                         ),
                                       ),
-                                      _tableHeaderCell('Sl'),
-                                      _tableHeaderCell('Customer / Seller'),
-                                      _tableHeaderCell('Series'),
-                                      _tableHeaderCell('Ticket No'),
-                                      _tableHeaderCell('Amount'),
-                                      _tableHeaderCell('Time'),
-                                      _tableHeaderCell(
-                                        'Delete',
-                                        alignment: Alignment.center,
-                                      ),
+                                      const SizedBox(width: 40, child: Text('Sl', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary))),
+                                      const Expanded(flex: 3, child: Text('Customer / Seller', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary))),
+                                      const Expanded(flex: 2, child: Text('Series', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary))),
+                                      const Expanded(flex: 2, child: Text('Ticket No', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary))),
+                                      const Expanded(flex: 2, child: Text('Amount', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary))),
+                                      const Expanded(flex: 2, child: Text('Time', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary))),
+                                      const SizedBox(width: 80, child: Center(child: Text('Actions', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary)))),
                                     ],
                                   ),
-                                  ...filteredBookingRows.asMap().entries.map((entry) {
-                                    final index = entry.key;
-                                    final row = entry.value;
-                                    final isNewest = index == 0;
-                                    final isSelected = _selectedRowIds.contains(row.id);
+                                ),
+                                // ⚡ Snug Height List (Zero Extra Blank Space at Bottom!)
+                                SizedBox(
+                                  height: math.min(
+                                    math.max(filteredBookingRows.length * 44.0, 44.0),
+                                    480.0,
+                                  ),
+                                  child: ListView.builder(
+                                    itemCount: filteredBookingRows.length,
+                                    itemExtent: 44, // Fixed height enables instant O(1) virtualization
+                                    padding: EdgeInsets.zero,
+                                    physics: const ClampingScrollPhysics(),
+                                    itemBuilder: (context, index) {
+                                      final row = filteredBookingRows[index];
+                                      final isNewest = index == 0;
+                                      final isSelected = _selectedRowIds.contains(row.id);
+                                      final isMissingSeries = row.series == '?' || row.series.trim().isEmpty || row.series.toUpperCase() == 'MISSING' || row.series.toUpperCase() == 'UNKNOWN' || row.series == '—' || row.series == '-' || row.series.toLowerCase() == 'none';
 
-                                    return TableRow(
-                                      decoration: BoxDecoration(
-                                        color: isSelected
-                                            ? AppColors.primaryContainer.withAlpha(120)
-                                            : (isNewest
-                                                ? AppColors.primaryContainer.withAlpha(80)
-                                                : (index % 2 == 0
-                                                    ? AppColors.surfaceContainerLow
-                                                    : AppColors.surfaceContainer)),
-                                      ),
-                                      children: [
-                                        Container(
-                                          alignment: Alignment.center,
-                                          child: Checkbox(
-                                            value: isSelected,
-                                            onChanged: (_) => _toggleSelectRow(row.id),
-                                            activeColor: AppColors.primary,
-                                          ),
-                                        ),
-                                        _tableDataCell(
-                                          row.sl.toString(),
-                                          isBold: isNewest,
-                                        ),
-                                        _tableDataCell(
-                                          row.sellerName,
-                                          isBold: true,
-                                        ),
-                                        _tableDataCell(
-                                          row.series,
-                                          isBold: true,
-                                          color: AppColors.primary,
-                                        ),
-                                        _tableDataCell(
-                                          row.ticketNo,
-                                          isMonospace: true,
-                                          isBold: true,
-                                        ),
-                                        _tableDataCell(
-                                          '₹${_formatPrice(row.amount)}',
-                                          isBold: true,
-                                          color: AppColors.success,
-                                        ),
-                                        _tableDataCell(
-                                          row.time,
-                                          color: AppColors.textSecondary,
-                                        ),
-                                        Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 4,
-                                          ),
-                                          child: Center(
-                                            child: IconButton(
-                                              icon: const Icon(
-                                                Icons.delete_outline,
-                                                size: 18,
-                                                color: AppColors.error,
-                                              ),
-                                              tooltip: 'Delete row',
-                                              onPressed: () =>
-                                                  _deleteRow(row),
+                                      return Container(
+                                        height: 44,
+                                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                                        decoration: BoxDecoration(
+                                          color: isMissingSeries
+                                              ? Colors.amber.withValues(alpha: 0.18)
+                                              : (isSelected
+                                                  ? AppColors.primaryContainer.withAlpha(120)
+                                                  : (isNewest
+                                                      ? AppColors.primaryContainer.withAlpha(80)
+                                                      : (index % 2 == 0
+                                                          ? AppColors.surfaceContainerLow
+                                                          : AppColors.surfaceContainer))),
+                                          border: Border(
+                                            bottom: BorderSide(
+                                              color: isMissingSeries ? Colors.amber.withValues(alpha: 0.6) : AppColors.border.withValues(alpha: 0.5),
+                                              width: 0.8,
                                             ),
                                           ),
                                         ),
-                                      ],
-                                    );
-                                  }),
-                                ],
-                              ),
+                                        child: Row(
+                                          children: [
+                                            SizedBox(
+                                              width: 36,
+                                              child: Checkbox(
+                                                value: isSelected,
+                                                onChanged: (_) => _toggleSelectRow(row.id),
+                                                activeColor: AppColors.primary,
+                                              ),
+                                            ),
+                                            SizedBox(
+                                              width: 40,
+                                              child: Text(
+                                                '${row.sl}',
+                                                style: TextStyle(
+                                                  fontWeight: isNewest ? FontWeight.bold : FontWeight.normal,
+                                                  fontSize: 12,
+                                                ),
+                                              ),
+                                            ),
+                                            Expanded(
+                                              flex: 3,
+                                              child: Text(
+                                                row.sellerName,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
+                                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                                              ),
+                                            ),
+                                            Expanded(
+                                              flex: 2,
+                                              child: isMissingSeries
+                                                  ? InkWell(
+                                                      onTap: () => _editRow(row),
+                                                      child: Container(
+                                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                        decoration: BoxDecoration(
+                                                          color: Colors.amber.withValues(alpha: 0.25),
+                                                          borderRadius: BorderRadius.circular(4),
+                                                          border: Border.all(color: Colors.amber, width: 1.0),
+                                                        ),
+                                                        child: const Text(
+                                                          '⚠️ NO SERIES',
+                                                          style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 10),
+                                                        ),
+                                                      ),
+                                                    )
+                                                  : Text(
+                                                      row.series,
+                                                      style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 13),
+                                                    ),
+                                            ),
+                                            Expanded(
+                                              flex: 2,
+                                              child: Text(
+                                                row.ticketNo,
+                                                style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold, fontSize: 14),
+                                              ),
+                                            ),
+                                            Expanded(
+                                              flex: 2,
+                                              child: Text(
+                                                '₹${_formatPrice(row.amount)}',
+                                                style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.success, fontSize: 13),
+                                              ),
+                                            ),
+                                            Expanded(
+                                              flex: 2,
+                                              child: Text(
+                                                row.time,
+                                                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                                              ),
+                                            ),
+                                            SizedBox(
+                                              width: 80,
+                                              child: Row(
+                                                mainAxisAlignment: MainAxisAlignment.center,
+                                                children: [
+                                                  IconButton(
+                                                    icon: const Icon(Icons.edit_outlined, size: 16, color: AppColors.primary),
+                                                    tooltip: 'Edit',
+                                                    padding: EdgeInsets.zero,
+                                                    constraints: const BoxConstraints(),
+                                                    onPressed: () => _editRow(row),
+                                                  ),
+                                                  const SizedBox(width: 8),
+                                                  IconButton(
+                                                    icon: const Icon(Icons.delete_outline, size: 16, color: AppColors.error),
+                                                    tooltip: 'Delete',
+                                                    padding: EdgeInsets.zero,
+                                                    constraints: const BoxConstraints(),
+                                                    onPressed: () => _deleteRow(row),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                              ],
                             ),
                     ),
 
@@ -2498,8 +3558,11 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                           ),
                         ),
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      child: Wrap(
+                        alignment: WrapAlignment.center,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        spacing: 24,
+                        runSpacing: 10,
                         children: [
                           _summaryBadge(
                             label: 'Total Booking',
@@ -2507,13 +3570,72 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                             icon: Icons.confirmation_number_outlined,
                             color: AppColors.primary,
                           ),
-                          const SizedBox(width: 48),
+                          if (seriesBreakdown.isNotEmpty) ...[
+                            Container(
+                              width: 1,
+                              height: 28,
+                              color: AppColors.border,
+                            ),
+                            // 🎯 Series Breakdown Count Badges (Clickable to Filter!)
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              crossAxisAlignment: WrapCrossAlignment.center,
+                              children: seriesBreakdown.entries.map((e) {
+                                final isMissing = e.key == 'No Series';
+                                final isSelected = _selectedSeriesFilter == e.key;
+                                return InkWell(
+                                  onTap: () {
+                                    setState(() {
+                                      _selectedSeriesFilter = _selectedSeriesFilter == e.key ? 'All' : e.key;
+                                    });
+                                  },
+                                  borderRadius: BorderRadius.circular(8),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                                    decoration: BoxDecoration(
+                                      color: isSelected
+                                          ? AppColors.primary.withAlpha(50)
+                                          : (isMissing ? Colors.amber.withAlpha(25) : AppColors.surfaceContainerLow),
+                                      borderRadius: BorderRadius.circular(8),
+                                      border: Border.all(
+                                        color: isSelected
+                                            ? AppColors.primary
+                                            : (isMissing ? Colors.amberAccent.withAlpha(120) : AppColors.border),
+                                        width: isSelected ? 1.5 : 1.0,
+                                      ),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Text(
+                                          isMissing ? '⚠️ No Series: ' : 'Series ${e.key}: ',
+                                          style: TextStyle(
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.bold,
+                                            color: isMissing ? Colors.amberAccent : AppColors.textSecondary,
+                                          ),
+                                        ),
+                                        Text(
+                                          '${e.value}',
+                                          style: TextStyle(
+                                            fontSize: 12,
+                                            fontWeight: FontWeight.w900,
+                                            color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ],
                           Container(
                             width: 1,
                             height: 28,
                             color: AppColors.border,
                           ),
-                          const SizedBox(width: 48),
                           _summaryBadge(
                             label: 'Total Amount',
                             value: '₹${_formatPrice(_totalAmount)}',

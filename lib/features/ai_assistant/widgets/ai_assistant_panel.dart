@@ -28,7 +28,7 @@ class _AIAssistantPanelState extends State<AIAssistantPanel> {
   final List<Map<String, String>> _messages = [
     {
       'sender': 'ai',
-      'text': '🤖 **Hello! I am your TicketCore AI Assistant.**\n\n'
+      'text': '🤖 **Hello! I am your Phantom AI Assistant.**\n\n'
           'I run 100% offline on your local database (`opscore_pro.db`). Ask me anything about sales, ticket winners, or Sambad results!',
     }
   ];
@@ -121,7 +121,7 @@ class _AIAssistantPanelState extends State<AIAssistantPanel> {
                     Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('TICKETCORE AI ASSISTANT', style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.bold)),
+                        Text('PHANTOM AI ASSISTANT', style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.bold)),
                         Text('100% Offline Intelligence Engine • Local Database', style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary)),
                       ],
                     ),

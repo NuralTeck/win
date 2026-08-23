@@ -1,8 +1,9 @@
 class AppConstants {
   AppConstants._();
 
-  static const String appName = 'NagaLand TicketCore';
-  static const String appSubtitle = 'Enterprise Ticket & Lottery v2.4';
+  static const String appName = 'PhantomManagement';
+  static const String appSubtitle = 'Enterprise Management v2.4';
+  static const String appVersion = '1.0.0';
 
   static const double sidebarWidth = 260.0;
   static const double topHeaderHeight = 64.0;
@@ -11,6 +12,7 @@ class AppConstants {
   static const double minWindowHeight = 800.0;
 
   // Route Paths
+  static const String routeSplash = '/splash';         // Animated Splash Screen
   static const String routeLogin = '/login';           // Admin / Owner Login Screen
   static const String routeDashboard = '/';
   static const String routeOperations = '/operations'; // Draws & Schemes
@@ -21,7 +23,9 @@ class AppConstants {
   static const String routeCustomers = '/customers';   // Customer & Seller Account Master
   static const String routeDrawTimes = '/draw-times';   // Master Draw Times & Shifts Setup
   static const String routeResultEntry = '/result-entry'; // Official Lottery Sambad Result Entry
+  static const String routeGeneratedHisab = '/generated-hisab'; // Generated Hisab & Draw Settlements
   static const String routeAnalytics = '/analytics';   // Revenue & Payouts
   static const String routeCollectors = '/collectors'; // Money Collector Management & Payments
   static const String routeSettings = '/settings';     // Pricing & Series Setup
 }
+

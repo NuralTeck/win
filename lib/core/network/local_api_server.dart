@@ -46,7 +46,7 @@ class LocalApiServer {
         if (path == '/api/v1/health' && request.method == 'GET') {
           _sendJsonResponse(request, {
             'status': 'online',
-            'app': 'NagaLand TicketCore POS Counter',
+            'app': 'PhantomManagement POS Counter',
             'timestamp': DateTime.now().toIso8601String(),
           });
           return;

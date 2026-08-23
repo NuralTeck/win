@@ -1,39 +1,33 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/ticket_sale_model.dart';
 import '../../../core/database/database_service.dart';
-import '../../../core/database/supabase_service.dart';
 
 abstract class TicketSalesRepository {
   Future<List<TicketSaleModel>> getTicketSales();
   Future<TicketSaleModel> createTicketSale(TicketSaleModel sale);
+  Future<void> createTicketSalesBulk(List<TicketSaleModel> sales);
   Future<void> updateTicketSale(TicketSaleModel sale);
   Future<void> deleteTicketSale(String id);
 }
 
+/// SQLite-only repository — all ticket data stays local, no cloud sync.
 class SqliteTicketSalesRepository implements TicketSalesRepository {
   final DatabaseService _dbService = DatabaseService.instance;
-  final SupabaseService _supabaseService = SupabaseService.instance;
 
   @override
   Future<List<TicketSaleModel>> getTicketSales() async {
-    // 1. Instant local read from SQLite Database (0ms latency)
-    final localSales = await _dbService.getTicketSales();
-
-    // 2. Background Cloud Sync (Non-blocking)
-    if (_supabaseService.isInitialized) {
-      _supabaseService.fetchCloudSales().catchError((e) {
-        debugPrint('⚠️ [CLOUD SYNC] Note: $e');
-        return <TicketSaleModel>[];
-      });
-    }
-    return localSales;
+    return await _dbService.getTicketSales();
   }
 
   @override
   Future<TicketSaleModel> createTicketSale(TicketSaleModel sale) async {
-    await _supabaseService.insertTicketBooking(sale);
+    await _dbService.insertTicketSale(sale);
     return sale;
+  }
+
+  @override
+  Future<void> createTicketSalesBulk(List<TicketSaleModel> sales) async {
+    await _dbService.insertTicketSalesBulk(sales);
   }
 
   @override

@@ -20,8 +20,20 @@ const pino = require('pino');
 const path = require('path');
 const fs = require('fs');
 
-// Session directory path
-const SESSION_DIR = path.join(process.cwd(), 'app_session');
+// Session directory path (Safe writable path on Windows)
+function getSessionDir() {
+  const baseDir = process.env.APPDATA || process.env.LOCALAPPDATA || process.env.USERPROFILE || 'C:\\Lottery_Reports';
+  const targetDir = path.join(baseDir, 'OpsCore_Pro', 'whatsapp_session');
+  try {
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true });
+    }
+    return targetDir;
+  } catch (err) {
+    return path.join(process.cwd(), 'app_session');
+  }
+}
+const SESSION_DIR = getSessionDir();
 
 // Pino logger (silent to prevent CPU overhead / I/O latency)
 const logger = pino({ level: 'silent' });

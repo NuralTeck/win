@@ -78,6 +78,7 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(ticketSalesViewModelProvider.notifier).loadSales();
       _fetchHistoryRecords();
     });
   }
@@ -385,57 +386,169 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
     try {
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
-        allowedExtensions: ['pdf', 'txt', 'png', 'jpg'],
+        allowedExtensions: ['pdf', 'txt', 'csv', 'png', 'jpg'],
         withData: true,
       );
 
       if (result != null && result.files.isNotEmpty) {
         final file = result.files.first;
-        LotterySambadResultModel? parsed;
+        String? extractedText;
 
+        if (file.path != null && (file.name.toLowerCase().endsWith('.txt') || file.name.toLowerCase().endsWith('.csv'))) {
+          try {
+            extractedText = await File(file.path!).readAsString();
+          } catch (_) {}
+        } else if (file.bytes != null && (file.name.toLowerCase().endsWith('.txt') || file.name.toLowerCase().endsWith('.csv'))) {
+          extractedText = utf8.decode(file.bytes!, allowMalformed: true);
+        }
+
+        // If file text extracted, parse directly using Dart Regex engine
+        if (extractedText != null && extractedText.trim().isNotEmpty) {
+          _bulkPasteCtrl.text = extractedText;
+          _parseBulkTextPaste();
+          return;
+        }
+
+        // 1. Try bundled Node Standalone PDF Parser (Zero Python Needed)
+        LotterySambadResultModel? parsed;
         if (file.path != null && file.name.toLowerCase().endsWith('.pdf')) {
           try {
-            ProcessResult pyResult;
-            try {
-              pyResult = await Process.run(
-                  'python3', ['scripts/pdf_sambad_parser.py', file.path!]);
-            } catch (_) {
-              pyResult = await Process.run(
-                  'python', ['scripts/pdf_sambad_parser.py', file.path!]);
+            // First try via local WhatsApp Engine REST API if online
+            final uri = Uri.parse('http://127.0.0.1:4000/api/parse-pdf');
+            final httpReq = await HttpClient().postUrl(uri);
+            httpReq.headers.contentType = ContentType.json;
+            httpReq.write(jsonEncode({'filePath': file.path!}));
+            final httpRes = await httpReq.close();
+            if (httpRes.statusCode == 200) {
+              final respBody = await httpRes.transform(utf8.decoder).join();
+              final decoded = jsonDecode(respBody);
+              if (decoded['success'] == true) {
+                parsed = LotterySambadResultModel(
+                  drawId: DateTime.now().millisecondsSinceEpoch.toString(),
+                  drawName: _selectedShift,
+                  drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
+                  drawTimeStr: _selectedShift,
+                  firstPrize: decoded['firstPrize'] ?? '',
+                  consolationPrize: decoded['consolationPrize'] ?? '',
+                  secondPrizeNumbers: List<String>.from(decoded['secondPrizeNumbers'] ?? []),
+                  thirdPrizeNumbers: List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
+                  fourthPrizeNumbers: List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
+                  fifthPrizeNumbers: List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
+                  publishedAt: DateTime.now(),
+                );
+              }
             }
+          } catch (_) {}
 
-            if (pyResult.exitCode == 0 &&
-                pyResult.stdout.toString().trim().isNotEmpty) {
-              final decoded =
-                  jsonDecode(pyResult.stdout.toString().trim());
-              parsed = LotterySambadResultModel(
-                drawId: DateTime.now().millisecondsSinceEpoch.toString(),
-                drawName: _selectedShift,
-                drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
-                drawTimeStr: _selectedShift,
-                firstPrize: decoded['firstPrize'] ?? '',
-                consolationPrize: decoded['consolationPrize'] ?? '',
-                secondPrizeNumbers:
-                    List<String>.from(decoded['secondPrizeNumbers'] ?? []),
-                thirdPrizeNumbers:
-                    List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
-                fourthPrizeNumbers:
-                    List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
-                fifthPrizeNumbers:
-                    List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
-                publishedAt: DateTime.now(),
-              );
+          // Fallback to executing bundled node.exe parse_pdf.js
+          if (parsed == null) {
+            try {
+              final exeDir = File(Platform.resolvedExecutable).parent.path;
+              final nodeCandidates = [
+                '$exeDir\\whatsapp_engine\\node.exe',
+                'whatsapp_engine\\node.exe',
+                'node.exe',
+                'node',
+              ];
+              final scriptCandidates = [
+                '$exeDir\\whatsapp_engine\\parse_pdf.js',
+                'whatsapp_engine\\parse_pdf.js',
+                'parse_pdf.js',
+              ];
+              String? nodeBin;
+              for (final n in nodeCandidates) {
+                if (File(n).existsSync() || n == 'node') {
+                  nodeBin = n;
+                  break;
+                }
+              }
+              String? scriptPath;
+              for (final s in scriptCandidates) {
+                if (File(s).existsSync()) {
+                  scriptPath = s;
+                  break;
+                }
+              }
+
+              if (nodeBin != null && scriptPath != null) {
+                final runRes = await Process.run(nodeBin, [scriptPath, file.path!]);
+                if (runRes.exitCode == 0 && runRes.stdout.toString().trim().isNotEmpty) {
+                  final decoded = jsonDecode(runRes.stdout.toString().trim());
+                  parsed = LotterySambadResultModel(
+                    drawId: DateTime.now().millisecondsSinceEpoch.toString(),
+                    drawName: _selectedShift,
+                    drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
+                    drawTimeStr: _selectedShift,
+                    firstPrize: decoded['firstPrize'] ?? '',
+                    consolationPrize: decoded['consolationPrize'] ?? '',
+                    secondPrizeNumbers: List<String>.from(decoded['secondPrizeNumbers'] ?? []),
+                    thirdPrizeNumbers: List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
+                    fourthPrizeNumbers: List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
+                    fifthPrizeNumbers: List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
+                    publishedAt: DateTime.now(),
+                  );
+                }
+              }
+            } catch (e) {
+              debugPrint('Node PDF parse error: $e');
             }
-          } catch (e) {
-            debugPrint('Python execution error: $e');
+          }
+
+          // Fallback to Python (if available on system)
+          if (parsed == null || (parsed.firstPrize.isEmpty && parsed.secondPrizeNumbers.isEmpty)) {
+            try {
+              final exeDir = File(Platform.resolvedExecutable).parent.path;
+              final pyScriptCandidates = [
+                '$exeDir\\scripts\\pdf_sambad_parser.py',
+                'scripts\\pdf_sambad_parser.py',
+                '${Directory.current.path}\\scripts\\pdf_sambad_parser.py',
+              ];
+              String? pyScript;
+              for (final p in pyScriptCandidates) {
+                if (File(p).existsSync()) {
+                  pyScript = p;
+                  break;
+                }
+              }
+
+              if (pyScript != null) {
+                ProcessResult pyResult;
+                try {
+                  pyResult = await Process.run('python', [pyScript, file.path!]);
+                } catch (_) {
+                  pyResult = await Process.run('python3', [pyScript, file.path!]);
+                }
+
+                if (pyResult.exitCode == 0 && pyResult.stdout.toString().trim().isNotEmpty) {
+                  final decoded = jsonDecode(pyResult.stdout.toString().trim());
+                  final p = LotterySambadResultModel(
+                    drawId: DateTime.now().millisecondsSinceEpoch.toString(),
+                    drawName: _selectedShift,
+                    drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
+                    drawTimeStr: _selectedShift,
+                    firstPrize: decoded['firstPrize'] ?? '',
+                    consolationPrize: decoded['consolationPrize'] ?? '',
+                    secondPrizeNumbers: List<String>.from(decoded['secondPrizeNumbers'] ?? []),
+                    thirdPrizeNumbers: List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
+                    fourthPrizeNumbers: List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
+                    fifthPrizeNumbers: List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
+                    publishedAt: DateTime.now(),
+                  );
+                  if (p.firstPrize.isNotEmpty || p.secondPrizeNumbers.isNotEmpty) {
+                    parsed = p;
+                  }
+                }
+              }
+            } catch (_) {}
           }
         }
 
-        if (parsed != null && mounted) {
+        if (parsed != null && (parsed.firstPrize.isNotEmpty || parsed.secondPrizeNumbers.isNotEmpty || parsed.fifthPrizeNumbers.isNotEmpty) && mounted) {
           _populateFromModel(parsed);
           await _saveResult(silent: true);
-          _showSnackbar(
-              '⚡ PDF Extracted & Auto-Filled!', AppColors.success);
+          _showSnackbar('⚡ PDF Extracted & Auto-Filled (${parsed.fifthPrizeNumbers.length} numbers)!', AppColors.success);
+        } else {
+          _showSnackbar('⚠️ PDF text could not be extracted. Please use "Bulk Paste" to copy-paste result text!', AppColors.warning);
         }
       }
     } catch (e) {
@@ -1392,6 +1505,8 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
 
   // ── History Tab ─────────────────────────────────────────────────────────────
   Widget _buildHistoryView() {
+    final allSales = ref.watch(ticketSalesViewModelProvider).sales;
+
     // Filtered records
     final filtered = _historyRecords.where((r) {
       final matchesSearch = _historySearch.isEmpty ||
@@ -1414,7 +1529,7 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Search + Filter Bar
+          // Search + Filter Bar + Refresh
           Row(
             children: [
               Expanded(
@@ -1444,6 +1559,16 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
                   );
                 }).toList(),
               ),
+              const SizedBox(width: 12),
+              OutlinedButton.icon(
+                onPressed: () {
+                  ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+                  _fetchHistoryRecords();
+                  _showSnackbar('🔄 Re-verified results with all latest bookings!', AppColors.success);
+                },
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('Refresh & Re-verify', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -1471,8 +1596,36 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
               separatorBuilder: (_, __) => const SizedBox(height: 8),
               itemBuilder: (context, index) {
                 final record = filtered[index];
-                final hasWinners =
-                    (record['verifiedWinnersCount'] ?? 0) > 0;
+
+                // Dynamically re-verify winners against latest live ticket bookings!
+                final sec = (record['secondPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+                final th = (record['thirdPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+                final fo = (record['fourthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+                final fi = (record['fifthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+
+                final model = LotterySambadResultModel(
+                  drawId: record['id']?.toString() ?? '',
+                  drawName: record['drawName']?.toString() ?? record['drawTimeStr']?.toString() ?? '1 PM',
+                  drawDateStr: record['drawDateStr']?.toString() ?? '',
+                  drawTimeStr: record['drawTimeStr']?.toString() ?? '',
+                  firstPrize: record['firstPrize']?.toString() ?? '',
+                  consolationPrize: record['consolationPrize']?.toString() ?? '',
+                  secondPrizeNumbers: sec,
+                  thirdPrizeNumbers: th,
+                  fourthPrizeNumbers: fo,
+                  fifthPrizeNumbers: fi,
+                  publishedAt: DateTime.tryParse(record['publishedAt']?.toString() ?? '') ?? DateTime.now(),
+                );
+
+                final liveClaims = WinnerVerificationEngine.verifyWinners(
+                  result: model,
+                  soldTickets: allSales,
+                );
+
+                final liveWinnerCount = liveClaims.length;
+                final liveTotalPayout = liveClaims.fold<double>(0.0, (acc, c) => acc + c.prizeAmount);
+                final hasWinners = liveWinnerCount > 0;
+
                 return GlassCard(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -1595,7 +1748,7 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
                                           size: 12, color: Colors.amber),
                                       const SizedBox(width: 4),
                                       Text(
-                                          '${record['verifiedWinnersCount']} winner(s)',
+                                          '$liveWinnerCount winner(s)',
                                           style: const TextStyle(
                                               fontSize: 11,
                                               fontWeight: FontWeight.bold,
@@ -1605,7 +1758,7 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
                                 ),
                               if (hasWinners) const SizedBox(height: 4),
                               Text(
-                                'Payout: ₹${NumberFormat('#,##,##0', 'en_IN').format(record['totalPayoutAmount'] ?? 0)}',
+                                'Payout: ₹${NumberFormat('#,##,##0', 'en_IN').format(liveTotalPayout)}',
                                 style: TextStyle(
                                     fontWeight: FontWeight.bold,
                                     fontSize: 13,

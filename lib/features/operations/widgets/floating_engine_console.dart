@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/services/whatsapp_engine_service.dart';
+import '../screens/whatsapp_engine_screen.dart';
 
 class FloatingEngineConsole extends StatefulWidget {
   const FloatingEngineConsole({super.key});
@@ -462,7 +463,6 @@ class _FloatingEngineConsoleState extends State<FloatingEngineConsole> {
                   ),
                 ),
 
-                // 3. Optional QR Code Preview Overlay Box
                 if (_showQrCode && status.qrDataUrl != null)
                   Container(
                     margin: const EdgeInsets.all(10),
@@ -475,10 +475,9 @@ class _FloatingEngineConsoleState extends State<FloatingEngineConsole> {
                       children: [
                         const Text('Scan with WhatsApp App:', style: TextStyle(color: Colors.black, fontWeight: FontWeight.bold, fontSize: 12)),
                         const SizedBox(height: 6),
-                        Image.memory(
-                          base64Decode(status.qrDataUrl!.split(',').last),
-                          width: 140,
-                          height: 140,
+                        StableQrDisplay(
+                          qrDataUrl: status.qrDataUrl!,
+                          size: 140,
                         ),
                       ],
                     ),

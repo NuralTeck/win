@@ -5,12 +5,17 @@ import '../../shared/models/draw_model.dart';
 import '../../shared/models/metric_model.dart';
 import '../../shared/models/ticket_sale_model.dart';
 import '../../../core/database/database_service.dart';
+import '../../operations/models/winning_claim_model.dart';
+import '../../operations/models/lottery_sambad_result_model.dart';
+import '../../operations/utils/winner_verification_engine.dart';
 
 class DashboardState {
   final bool isLoading;
   final String dateFilter; // 'Today', 'Total'
   final List<KpiMetricModel> kpis;
   final List<DrawModel> recentDraws;
+  final List<WinningClaimModel> winningClaims;
+  final double totalWinningPayout;
   final String? errorMessage;
 
   const DashboardState({
@@ -18,6 +23,8 @@ class DashboardState {
     this.dateFilter = 'Today',
     this.kpis = const [],
     this.recentDraws = const [],
+    this.winningClaims = const [],
+    this.totalWinningPayout = 0.0,
     this.errorMessage,
   });
 
@@ -26,6 +33,8 @@ class DashboardState {
     String? dateFilter,
     List<KpiMetricModel>? kpis,
     List<DrawModel>? recentDraws,
+    List<WinningClaimModel>? winningClaims,
+    double? totalWinningPayout,
     String? errorMessage,
   }) {
     return DashboardState(
@@ -33,6 +42,8 @@ class DashboardState {
       dateFilter: dateFilter ?? this.dateFilter,
       kpis: kpis ?? this.kpis,
       recentDraws: recentDraws ?? this.recentDraws,
+      winningClaims: winningClaims ?? this.winningClaims,
+      totalWinningPayout: totalWinningPayout ?? this.totalWinningPayout,
       errorMessage: errorMessage,
     );
   }
@@ -139,15 +150,48 @@ class DashboardViewModel extends StateNotifier<DashboardState> {
         ),
       ];
 
+      // Calculate verified winners & itemized prize/bonus/incentive metrics
+      final List<WinningClaimModel> verifiedWinners = [];
+      try {
+        final rawResults = await DatabaseService.instance.getLotteryResults();
+        for (final raw in rawResults) {
+          final drawTimeStr = raw['drawTimeStr']?.toString() ?? '';
+          final firstP = raw['firstPrize']?.toString() ?? '';
+          List<String> splitNums(String key) {
+            final v = raw[key]?.toString();
+            return (v != null && v.isNotEmpty) ? v.split(',') : [];
+          }
+
+          final resModel = LotterySambadResultModel(
+            drawId: raw['id']?.toString() ?? '',
+            drawName: raw['drawName']?.toString() ?? 'Lottery Draw',
+            drawDateStr: raw['drawDateStr']?.toString() ?? '',
+            drawTimeStr: drawTimeStr,
+            firstPrize: firstP,
+            consolationPrize: firstP.contains(' ') ? firstP.split(' ').last : (firstP.length >= 5 ? firstP.substring(firstP.length - 5) : firstP),
+            secondPrizeNumbers: splitNums('secondPrizeNumbers'),
+            thirdPrizeNumbers: splitNums('thirdPrizeNumbers'),
+            fourthPrizeNumbers: splitNums('fourthPrizeNumbers'),
+            fifthPrizeNumbers: splitNums('fifthPrizeNumbers'),
+            publishedAt: DateTime.tryParse(raw['publishedAt']?.toString() ?? '') ?? DateTime.now(),
+          );
+
+          final claims = WinnerVerificationEngine.verifyWinners(soldTickets: filteredSales, result: resModel);
+          verifiedWinners.addAll(claims);
+        }
+      } catch (_) {}
+
+      final totalWinningPayout = verifiedWinners.fold(0.0, (sum, c) => sum + c.prizeAmount);
+
       final liveKpis = [
         KpiMetricModel(
-          title: 'Active Draws (${state.dateFilter})',
-          value: '3',
+          title: 'Total Inami Payout (${state.dateFilter})',
+          value: 'Rs. ${NumberFormat('#,##,##0', 'en_IN').format(totalWinningPayout)}',
           changePercentage: 0.0,
           isPositive: true,
-          subtitle: '1 PM • 6 PM • 8 PM',
-          icon: Icons.confirmation_number_outlined,
-          iconColor: const Color(0xFFD0BCFF),
+          subtitle: '${verifiedWinners.length} Winning Claims',
+          icon: Icons.emoji_events_rounded,
+          iconColor: const Color(0xFFFFD700),
         ),
         KpiMetricModel(
           title: 'Active Sellers',
@@ -182,6 +226,8 @@ class DashboardViewModel extends StateNotifier<DashboardState> {
       state = state.copyWith(
         isLoading: false,
         recentDraws: realDraws,
+        winningClaims: verifiedWinners,
+        totalWinningPayout: totalWinningPayout,
         kpis: liveKpis,
       );
     } catch (e) {

@@ -107,7 +107,7 @@ class _AITrainingScreenState extends State<AITrainingScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('TRAIN TICKETCORE AI KNOWLEDGE BASE', style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.bold, color: AppColors.tertiary)),
+                        Text('TRAIN PHANTOM AI KNOWLEDGE BASE', style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.bold, color: AppColors.tertiary)),
                         const SizedBox(height: 4),
                         Text(
                           'Add custom business rules, lottery formats, seller commission rules, and FAQs. The local AI engine learns these rules instantly with zero internet required.',

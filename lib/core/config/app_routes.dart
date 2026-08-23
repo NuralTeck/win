@@ -4,17 +4,15 @@ import '../../app/main_layout.dart';
 import '../constants/app_constants.dart';
 import '../../features/dashboard/screens/dashboard_screen.dart';
 import '../../features/operations/screens/draws_screen.dart';
-import '../../features/sellers/screens/agents_screen.dart';
 import '../../features/bookings/screens/ticket_sales_screen.dart';
-import '../../features/bookings/screens/company_forward_screen.dart';
 import '../../features/analytics/screens/analytics_screen.dart';
 import '../../features/settings/screens/settings_screen.dart';
 import '../../features/settings/screens/price_setup_screen.dart';
-import '../../features/sellers/screens/customer_setup_screen.dart';
 import '../../features/settings/screens/draw_time_setup_screen.dart';
 import '../../features/operations/screens/result_entry_screen.dart';
-import '../../features/collectors/screens/collector_management_screen.dart';
+import '../../features/operations/screens/generated_hisab_screen.dart';
 import '../../features/auth/screens/admin_login_screen.dart';
+import '../../features/auth/screens/splash_screen.dart';
 
 final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
 
@@ -23,11 +21,15 @@ class AppRouter {
 
   static final GoRouter router = GoRouter(
     navigatorKey: _rootNavigatorKey,
-    initialLocation: AppConstants.routeLogin,
+    initialLocation: AppConstants.routeSplash,
     routes: [
       GoRoute(
+        path: AppConstants.routeSplash,
+        builder: (context, state) => const SplashScreen(),
+      ),
+      GoRoute(
         path: AppConstants.routeLogin,
-        builder: (context, state) => const AdminLoginScreen(),
+        redirect: (context, state) => AppConstants.routeDashboard,
       ),
       StatefulShellRoute.indexedStack(
         builder: (context, state, navigationShell) {
@@ -53,14 +55,6 @@ class AppRouter {
           StatefulShellBranch(
             routes: [
               GoRoute(
-                path: AppConstants.routeCompanyForward,
-                builder: (context, state) => const CompanyForwardScreen(),
-              ),
-            ],
-          ),
-          StatefulShellBranch(
-            routes: [
-              GoRoute(
                 path: AppConstants.routeResultEntry,
                 builder: (context, state) => const ResultEntryScreen(),
               ),
@@ -69,28 +63,8 @@ class AppRouter {
           StatefulShellBranch(
             routes: [
               GoRoute(
-                path: AppConstants.routeCustomers,
-                builder: (context, state) => const CustomerSetupScreen(),
-              ),
-              GoRoute(
-                path: AppConstants.routeSellers,
-                builder: (context, state) => const AgentsScreen(),
-              ),
-            ],
-          ),
-          StatefulShellBranch(
-            routes: [
-              GoRoute(
-                path: AppConstants.routeCollectors,
-                builder: (context, state) => const CollectorManagementScreen(),
-              ),
-            ],
-          ),
-          StatefulShellBranch(
-            routes: [
-              GoRoute(
-                path: AppConstants.routeAnalytics,
-                builder: (context, state) => const AnalyticsScreen(),
+                path: AppConstants.routeGeneratedHisab,
+                builder: (context, state) => const GeneratedHisabScreen(),
               ),
             ],
           ),

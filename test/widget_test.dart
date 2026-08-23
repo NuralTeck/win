@@ -12,11 +12,11 @@ void main() {
 
     await tester.pumpWidget(
       const ProviderScope(
-        child: OpsCoreProApp(),
+        child: TicketCoreApp(),
       ),
     );
     await tester.pumpAndSettle();
 
-    expect(find.byType(OpsCoreProApp), findsOneWidget);
+    expect(find.byType(TicketCoreApp), findsOneWidget);
   });
 }

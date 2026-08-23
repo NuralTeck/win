@@ -179,61 +179,297 @@ class _CompanyForwardScreenState extends ConsumerState<CompanyForwardScreen> {
     );
   }
 
-  // ── Ticket Bookings Export ───────────────────────────────────────────────
-  Future<void> _exportToExcelCsv(List<TicketSaleModel> sales) async {
-    if (sales.isEmpty) {
-      _showSnackbar('No ticket bookings available to export!', AppColors.warning);
-      return;
+  // ── Ticket Bookings Clean Text Forwarding (Series • Ticket • Timing ONLY) ──────
+  String _formatDrawTimeShort(String rawDrawName) {
+    final d = rawDrawName.toLowerCase();
+    if (d.contains('1:00') || d.contains('1 pm') || d.contains('1pm') || d.contains('morning')) {
+      return '1:00 PM';
     }
-
-    try {
-      final dateStr = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
-      final String? filePath = await FilePicker.platform.saveFile(
-        dialogTitle: 'Export Today Bookings for Company Forwarding',
-        fileName: 'company_forward_bookings_$dateStr.csv',
-        type: FileType.custom,
-        allowedExtensions: ['csv'],
-      );
-
-      if (filePath == null) return;
-
-      final buffer = StringBuffer();
-      // Excel/CSV Header: Series, Ticket No, Seller Name, Draw Name, Booking Time
-      buffer.writeln('Series,Ticket No,Seller Name,Draw Name,Booking Time');
-
-      for (final s in sales) {
-        final parts = s.ticketNumber.trim().split(' ');
-        final ticketNo = parts.length > 1 ? parts.last : s.ticketNumber;
-        final sellerName = s.agentName.isNotEmpty ? s.agentName : s.buyerName;
-        final timeStr = DateFormat('HH:mm dd/MM/yyyy').format(s.saleDate);
-        buffer.writeln('"${s.ticketSeries}","$ticketNo","$sellerName","${s.drawName}","$timeStr"');
-      }
-
-      final file = File(filePath);
-      await file.writeAsString(buffer.toString());
-
-      _showSnackbar('📊 Exported ${sales.length} tickets to Excel/CSV file at $filePath', AppColors.success);
-    } catch (e) {
-      _showSnackbar('Error exporting file: $e', AppColors.error);
+    if (d.contains('6:00') || d.contains('6 pm') || d.contains('6pm') || d.contains('day')) {
+      return '6:00 PM';
     }
+    if (d.contains('8:00') || d.contains('8 pm') || d.contains('8pm') || d.contains('evening') || d.contains('night')) {
+      return '8:00 PM';
+    }
+    return rawDrawName;
   }
 
-  void _copyForwardText(List<TicketSaleModel> sales) {
+  String _buildForwardingText(List<TicketSaleModel> sales) {
+    final buffer = StringBuffer();
+    for (final s in sales) {
+      final parts = s.ticketNumber.trim().split(' ');
+      final ticketNo = parts.length > 1 ? parts.last : s.ticketNumber;
+      final timeLabel = _formatDrawTimeShort(s.drawName);
+      buffer.writeln('${s.ticketSeries} $ticketNo $timeLabel');
+    }
+    return buffer.toString().trim();
+  }
+
+  void _copyForwardTextDirect(List<TicketSaleModel> sales) {
     if (sales.isEmpty) {
       _showSnackbar('No ticket bookings available to copy!', AppColors.warning);
       return;
     }
-    final buffer = StringBuffer();
-    buffer.writeln('📋 COMPANY FORWARDING TICKET LIST (${sales.length} Tickets)');
-    buffer.writeln('--------------------------------------------------');
-    for (final s in sales) {
-      final parts = s.ticketNumber.trim().split(' ');
-      final ticketNo = parts.length > 1 ? parts.last : s.ticketNumber;
-      final sellerName = s.agentName.isNotEmpty ? s.agentName : s.buyerName;
-      buffer.writeln('${s.ticketSeries} $ticketNo | Seller: $sellerName | Draw: ${s.drawName}');
+    final text = _buildForwardingText(sales);
+    Clipboard.setData(ClipboardData(text: text));
+    _showSnackbar('📋 Copied ${sales.length} tickets (Series • Ticket • Timing) to Clipboard!', AppColors.success);
+  }
+
+  Future<void> _saveAsTextFile(List<TicketSaleModel> sales) async {
+    if (sales.isEmpty) {
+      _showSnackbar('No ticket bookings available to save!', AppColors.warning);
+      return;
     }
-    Clipboard.setData(ClipboardData(text: buffer.toString()));
-    _showSnackbar('📋 Copied ${sales.length} tickets with Seller details to Clipboard!', AppColors.success);
+    try {
+      final dateStr = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+      final String? filePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Company Forwarding Text File',
+        fileName: 'company_forward_$dateStr.txt',
+        type: FileType.custom,
+        allowedExtensions: ['txt'],
+      );
+
+      if (filePath == null) return;
+
+      final text = _buildForwardingText(sales);
+      final file = File(filePath);
+      await file.writeAsString(text);
+
+      _showSnackbar('💾 Saved text file successfully to $filePath', AppColors.success);
+    } catch (e) {
+      _showSnackbar('Error saving text file: $e', AppColors.error);
+    }
+  }
+
+  void _shareViaWhatsApp(List<TicketSaleModel> sales) {
+    if (sales.isEmpty) {
+      _showSnackbar('No tickets available to share on WhatsApp!', AppColors.warning);
+      return;
+    }
+    final text = _buildForwardingText(sales);
+    final url = 'https://wa.me/?text=${Uri.encodeComponent(text)}';
+    Process.run('cmd', ['/c', 'start', '', url]);
+    _showSnackbar('💬 Opening WhatsApp with formatted ticket text...', AppColors.success);
+  }
+
+  void _showForwardTextModal(BuildContext context, List<TicketSaleModel> allFilteredSales) {
+    if (allFilteredSales.isEmpty) {
+      _showSnackbar('No tickets available for Company Forwarding!', AppColors.warning);
+      return;
+    }
+
+    String activeModalShift = _selectedShift;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) {
+          final modalSales = allFilteredSales.where((s) {
+            if (activeModalShift == 'All') return true;
+            final d = s.drawName.toLowerCase();
+            final sShift = activeModalShift.toLowerCase();
+            if (sShift.contains('morning') || sShift.contains('1')) {
+              return d.contains('1:00') || d.contains('morning') || d.contains('1 pm') || d.contains('1pm') || d.contains('1');
+            }
+            if (sShift.contains('day') || sShift.contains('6')) {
+              return d.contains('6:00') || d.contains('day') || d.contains('6 pm') || d.contains('6pm') || d.contains('6');
+            }
+            if (sShift.contains('evening') || sShift.contains('night') || sShift.contains('8')) {
+              return d.contains('8:00') || d.contains('evening') || d.contains('night') || d.contains('8 pm') || d.contains('8pm') || d.contains('8');
+            }
+            return true;
+          }).toList();
+
+          final textPreview = _buildForwardingText(modalSales);
+
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            child: Container(
+              width: 580,
+              padding: const EdgeInsets.all(24),
+              decoration: BoxDecoration(
+                color: const Color(0xFF111827),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.4), width: 1.5),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withValues(alpha: 0.7),
+                    blurRadius: 36,
+                    spreadRadius: 8,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Header
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: Colors.greenAccent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.greenAccent.withValues(alpha: 0.3)),
+                        ),
+                        child: const Icon(Icons.forward_to_inbox_rounded, color: Colors.greenAccent, size: 28),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Company Forwarding Text',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Format: Series • Ticket No • Timing (${modalSales.length} Tickets)',
+                              style: TextStyle(
+                                color: AppColors.textSecondary.withValues(alpha: 0.85),
+                                fontSize: 12,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.close_rounded, color: AppColors.textSecondary),
+                        onPressed: () => Navigator.of(ctx).pop(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(color: AppColors.border, height: 1),
+                  const SizedBox(height: 14),
+
+                  // Shift Selection Chips
+                  Row(
+                    children: [
+                      const Text(
+                        'Filter Timing: ',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textSecondary),
+                      ),
+                      const SizedBox(width: 8),
+                      Wrap(
+                        spacing: 6,
+                        children: [
+                          'All',
+                          '1:00 PM',
+                          '6:00 PM',
+                          '8:00 PM',
+                        ].map((shiftOption) {
+                          final isSelected = activeModalShift == shiftOption ||
+                              (shiftOption == '1:00 PM' && (activeModalShift == 'Morning' || activeModalShift == '1')) ||
+                              (shiftOption == '6:00 PM' && (activeModalShift == 'Day' || activeModalShift == '6')) ||
+                              (shiftOption == '8:00 PM' && (activeModalShift == 'Evening' || activeModalShift == 'Night' || activeModalShift == '8'));
+
+                          return ChoiceChip(
+                            label: Text(shiftOption, style: TextStyle(fontSize: 11.5, fontWeight: isSelected ? FontWeight.bold : FontWeight.normal)),
+                            selected: isSelected,
+                            selectedColor: const Color(0xFF16A34A),
+                            onSelected: (val) {
+                              if (val) {
+                                setModalState(() => activeModalShift = shiftOption);
+                              }
+                            },
+                          );
+                        }).toList(),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+
+                  // Text Monospace Preview Box
+                  Container(
+                    height: 220,
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F172A),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: SingleChildScrollView(
+                      child: SelectableText(
+                        textPreview.isNotEmpty ? textPreview : 'No tickets matching selected timing.',
+                        style: const TextStyle(
+                          fontFamily: 'monospace',
+                          fontSize: 13,
+                          color: Color(0xFF4ADE80),
+                          height: 1.5,
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+
+                  // 3 Quick Action Buttons
+                  Row(
+                    children: [
+                      // 1. Copy Button
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF16A34A),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                          icon: const Icon(Icons.copy_rounded, size: 18),
+                          label: const Text('COPY TEXT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                          onPressed: () {
+                            Clipboard.setData(ClipboardData(text: textPreview));
+                            _showSnackbar('📋 Copied ${modalSales.length} tickets to Clipboard!', AppColors.success);
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+
+                      // 2. WhatsApp Button
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF25D366),
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                          icon: const Icon(Icons.chat_bubble_rounded, size: 18),
+                          label: const Text('WHATSAPP', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                          onPressed: () => _shareViaWhatsApp(modalSales),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+
+                      // 3. Save .txt File Button
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.cyanAccent,
+                            side: const BorderSide(color: Colors.cyanAccent),
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                          ),
+                          icon: const Icon(Icons.save_alt_rounded, size: 18),
+                          label: const Text('SAVE .TXT', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                          onPressed: () => _saveAsTextFile(modalSales),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
   }
 
   @override
@@ -284,6 +520,16 @@ class _CompanyForwardScreenState extends ConsumerState<CompanyForwardScreen> {
       }
       return true;
     }).toList();
+
+    // 🎯 Prioritize missing/empty series tickets at the VERY TOP
+    filteredSales.sort((a, b) {
+      final aMissing = a.ticketSeries == '?' || a.ticketSeries.trim().isEmpty || a.ticketSeries.toUpperCase() == 'MISSING' || a.ticketSeries.toUpperCase() == 'UNKNOWN' || a.ticketSeries == '—' || a.ticketSeries == '-' || a.ticketSeries.toLowerCase() == 'none';
+      final bMissing = b.ticketSeries == '?' || b.ticketSeries.trim().isEmpty || b.ticketSeries.toUpperCase() == 'MISSING' || b.ticketSeries.toUpperCase() == 'UNKNOWN' || b.ticketSeries == '—' || b.ticketSeries == '-' || b.ticketSeries.toLowerCase() == 'none';
+
+      if (aMissing && !bMissing) return -1; // A comes first (top)
+      if (!aMissing && bMissing) return 1;  // B comes first (top)
+      return b.saleDate.compareTo(a.saleDate); // Newer tickets first otherwise
+    });
 
     final uniqueSeriesCount = filteredSales.map((e) => e.ticketSeries).toSet().length;
 
@@ -449,18 +695,41 @@ class _CompanyForwardScreenState extends ConsumerState<CompanyForwardScreen> {
                       style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
                     ),
 
+                    // 1. Forward Text Modal (Preview / Filter / Export)
                     ElevatedButton.icon(
-                      onPressed: () => _exportToExcelCsv(filteredSales),
-                      icon: const Icon(Icons.description, color: Colors.white),
-                      label: const Text('EXPORT TO EXCEL (.CSV)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                      style: ElevatedButton.styleFrom(backgroundColor: Colors.green.shade700, padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12)),
+                      onPressed: () => _showForwardTextModal(context, filteredSales),
+                      icon: const Icon(Icons.forward_to_inbox_rounded, color: Colors.white, size: 18),
+                      label: const Text('FORWARD TEXT (SERIES • TKT • TIME)', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF16A34A),
+                        elevation: 2,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
                     ),
 
+                    // 2. Direct 1-Click Copy
                     OutlinedButton.icon(
-                      onPressed: () => _copyForwardText(filteredSales),
-                      icon: const Icon(Icons.copy, size: 16, color: AppColors.primary),
-                      label: const Text('Copy List Text', style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary)),
-                      style: OutlinedButton.styleFrom(side: const BorderSide(color: AppColors.primary), padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12)),
+                      onPressed: () => _copyForwardTextDirect(filteredSales),
+                      icon: const Icon(Icons.copy_rounded, size: 16, color: Colors.greenAccent),
+                      label: const Text('Quick Copy', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.greenAccent)),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.greenAccent),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                    ),
+
+                    // 3. WhatsApp Direct Share
+                    ElevatedButton.icon(
+                      onPressed: () => _shareViaWhatsApp(filteredSales),
+                      icon: const Icon(Icons.chat_bubble_rounded, size: 16, color: Colors.black),
+                      label: const Text('WhatsApp', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.black)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF25D366),
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
                     ),
                   ],
                 ),

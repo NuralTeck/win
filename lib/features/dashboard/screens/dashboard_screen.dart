@@ -1,670 +1,876 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
-import '../../../core/widgets/kpi_card.dart';
 import '../../../core/widgets/glass_card.dart';
-import '../../../core/widgets/status_badge.dart';
-import '../../../core/widgets/app_data_table.dart';
-import '../../../core/widgets/app_button.dart';
-import '../../../core/utils/formatters.dart';
-import '../../../core/constants/app_constants.dart';
-import '../viewmodels/dashboard_viewmodel.dart';
-import '../../bookings/viewmodels/ticket_sales_viewmodel.dart';
-import '../../bookings/widgets/booking_history_dialog.dart';
-import '../../shared/models/draw_model.dart';
+import '../../../core/database/database_service.dart';
+import '../../shared/models/ticket_sale_model.dart';
 
-class DashboardScreen extends ConsumerStatefulWidget {
+// ─── State ───────────────────────────────────────────────────────────────────
+
+class HisabDashboardState {
+  final bool isLoading;
+  final String filter; // 'Today', 'All'
+  final List<TicketSaleModel> sales;
+  final List<Map<String, dynamic>> partyHisab; // per-seller summary
+  final double totalCollection;
+  final double totalInami;
+  final int totalTickets;
+  final int totalParties;
+
+  const HisabDashboardState({
+    this.isLoading = true,
+    this.filter = 'Today',
+    this.sales = const [],
+    this.partyHisab = const [],
+    this.totalCollection = 0,
+    this.totalInami = 0,
+    this.totalTickets = 0,
+    this.totalParties = 0,
+  });
+
+  HisabDashboardState copyWith({
+    bool? isLoading,
+    String? filter,
+    List<TicketSaleModel>? sales,
+    List<Map<String, dynamic>>? partyHisab,
+    double? totalCollection,
+    double? totalInami,
+    int? totalTickets,
+    int? totalParties,
+  }) =>
+      HisabDashboardState(
+        isLoading: isLoading ?? this.isLoading,
+        filter: filter ?? this.filter,
+        sales: sales ?? this.sales,
+        partyHisab: partyHisab ?? this.partyHisab,
+        totalCollection: totalCollection ?? this.totalCollection,
+        totalInami: totalInami ?? this.totalInami,
+        totalTickets: totalTickets ?? this.totalTickets,
+        totalParties: totalParties ?? this.totalParties,
+      );
+}
+
+// ─── ViewModel ───────────────────────────────────────────────────────────────
+
+class HisabDashboardViewModel extends StateNotifier<HisabDashboardState> {
+  HisabDashboardViewModel() : super(const HisabDashboardState()) {
+    load();
+  }
+
+  Future<void> setFilter(String f) async {
+    state = state.copyWith(filter: f);
+    await load();
+  }
+
+  Future<void> load() async {
+    if (!mounted) return;
+    state = state.copyWith(isLoading: true);
+    try {
+      final allSales = await DatabaseService.instance.getTicketSales();
+      final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+
+      final filtered = state.filter == 'Today'
+          ? allSales
+              .where((s) =>
+                  DateFormat('yyyy-MM-dd').format(s.saleDate) == todayStr)
+              .toList()
+          : allSales;
+
+      // Per-party hisab grouped by seller name
+      final Map<String, Map<String, dynamic>> partyMap = {};
+      for (final s in filtered) {
+        final name =
+            s.agentName.isNotEmpty ? s.agentName : s.buyerName.isNotEmpty ? s.buyerName : 'Direct';
+        partyMap.putIfAbsent(
+          name,
+          () => {
+            'name': name,
+            'tickets': 0,
+            'collection': 0.0,
+            'draws': <String>{},
+          },
+        );
+        partyMap[name]!['tickets'] =
+            (partyMap[name]!['tickets'] as int) + s.quantity;
+        partyMap[name]!['collection'] =
+            (partyMap[name]!['collection'] as double) + s.totalAmount;
+        if (s.drawName.isNotEmpty) {
+          (partyMap[name]!['draws'] as Set<String>).add(s.drawName);
+        }
+      }
+
+      // Sort by collection desc
+      final partyList = partyMap.values.map((p) {
+        return {
+          'name': p['name'],
+          'tickets': p['tickets'],
+          'collection': p['collection'],
+          'draws': (p['draws'] as Set<String>).length,
+        };
+      }).toList()
+        ..sort((a, b) =>
+            (b['collection'] as double).compareTo(a['collection'] as double));
+
+      // Results payout from DB
+      double totalInami = 0;
+      try {
+        final results = await DatabaseService.instance.getLotteryResults();
+        totalInami = results.fold<double>(0.0, (sum, r) {
+          final v = double.tryParse(r['totalPayout']?.toString() ?? '0') ?? 0.0;
+          return sum + v;
+        });
+      } catch (_) {}
+
+      if (!mounted) return;
+      state = state.copyWith(
+        isLoading: false,
+        sales: filtered,
+        partyHisab: partyList,
+        totalCollection:
+            filtered.fold<double>(0.0, (s, x) => s + x.totalAmount),
+        totalInami: totalInami,
+        totalTickets: filtered.fold<int>(0, (s, x) => s + x.quantity),
+        totalParties: partyList.length,
+      );
+    } catch (_) {
+      if (!mounted) return;
+      state = state.copyWith(isLoading: false);
+    }
+  }
+}
+
+final hisabDashboardProvider =
+    StateNotifierProvider<HisabDashboardViewModel, HisabDashboardState>(
+        (ref) => HisabDashboardViewModel());
+
+// ─── Screen ──────────────────────────────────────────────────────────────────
+
+class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
   @override
-  ConsumerState<DashboardScreen> createState() => _DashboardScreenState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final state = ref.watch(hisabDashboardProvider);
+    final notifier = ref.read(hisabDashboardProvider.notifier);
+    final fmt = NumberFormat('#,##,##0', 'en_IN');
+    final now = DateTime.now();
 
-class _DashboardScreenState extends ConsumerState<DashboardScreen> {
-  @override
-  void initState() {
-    super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      ref.read(dashboardViewModelProvider.notifier).loadDashboardData();
-    });
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = ref.watch(dashboardViewModelProvider);
-
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // ── Header ────────────────────────────────────────────────────────
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    return RefreshIndicator(
+      onRefresh: notifier.load,
+      color: AppColors.primary,
+      child: SingleChildScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // ── Header ──────────────────────────────────────────────────────
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Hisab Dashboard',
+                        style: AppTypography.headlineLg
+                            .copyWith(fontWeight: FontWeight.w800),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Multiple Party Lottery Hisab — ${DateFormat('EEEE, d MMM yyyy').format(now)}',
+                        style: AppTypography.bodySm
+                            .copyWith(color: AppColors.textSecondary),
+                      ),
+                    ],
+                  ),
+                ),
+                Row(
                   children: [
-                    Text(
-                      'Nagaland Lottery Command Center',
-                      style: AppTypography.headlineLg.copyWith(
-                        fontWeight: FontWeight.w700,
-                      ),
-                      overflow: TextOverflow.ellipsis,
+                    // Refresh
+                    IconButton(
+                      onPressed: notifier.load,
+                      icon: state.isLoading
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                  strokeWidth: 2, color: AppColors.primary))
+                          : const Icon(Icons.refresh_rounded,
+                              color: AppColors.primary),
+                      tooltip: 'Refresh',
                     ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Live draw monitoring, ticket revenue, agent performance — ${_todayLabel()}',
-                      style: AppTypography.bodySm.copyWith(
-                        color: AppColors.textSecondary,
-                      ),
+                    const SizedBox(width: 8),
+                    // Today / All filter
+                    _FilterToggle(
+                      selected: state.filter,
+                      onChanged: notifier.setFilter,
                     ),
                   ],
                 ),
-              ),
-              Row(
+              ],
+            ),
+            const SizedBox(height: 24),
+
+            // ── 4 KPI Cards ─────────────────────────────────────────────────
+            GridView.count(
+              crossAxisCount: 4,
+              crossAxisSpacing: 16,
+              mainAxisSpacing: 16,
+              childAspectRatio: 2.2,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              children: [
+                _KpiCard(
+                  title: 'Total Collection',
+                  value: 'Rs. ${fmt.format(state.totalCollection)}',
+                  subtitle: '${state.filter} Revenue',
+                  icon: Icons.currency_rupee_rounded,
+                  color: const Color(0xFF22C55E),
+                ),
+                _KpiCard(
+                  title: 'Total Tickets',
+                  value: fmt.format(state.totalTickets),
+                  subtitle: '${state.filter} Booked',
+                  icon: Icons.local_activity_rounded,
+                  color: const Color(0xFF6366F1),
+                ),
+                _KpiCard(
+                  title: 'Active Parties',
+                  value: state.totalParties.toString(),
+                  subtitle: 'Sellers / Agents',
+                  icon: Icons.groups_rounded,
+                  color: const Color(0xFFF59E0B),
+                ),
+                _KpiCard(
+                  title: 'Total Inami',
+                  value: 'Rs. ${fmt.format(state.totalInami)}',
+                  subtitle: 'Winning Payout',
+                  icon: Icons.emoji_events_rounded,
+                  color: const Color(0xFFEF4444),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+
+            // ── Party-wise Hisab Table ───────────────────────────────────────
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _LiveIndicator(),
-                  const SizedBox(width: 14),
-                  // Date Filter Selector: Today vs Total / All
-                  Container(
-                    padding: const EdgeInsets.all(3),
-                    decoration: BoxDecoration(
-                      color: AppColors.surfaceContainerLow,
-                      borderRadius: AppDecorations.radiusDefault,
-                      border: Border.all(color: AppColors.border),
-                    ),
-                    child: Row(
-                      children: [
-                        ChoiceChip(
-                          label: const Text('Today', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                          selected: state.dateFilter == 'Today',
-                          selectedColor: AppColors.primary,
-                          labelStyle: TextStyle(color: state.dateFilter == 'Today' ? Colors.white : AppColors.textSecondary),
-                          onSelected: (sel) {
-                            if (sel) {
-                              ref.read(dashboardViewModelProvider.notifier).setDateFilter('Today');
-                            }
-                          },
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withAlpha(30),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(Icons.receipt_long_rounded,
+                                color: AppColors.primary, size: 20),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            'Party-wise Hisab (${state.filter})',
+                            style: AppTypography.titleLg
+                                .copyWith(fontWeight: FontWeight.w700),
+                          ),
+                        ],
+                      ),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 6),
+                        decoration: BoxDecoration(
+                          color: AppColors.primary.withAlpha(20),
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(
+                              color: AppColors.primary.withAlpha(60)),
                         ),
-                        const SizedBox(width: 4),
-                        ChoiceChip(
-                          label: const Text('Total / All', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                          selected: state.dateFilter == 'Total',
-                          selectedColor: AppColors.primary,
-                          labelStyle: TextStyle(color: state.dateFilter == 'Total' ? Colors.white : AppColors.textSecondary),
-                          onSelected: (sel) {
-                            if (sel) {
-                              ref.read(dashboardViewModelProvider.notifier).setDateFilter('Total');
-                            }
-                          },
+                        child: Text(
+                          '${state.partyHisab.length} Parties',
+                          style: AppTypography.labelSm.copyWith(
+                              color: AppColors.primary,
+                              fontWeight: FontWeight.bold),
                         ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 14),
-                  AppSecondaryButton(
-                    label: 'Daily Report',
-                    icon: Icons.file_download_outlined,
-                    onPressed: () {
-                      showDialog(
-                        context: context,
-                        builder: (ctx) => BookingHistoryDialog(initialDate: DateTime.now()),
-                      );
-                    },
-                  ),
-                  const SizedBox(width: 12),
-                  AppPrimaryButton(
-                    label: 'New Ticket Entry',
-                    icon: Icons.local_activity,
-                    onPressed: () => context.go(AppConstants.routeBookings),
-                  ),
+                  const SizedBox(height: 16),
+                  if (state.isLoading)
+                    const Center(
+                        child: Padding(
+                      padding: EdgeInsets.all(32),
+                      child: CircularProgressIndicator(
+                          color: AppColors.primary),
+                    ))
+                  else if (state.partyHisab.isEmpty)
+                    _EmptyParty(filter: state.filter)
+                  else
+                    _PartyHisabTable(
+                        parties: state.partyHisab, fmt: fmt),
                 ],
               ),
-            ],
-          ),
-          const SizedBox(height: 28),
-
-          // ── KPI Cards ─────────────────────────────────────────────────────
-          SizedBox(
-            height: 140,
-            child: Row(
-              children: state.kpis.map((kpi) {
-                return Expanded(
-                  child: Padding(
-                    padding: EdgeInsets.only(
-                      right: state.kpis.last == kpi ? 0 : 16,
-                    ),
-                    child: KpiCard(metric: kpi),
-                  ),
-                );
-              }).toList(),
             ),
-          ),
-          const SizedBox(height: 28),
+            const SizedBox(height: 20),
 
-          // ── Active Draws + Quick Stats side by side ───────────────────────
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-                // Active Draws Table (left, 70%)
-                Expanded(
-                  flex: 70,
-                  child: GlassCard(
-                    padding: const EdgeInsets.all(20),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+            // ── Draw-wise Summary ────────────────────────────────────────────
+            if (state.sales.isNotEmpty) ...[
+              GlassCard(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
                       children: [
-                        Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              'Active Lottery Draws',
-                              style: AppTypography.headlineMd.copyWith(
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: () => context.go(AppConstants.routeOperations),
-                              child: Text(
-                                'View All Draws →',
-                                style: AppTypography.bodySm.copyWith(
-                                  color: AppColors.primary,
-                                  fontWeight: FontWeight.w600,
-                                ),
-                              ),
-                            ),
-                          ],
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF6366F1).withAlpha(30),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(Icons.emoji_events_rounded,
+                              color: Color(0xFF6366F1), size: 20),
                         ),
-                        const SizedBox(height: 12),
-                        AppDataTable(
-                          columns: const [
-                            AppTableColumn(label: 'CODE', width: 110),
-                            AppTableColumn(label: 'DRAW NAME'),
-                            AppTableColumn(label: 'STATUS', width: 110),
-                            AppTableColumn(label: 'SOLD / TOTAL', width: 140),
-                            AppTableColumn(label: '₹/TICKET', width: 90),
-                            AppTableColumn(label: 'PRIZE POOL', width: 120),
-                          ],
-                          rows: state.recentDraws.map((d) {
-                            return [
-                              Text(
-                                d.drawCode,
-                                style: AppTypography.bodySm.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.primary,
-                                ),
-                              ),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    d.drawName,
-                                    style: AppTypography.bodySm.copyWith(
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textPrimary,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                  Text(
-                                    '${d.schemeType} • ${d.district}',
-                                    style: AppTypography.labelSm.copyWith(
-                                      color: AppColors.textSecondary.withAlpha(150),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              StatusBadge.fromStatus(d.status.name),
-                              Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Text(
-                                    '${Formatters.formatNumber(d.ticketsSold)} / ${Formatters.formatNumber(d.totalTickets)}',
-                                    style: AppTypography.bodySm.copyWith(
-                                      fontWeight: FontWeight.w600,
-                                      color: AppColors.textPrimary,
-                                    ),
-                                  ),
-                                  ClipRRect(
-                                    borderRadius: AppDecorations.radiusPill,
-                                    child: LinearProgressIndicator(
-                                      value: d.salesProgress,
-                                      minHeight: 4,
-                                      backgroundColor: AppColors.surfaceContainerHigh,
-                                      valueColor: AlwaysStoppedAnimation<Color>(
-                                        d.salesProgress > 0.8
-                                            ? AppColors.success
-                                            : (d.salesProgress > 0.5
-                                                ? AppColors.primary
-                                                : AppColors.warning),
-                                      ),
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              Text(
-                                '₹${d.ticketPrice.toStringAsFixed(d.ticketPrice % 1 == 0 ? 0 : 2)}',
-                                style: AppTypography.bodySm.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                  color: AppColors.tertiary,
-                                ),
-                              ),
-                              Text(
-                                Formatters.formatIndianCurrency(d.prizePool),
-                                style: AppTypography.bodySm.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.textPrimary,
-                                ),
-                              ),
-                            ];
-                          }).toList(),
+                        const SizedBox(width: 12),
+                        Text(
+                          'Draw-wise Hisab (${state.filter})',
+                          style: AppTypography.titleLg
+                              .copyWith(fontWeight: FontWeight.w700),
                         ),
                       ],
                     ),
-                  ),
+                    const SizedBox(height: 16),
+                    _DrawSummaryGrid(sales: state.sales, fmt: fmt),
+                  ],
                 ),
+              ),
+              const SizedBox(height: 20),
+            ],
 
-                const SizedBox(width: 20),
-
-                // Right Panel – Quick Stats (30%)
-                Expanded(
-                  flex: 30,
-                  child: Column(
+            // ── Recent 10 Entries ────────────────────────────────────────────
+            GlassCard(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
                     children: [
-                      // Prize Pool Summary
-                      GlassCard(
-                        padding: const EdgeInsets.all(20),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Row(
-                              children: [
-                                Container(
-                                  width: 36,
-                                  height: 36,
-                                  decoration: BoxDecoration(
-                                    color: AppColors.tertiary.withAlpha(30),
-                                    borderRadius: AppDecorations.radiusDefault,
-                                  ),
-                                  child: const Icon(
-                                    Icons.emoji_events_outlined,
-                                    color: AppColors.tertiary,
-                                    size: 20,
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    'Total Prize Pools',
-                                    style: AppTypography.labelMd.copyWith(
-                                      color: AppColors.textSecondary,
-                                    ),
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              Formatters.formatIndianCurrency(
-                                state.recentDraws
-                                    .fold(0.0, (s, d) => s + d.prizePool),
-                              ),
-                              style: AppTypography.headlineMd.copyWith(
-                                fontWeight: FontWeight.w700,
-                                color: AppColors.tertiary,
-                              ),
-                            ),
-                            const SizedBox(height: 4),
-                            Text(
-                              'Across ${state.recentDraws.length} draws shown',
-                              style: AppTypography.labelSm.copyWith(
-                                color: AppColors.textSecondary,
-                              ),
-                            ),
-                          ],
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF22C55E).withAlpha(30),
+                          borderRadius: BorderRadius.circular(8),
                         ),
+                        child: const Icon(Icons.history_rounded,
+                            color: Color(0xFF22C55E), size: 20),
                       ),
-                      const SizedBox(height: 16),
+                      const SizedBox(width: 12),
+                      Text(
+                        'Recent Ticket Entries',
+                        style: AppTypography.titleLg
+                            .copyWith(fontWeight: FontWeight.w700),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  _RecentEntriesTable(
+                      sales: state.sales.take(10).toList(), fmt: fmt),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
-                      // Draw Status Breakdown
-                      GlassCard(
-                        padding: const EdgeInsets.all(20),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Draw Status Breakdown',
-                              style: AppTypography.labelMd.copyWith(
-                                color: AppColors.textSecondary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            _StatusRow(
-                              label: 'Open',
-                              color: AppColors.success,
-                              count: state.recentDraws
-                                  .where((d) => d.status == DrawStatus.open)
-                                  .length,
-                            ),
-                            const SizedBox(height: 8),
-                            _StatusRow(
-                              label: 'Closed / Pending',
-                              color: AppColors.warning,
-                              count: state.recentDraws
-                                  .where((d) => d.status == DrawStatus.closed)
-                                  .length,
-                            ),
-                            const SizedBox(height: 8),
-                            _StatusRow(
-                              label: 'Completed',
+// ─── Filter Toggle ───────────────────────────────────────────────────────────
+
+class _FilterToggle extends StatelessWidget {
+  final String selected;
+  final void Function(String) onChanged;
+
+  const _FilterToggle({required this.selected, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(3),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceContainerLow,
+        borderRadius: AppDecorations.radiusDefault,
+        border: Border.all(color: AppColors.border),
+      ),
+      child: Row(
+        children: ['Today', 'All'].map((f) {
+          final isActive = selected == f;
+          return GestureDetector(
+            onTap: () => onChanged(f),
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              decoration: BoxDecoration(
+                color: isActive
+                    ? AppColors.primary
+                    : Colors.transparent,
+                borderRadius: AppDecorations.radiusDefault,
+              ),
+              child: Text(
+                f,
+                style: AppTypography.bodySm.copyWith(
+                  color: isActive ? Colors.black : AppColors.textSecondary,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+}
+
+// ─── KPI Card ────────────────────────────────────────────────────────────────
+
+class _KpiCard extends StatelessWidget {
+  final String title;
+  final String value;
+  final String subtitle;
+  final IconData icon;
+  final Color color;
+
+  const _KpiCard({
+    required this.title,
+    required this.value,
+    required this.subtitle,
+    required this.icon,
+    required this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.all(18),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceContainerHigh,
+        borderRadius: AppDecorations.radiusLg,
+        border: Border.all(color: color.withAlpha(60)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: color.withAlpha(30),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Icon(icon, color: color, size: 22),
+          ),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Text(
+                  title,
+                  style: AppTypography.labelSm.copyWith(
+                      color: AppColors.textSecondary,
+                      fontWeight: FontWeight.w600),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  value,
+                  style: AppTypography.titleLg.copyWith(
+                      color: color, fontWeight: FontWeight.w800),
+                  overflow: TextOverflow.ellipsis,
+                ),
+                Text(
+                  subtitle,
+                  style: AppTypography.labelSm
+                      .copyWith(color: AppColors.textSecondary),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Party Hisab Table ───────────────────────────────────────────────────────
+
+class _PartyHisabTable extends StatelessWidget {
+  final List<Map<String, dynamic>> parties;
+  final NumberFormat fmt;
+
+  const _PartyHisabTable({required this.parties, required this.fmt});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        // Header
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                  flex: 3,
+                  child: Text('Party / Seller',
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  child: Text('Tickets',
+                      textAlign: TextAlign.center,
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  child: Text('Draws',
+                      textAlign: TextAlign.center,
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  flex: 2,
+                  child: Text('Collection (Rs.)',
+                      textAlign: TextAlign.right,
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+            ],
+          ),
+        ),
+        const SizedBox(height: 4),
+        ...parties.asMap().entries.map((e) {
+          final i = e.key;
+          final p = e.value;
+          final isEven = i % 2 == 0;
+          return Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: BoxDecoration(
+              color: isEven
+                  ? Colors.transparent
+                  : AppColors.surfaceContainerLow.withAlpha(80),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 3,
+                  child: Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 14,
+                        backgroundColor:
+                            AppColors.primary.withAlpha(40),
+                        child: Text(
+                          (p['name'] as String)
+                              .substring(0, 1)
+                              .toUpperCase(),
+                          style: TextStyle(
                               color: AppColors.primary,
-                              count: state.recentDraws
-                                  .where((d) => d.status == DrawStatus.completed)
-                                  .length,
-                            ),
-                          ],
+                              fontWeight: FontWeight.bold,
+                              fontSize: 12),
                         ),
                       ),
-                      const SizedBox(height: 16),
-
-                      // Quick Navigation
-                      GlassCard(
-                        padding: const EdgeInsets.all(20),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Quick Access',
-                              style: AppTypography.labelMd.copyWith(
-                                color: AppColors.textSecondary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            _QuickNavTile(
-                              icon: Icons.local_activity_outlined,
-                              label: 'Ticket Sales',
-                              onTap: () => context.go(AppConstants.routeBookings),
-                            ),
-                            const SizedBox(height: 8),
-                            _QuickNavTile(
-                              icon: Icons.bar_chart_outlined,
-                              label: 'Revenue & Payouts',
-                              onTap: () => context.go(AppConstants.routeAnalytics),
-                            ),
-                          ],
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          p['name'] as String,
+                          style: AppTypography.bodyMd.copyWith(
+                              fontWeight: FontWeight.w600),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
                     ],
                   ),
                 ),
-              ],
-            ),
-
-          const SizedBox(height: 28),
-
-          // ── Recent Ticket Sales Ticker ─────────────────────────────────────
-          GlassCard(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Recent Ticket Activity',
-                      style: AppTypography.headlineMd.copyWith(fontWeight: FontWeight.w700),
-                    ),
-                    TextButton(
-                      onPressed: () => context.go(AppConstants.routeBookings),
-                      child: Text(
-                        'View All Sales →',
-                        style: AppTypography.bodySm.copyWith(
-                          color: AppColors.primary,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
+                Expanded(
+                  child: Text(
+                    '${p['tickets']}',
+                    textAlign: TextAlign.center,
+                    style: AppTypography.bodyMd.copyWith(
+                        color: const Color(0xFF6366F1),
+                        fontWeight: FontWeight.bold),
+                  ),
                 ),
-                const SizedBox(height: 12),
-                // Activity rows
-                Builder(builder: (context) {
-                  final allSales = ref.watch(ticketSalesViewModelProvider).sales;
-                  final todayStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
-                  final liveSales = state.dateFilter == 'Today'
-                      ? allSales.where((s) => DateFormat('yyyy-MM-dd').format(s.saleDate) == todayStr).toList()
-                      : allSales;
-
-                  if (liveSales.isEmpty) {
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 20),
-                      child: Center(
-                        child: Text(
-                          'No ticket bookings recorded for ${state.dateFilter}. Click "New Ticket Entry" to start booking live tickets.',
-                          style: const TextStyle(color: AppColors.textSecondary, fontStyle: FontStyle.italic),
-                        ),
-                      ),
-                    );
-                  }
-
-                  final recentList = liveSales.take(5).toList();
-                  return Column(
-                    children: recentList.map((sale) {
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 8),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                        decoration: BoxDecoration(
-                          color: AppColors.surfaceContainerLow,
-                          borderRadius: AppDecorations.radiusDefault,
-                          border: Border.all(color: AppColors.border, width: 1),
-                        ),
-                        child: Row(
-                          children: [
-                            Container(
-                              width: 32,
-                              height: 32,
-                              decoration: BoxDecoration(
-                                color: AppColors.primaryContainer,
-                                borderRadius: AppDecorations.radiusDefault,
-                              ),
-                              child: const Icon(Icons.local_activity, size: 18, color: AppColors.onPrimaryContainer),
-                            ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    '${sale.agentName} (Buyer: ${sale.buyerName})',
-                                    style: AppTypography.bodySm.copyWith(fontWeight: FontWeight.w600),
-                                  ),
-                                  Text(
-                                    '${sale.drawName} • ${sale.ticketSeries} ${sale.ticketNumber} (${sale.receiptNumber})',
-                                    style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Text(
-                              '₹${sale.totalAmount.toStringAsFixed(0)}',
-                              style: AppTypography.bodyMd.copyWith(
-                                fontWeight: FontWeight.w700,
-                                color: AppColors.tertiary,
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                              decoration: BoxDecoration(
-                                color: AppColors.surfaceContainerHigh,
-                                borderRadius: AppDecorations.radiusSm,
-                              ),
-                              child: Text(
-                                sale.paymentMode.name.toUpperCase(),
-                                style: AppTypography.labelSm.copyWith(
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.textSecondary,
-                                  fontSize: 10,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-                    }).toList(),
-                  );
-                }),
+                Expanded(
+                  child: Text(
+                    '${p['draws']}',
+                    textAlign: TextAlign.center,
+                    style: AppTypography.bodyMd
+                        .copyWith(color: AppColors.textSecondary),
+                  ),
+                ),
+                Expanded(
+                  flex: 2,
+                  child: Text(
+                    fmt.format(p['collection']),
+                    textAlign: TextAlign.right,
+                    style: AppTypography.bodyMd.copyWith(
+                        color: const Color(0xFF22C55E),
+                        fontWeight: FontWeight.bold),
+                  ),
+                ),
               ],
             ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  String _todayLabel() {
-    final now = DateTime.now();
-    final months = [
-      'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
-      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
-    ];
-    return '${months[now.month - 1]} ${now.day}, ${now.year}';
-  }
-}
-
-class _LiveIndicator extends StatelessWidget {
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: AppColors.success.withAlpha(20),
-        borderRadius: AppDecorations.radiusPill,
-        border: Border.all(color: AppColors.success.withAlpha(80)),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 7,
-            height: 7,
-            decoration: BoxDecoration(
-              color: AppColors.success,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            'LIVE',
-            style: AppTypography.labelSm.copyWith(
-              color: AppColors.success,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 1.0,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StatusRow extends StatelessWidget {
-  final String label;
-  final Color color;
-  final int count;
-
-  const _StatusRow({required this.label, required this.color, required this.count});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Row(
-          children: [
-            Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-            ),
-            const SizedBox(width: 8),
-            Text(label, style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary)),
-          ],
-        ),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-          decoration: BoxDecoration(
-            color: color.withAlpha(25),
-            borderRadius: AppDecorations.radiusSm,
-          ),
-          child: Text(
-            count.toString(),
-            style: AppTypography.labelSm.copyWith(color: color, fontWeight: FontWeight.w700),
-          ),
-        ),
+          );
+        }),
       ],
     );
   }
 }
 
-class _QuickNavTile extends StatefulWidget {
-  final IconData icon;
-  final String label;
-  final VoidCallback onTap;
+// ─── Draw Summary Grid ───────────────────────────────────────────────────────
 
-  const _QuickNavTile({required this.icon, required this.label, required this.onTap});
+class _DrawSummaryGrid extends StatelessWidget {
+  final List<TicketSaleModel> sales;
+  final NumberFormat fmt;
 
-  @override
-  State<_QuickNavTile> createState() => _QuickNavTileState();
-}
-
-class _QuickNavTileState extends State<_QuickNavTile> {
-  bool _hovered = false;
+  const _DrawSummaryGrid({required this.sales, required this.fmt});
 
   @override
   Widget build(BuildContext context) {
-    return MouseRegion(
-      cursor: SystemMouseCursors.click,
-      onEnter: (_) => setState(() => _hovered = true),
-      onExit: (_) => setState(() => _hovered = false),
-      child: GestureDetector(
-        onTap: widget.onTap,
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    final Map<String, Map<String, dynamic>> drawMap = {};
+    for (final s in sales) {
+      final draw = s.drawName.isNotEmpty ? s.drawName : 'Unknown Draw';
+      drawMap.putIfAbsent(draw, () => {'tickets': 0, 'collection': 0.0});
+      drawMap[draw]!['tickets'] =
+          (drawMap[draw]!['tickets'] as int) + s.quantity;
+      drawMap[draw]!['collection'] =
+          (drawMap[draw]!['collection'] as double) + s.totalAmount;
+    }
+
+    final draws = drawMap.entries.toList()
+      ..sort((a, b) =>
+          (b.value['collection'] as double)
+              .compareTo(a.value['collection'] as double));
+
+    return Wrap(
+      spacing: 12,
+      runSpacing: 12,
+      children: draws.map((e) {
+        return Container(
+          width: 220,
+          padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
-            color: _hovered ? AppColors.hover : Colors.transparent,
-            borderRadius: AppDecorations.radiusDefault,
+            color: AppColors.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(10),
             border: Border.all(
-              color: _hovered ? AppColors.primary.withAlpha(80) : AppColors.border,
-            ),
+                color: const Color(0xFF6366F1).withAlpha(50)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                e.key,
+                style: AppTypography.bodyMd
+                    .copyWith(fontWeight: FontWeight.w700),
+                overflow: TextOverflow.ellipsis,
+              ),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Tickets:',
+                      style: AppTypography.labelSm
+                          .copyWith(color: AppColors.textSecondary)),
+                  Text(
+                    '${e.value['tickets']}',
+                    style: AppTypography.bodyMd.copyWith(
+                        color: const Color(0xFF6366F1),
+                        fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Text('Collection:',
+                      style: AppTypography.labelSm
+                          .copyWith(color: AppColors.textSecondary)),
+                  Text(
+                    'Rs. ${fmt.format(e.value['collection'])}',
+                    style: AppTypography.bodyMd.copyWith(
+                        color: const Color(0xFF22C55E),
+                        fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        );
+      }).toList(),
+    );
+  }
+}
+
+// ─── Recent Entries Table ────────────────────────────────────────────────────
+
+class _RecentEntriesTable extends StatelessWidget {
+  final List<TicketSaleModel> sales;
+  final NumberFormat fmt;
+
+  const _RecentEntriesTable({required this.sales, required this.fmt});
+
+  @override
+  Widget build(BuildContext context) {
+    if (sales.isEmpty) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(24),
+          child: Text('No entries yet.',
+              style: TextStyle(color: AppColors.textSecondary)),
+        ),
+      );
+    }
+
+    return Column(
+      children: [
+        Container(
+          padding:
+              const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.surfaceContainerLow,
+            borderRadius: BorderRadius.circular(8),
           ),
           child: Row(
             children: [
-              Icon(widget.icon, size: 18, color: _hovered ? AppColors.primary : AppColors.textSecondary),
-              const SizedBox(width: 10),
-              Text(
-                widget.label,
-                style: AppTypography.bodySm.copyWith(
-                  color: _hovered ? AppColors.textPrimary : AppColors.textSecondary,
-                  fontWeight: _hovered ? FontWeight.w600 : FontWeight.w500,
-                ),
-              ),
-              const Spacer(),
-              Icon(Icons.chevron_right, size: 16, color: _hovered ? AppColors.primary : AppColors.textSecondary.withAlpha(100)),
+              Expanded(
+                  flex: 2,
+                  child: Text('Party',
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  flex: 2,
+                  child: Text('Draw',
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  child: Text('Ticket No.',
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  child: Text('Qty',
+                      textAlign: TextAlign.center,
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
+              Expanded(
+                  child: Text('Amount',
+                      textAlign: TextAlign.right,
+                      style: AppTypography.labelSm.copyWith(
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.bold))),
             ],
           ),
+        ),
+        const SizedBox(height: 4),
+        ...sales.asMap().entries.map((e) {
+          final i = e.key;
+          final s = e.value;
+          final party = s.agentName.isNotEmpty
+              ? s.agentName
+              : s.buyerName.isNotEmpty
+                  ? s.buyerName
+                  : 'Direct';
+          return Container(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            decoration: BoxDecoration(
+              color: i % 2 == 0
+                  ? Colors.transparent
+                  : AppColors.surfaceContainerLow.withAlpha(80),
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                    flex: 2,
+                    child: Text(party,
+                        style: AppTypography.bodySm
+                            .copyWith(fontWeight: FontWeight.w600),
+                        overflow: TextOverflow.ellipsis)),
+                Expanded(
+                    flex: 2,
+                    child: Text(
+                        s.drawName.isEmpty ? '—' : s.drawName,
+                        style: AppTypography.bodySm.copyWith(
+                            color: AppColors.textSecondary),
+                        overflow: TextOverflow.ellipsis)),
+                Expanded(
+                    child: Text(
+                        '${s.ticketSeries}-${s.ticketNumber}',
+                        style: AppTypography.bodySm.copyWith(
+                            color: const Color(0xFF6366F1),
+                            fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis)),
+                Expanded(
+                    child: Text('${s.quantity}',
+                        textAlign: TextAlign.center,
+                        style: AppTypography.bodySm)),
+                Expanded(
+                    child: Text('Rs. ${fmt.format(s.totalAmount)}',
+                        textAlign: TextAlign.right,
+                        style: AppTypography.bodySm.copyWith(
+                            color: const Color(0xFF22C55E),
+                            fontWeight: FontWeight.bold))),
+              ],
+            ),
+          );
+        }),
+      ],
+    );
+  }
+}
+
+// ─── Empty State ─────────────────────────────────────────────────────────────
+
+class _EmptyParty extends StatelessWidget {
+  final String filter;
+  const _EmptyParty({required this.filter});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 40),
+        child: Column(
+          children: [
+            Icon(Icons.receipt_long_outlined,
+                size: 52, color: AppColors.textSecondary.withAlpha(100)),
+            const SizedBox(height: 16),
+            Text(
+              filter == 'Today'
+                  ? 'Aaj ki koi entry nahi\nTicket Booking tab se entry karo'
+                  : 'Koi bhi hisab record nahi mila',
+              textAlign: TextAlign.center,
+              style: AppTypography.bodyMd
+                  .copyWith(color: AppColors.textSecondary),
+            ),
+          ],
         ),
       ),
     );

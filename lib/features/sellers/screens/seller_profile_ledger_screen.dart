@@ -575,7 +575,7 @@ class _SellerProfileLedgerScreenState extends ConsumerState<SellerProfileLedgerS
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('NAGALAND TICKETCORE', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 20, color: Colors.black)),
+                const Text('PHANTOM MANAGEMENT', style: TextStyle(fontWeight: FontWeight.w900, fontSize: 20, color: Colors.black)),
                 const Text('SELLER DAILY SETTLEMENT BILL STATEMENT', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.black87)),
                 const Divider(color: Colors.black54, thickness: 1.5, height: 20),
 

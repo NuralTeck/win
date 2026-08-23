@@ -1,15 +1,17 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import '../core/widgets/side_nav_bar.dart';
 import '../core/widgets/top_app_bar.dart';
-import '../core/widgets/bottom_status_bar.dart';
-import '../core/config/system_control_service.dart';
+import '../core/widgets/offline_alert_overlay.dart';
+import '../core/services/internet_connectivity_service.dart';
+import '../core/database/database_service.dart';
 import '../core/theme/app_colors.dart';
-import '../core/theme/app_typography.dart';
-import '../core/theme/app_decorations.dart';
 import '../features/bookings/screens/ticket_sales_screen.dart';
+import '../features/bookings/widgets/ai_photo_review_dialog.dart';
+import '../features/bookings/services/gemini_scanner_service.dart';
 import '../features/operations/widgets/floating_engine_console.dart';
 
 class MainLayoutScreen extends ConsumerStatefulWidget {
@@ -25,35 +27,106 @@ class MainLayoutScreen extends ConsumerStatefulWidget {
 }
 
 class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
-  Timer? _lockCheckTimer;
-  bool _isLocked = false;
+  Timer? _pendingPhotoGlobalTimer;
+  bool _isReviewModalOpen = false;
 
   @override
   void initState() {
     super.initState();
-    _checkLockStatus();
-    _lockCheckTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      _checkLockStatus();
+    // 🌐 Real-time Internet Connectivity Watcher
+    InternetConnectivityService.instance.initialize();
+    // 📸 Global WhatsApp Photo Watcher
+    _checkPendingPhotosGlobal();
+    _pendingPhotoGlobalTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _checkPendingPhotosGlobal();
     });
   }
 
   @override
   void dispose() {
-    _lockCheckTimer?.cancel();
+    _pendingPhotoGlobalTimer?.cancel();
     super.dispose();
   }
 
-  Future<void> _checkLockStatus() async {
-    final config = await SystemControlService.instance.loadConfig();
-    if (mounted && _isLocked != config.isSystemLocked) {
-      setState(() {
-        _isLocked = config.isSystemLocked;
-      });
+  Future<void> _checkPendingPhotosGlobal() async {
+    if (_isReviewModalOpen || !mounted) return;
+    try {
+      final photos = await DatabaseService.instance.getPendingPhotoBookings();
+      if (photos.isEmpty || _isReviewModalOpen || !mounted) return;
+
+      final photo = photos.first;
+      final String photoId = photo['id'] ?? '';
+      final String imageBase64 = photo['imageBase64'] ?? '';
+      final String buyerName = photo['buyerName'] ?? 'Walk-in Customer';
+      final String drawShift = photo['drawShift'] ?? 'Dear 1 PM';
+      final String drawDateStr = photo['drawDate'] ?? '';
+      final String rawJson = photo['parsedTicketsJson'] ?? '[]';
+
+      if (imageBase64.isEmpty) return;
+
+      final imageBytes = base64Decode(imageBase64);
+      final List<GeminiScannedItem> items = [];
+
+      try {
+        final List dynamicList = jsonDecode(rawJson);
+        for (final d in dynamicList) {
+          final tkt = d['ticketNo']?.toString() ?? '';
+          final ser = d['series']?.toString() ?? '12';
+          final amt = (d['amount'] as num?)?.toDouble() ?? 0.0;
+          final qty = (d['quantity'] as num?)?.toInt() ?? 1;
+          items.add(GeminiScannedItem(
+            series: ser,
+            ticketNo: tkt,
+            amount: amt,
+            quantity: qty,
+            sellerName: buyerName,
+          ));
+        }
+      } catch (jsonErr) {
+        debugPrint('JSON parse error for pending photo: $jsonErr');
+      }
+
+      DateTime activeDate = DateTime.now();
+      if (drawDateStr.isNotEmpty) {
+        try {
+          activeDate = DateTime.parse(drawDateStr);
+        } catch (_) {}
+      }
+
+      _isReviewModalOpen = true;
+
+      final saved = await showDialog<bool>(
+        context: context,
+        useRootNavigator: true,
+        barrierDismissible: false,
+        builder: (ctx) => AiPhotoReviewDialog(
+          imageBytes: imageBytes,
+          initialItems: items,
+          activeShift: drawShift,
+          activeDate: activeDate,
+          defaultSeller: buyerName,
+          pendingPhotoId: photoId,
+        ),
+      );
+
+      _isReviewModalOpen = false;
+
+      if (saved == true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ WhatsApp Photo confirmed & tickets booked for $buyerName!'),
+            backgroundColor: AppColors.success,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+    } catch (e) {
+      _isReviewModalOpen = false;
+      debugPrint('Error in global pending photo check: $e');
     }
   }
 
   void _openNewTicketDialog(BuildContext context) {
-    if (_isLocked) return;
     showDialog(
       context: context,
       barrierColor: Colors.black.withAlpha(153),
@@ -61,63 +134,7 @@ class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
     );
   }
 
-  void _showOwnerUnlockPinDialog() {
-    final pinCtrl = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surfaceContainerHigh,
-        shape: RoundedRectangleBorder(borderRadius: AppDecorations.radiusLg),
-        title: Row(
-          children: [
-            const Icon(Icons.key, color: Colors.amberAccent),
-            const SizedBox(width: 10),
-            Text('Owner Emergency Unlock', style: AppTypography.titleLg),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('Enter 4-Digit Owner Passcode / PIN to unlock system operations:', style: TextStyle(fontSize: 13, color: AppColors.textSecondary)),
-            const SizedBox(height: 14),
-            TextField(
-              controller: pinCtrl,
-              obscureText: true,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.amberAccent),
-              decoration: const InputDecoration(labelText: 'Owner Master PIN', prefixIcon: Icon(Icons.security, color: Colors.amberAccent)),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton.icon(
-            onPressed: () async {
-              if (pinCtrl.text.trim() == '1234' || pinCtrl.text.trim() == 'admin123' || pinCtrl.text.trim() == '8842') {
-                await SystemControlService.instance.updateMasterLock(false);
-                if (mounted) {
-                  setState(() => _isLocked = false);
-                }
-                if (ctx.mounted) {
-                  Navigator.of(ctx).pop();
-                }
-              } else {
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Incorrect Master PIN! (Default: 1234)'), backgroundColor: AppColors.error),
-                  );
-                }
-              }
-            },
-            icon: const Icon(Icons.lock_open),
-            label: const Text('UNLOCK SYSTEM NOW'),
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
-          ),
-        ],
-      ),
-    );
-  }
+
 
   @override
   Widget build(BuildContext context) {
@@ -140,7 +157,7 @@ class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
                 child: Column(
                   children: [
                     const TopAppBar(
-                      title: 'NagaLand TicketCore — Lottery Management Platform',
+                      title: 'PhantomManagement — Hisab Management Platform',
                     ),
 
                     Expanded(
@@ -149,8 +166,6 @@ class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
                         child: widget.navigationShell,
                       ),
                     ),
-
-                    const BottomStatusBar(),
                   ],
                 ),
               ),
@@ -160,71 +175,8 @@ class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
           // FLOATING DRAGGABLE WHATSAPP ENGINE CONSOLE OVERLAY
           const FloatingEngineConsole(),
 
-          // FULL-SCREEN SYSTEM MASTER LOCK OVERLAY
-          if (_isLocked)
-            Positioned.fill(
-              child: Container(
-                color: Colors.black.withAlpha(235),
-                child: Center(
-                  child: Container(
-                    constraints: const BoxConstraints(maxWidth: 540),
-                    padding: const EdgeInsets.all(32),
-                    decoration: BoxDecoration(
-                      color: AppColors.surface,
-                      borderRadius: AppDecorations.radiusLg,
-                      border: Border.all(color: Colors.redAccent, width: 2),
-                    ),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(20),
-                          decoration: BoxDecoration(
-                            color: Colors.red.withAlpha(40),
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.redAccent, width: 2),
-                          ),
-                          child: const Icon(Icons.lock, size: 64, color: Colors.redAccent),
-                        ),
-                        const SizedBox(height: 20),
-                        Text(
-                          '🚨 SYSTEM MASTER LOCKED',
-                          style: AppTypography.headlineLg.copyWith(color: Colors.redAccent, fontWeight: FontWeight.w900),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 10),
-                        const Text(
-                          'Operations, ticket bookings, and sales entries have been remotely locked by the System Owner via Admin App.',
-                          style: TextStyle(color: AppColors.textSecondary, fontSize: 14, height: 1.5),
-                          textAlign: TextAlign.center,
-                        ),
-                        const SizedBox(height: 28),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: OutlinedButton.icon(
-                                onPressed: _checkLockStatus,
-                                icon: const Icon(Icons.refresh, color: Colors.white),
-                                label: const Text('Refresh Status', style: TextStyle(color: Colors.white)),
-                              ),
-                            ),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: ElevatedButton.icon(
-                                onPressed: _showOwnerUnlockPinDialog,
-                                icon: const Icon(Icons.key, color: Colors.white),
-                                label: const Text('OWNER UNLOCK PIN', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
-                                style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+          // REAL-TIME NO INTERNET CONNECTION POPUP & OVERLAY
+          const OfflineAlertOverlay(),
         ],
       ),
     );

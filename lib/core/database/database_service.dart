@@ -142,6 +142,73 @@ class DatabaseService {
         collected_at TEXT NOT NULL
       )
     ''');
+
+    // System Users (Login & Signup) Table
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS app_users (
+        id TEXT PRIMARY KEY,
+        username TEXT NOT NULL UNIQUE,
+        fullName TEXT NOT NULL,
+        password TEXT NOT NULL,
+        phone TEXT,
+        role TEXT NOT NULL,
+        securityPin TEXT,
+        isActive INTEGER NOT NULL,
+        createdAt TEXT NOT NULL
+      )
+    ''');
+
+    // AI Configuration (Gemini Vision OCR API Key) Table
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS ai_settings (
+        key TEXT PRIMARY KEY,
+        value TEXT,
+        updatedAt TEXT
+      )
+    ''');
+
+    // Pending Photo / Parcha Bookings Queue Table (for Human-in-the-Loop Review)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS pending_photo_bookings (
+        id TEXT PRIMARY KEY,
+        senderPhone TEXT NOT NULL,
+        buyerName TEXT NOT NULL,
+        drawShift TEXT NOT NULL,
+        drawDate TEXT NOT NULL,
+        imageBase64 TEXT,
+        extractedText TEXT NOT NULL,
+        parsedTicketsJson TEXT NOT NULL,
+        status TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      )
+    ''');
+
+    // Dynamic Learned Regex Patterns Table (100% Offline SQLite)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS learned_patterns (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        pattern_name TEXT NOT NULL,
+        regex_pattern TEXT NOT NULL,
+        series_group_index INTEGER DEFAULT 1,
+        ticket_group_index INTEGER DEFAULT 2,
+        qty_group_index INTEGER DEFAULT 3,
+        sample_text TEXT,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    // Unparsed Messages Table (100% Offline SQLite)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS unparsed_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL,
+        sender_name TEXT,
+        raw_message TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        received_at TEXT NOT NULL,
+        resolved_at TEXT
+      )
+    ''');
   }
 
   Future<void> _seedInitialData(Database db) async {
@@ -237,6 +304,21 @@ class DatabaseService {
     return maps.map((m) => _ticketSaleFromMap(m)).toList();
   }
 
+  Future<List<TicketSaleModel>> getTicketSalesByDateRange(DateTime startDate, DateTime endDate) async {
+    final db = await database;
+    final startStr =
+        "${startDate.year.toString().padLeft(4, '0')}-${startDate.month.toString().padLeft(2, '0')}-${startDate.day.toString().padLeft(2, '0')}";
+    final endStr =
+        "${endDate.year.toString().padLeft(4, '0')}-${endDate.month.toString().padLeft(2, '0')}-${endDate.day.toString().padLeft(2, '0')}";
+    final List<Map<String, dynamic>> maps = await db.query(
+      'ticket_sales',
+      where: "(substr(drawDate, 1, 10) BETWEEN ? AND ?) OR (substr(saleDate, 1, 10) BETWEEN ? AND ?)",
+      whereArgs: [startStr, endStr, startStr, endStr],
+      orderBy: 'saleDate DESC',
+    );
+    return maps.map((m) => _ticketSaleFromMap(m)).toList();
+  }
+
   Future<bool> isDuplicateTicket({
     required String drawName,
     required String drawDateStr,
@@ -269,6 +351,35 @@ class DatabaseService {
     }
   }
 
+  Future<void> _autoRegisterSellerFromTicket(TicketSaleModel sale) async {
+    final name = (sale.agentName.trim().isNotEmpty ? sale.agentName : sale.buyerName).trim();
+    if (name.isEmpty || name.toLowerCase() == 'walk-in customer' || name.toLowerCase() == 'default') return;
+
+    try {
+      final db = await database;
+      final existing = await db.query(
+        'seller_customers',
+        where: 'LOWER(name) = ?',
+        whereArgs: [name.toLowerCase()],
+      );
+
+      if (existing.isEmpty) {
+        final cleanKey = name.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toUpperCase();
+        final accessKey = cleanKey.isNotEmpty ? (cleanKey.length > 8 ? cleanKey.substring(0, 8) : cleanKey) : 'SEL${DateTime.now().millisecondsSinceEpoch % 10000}';
+        final autoSeller = SellerCustomerModel(
+          id: 'sc_${name.hashCode.abs()}',
+          name: name,
+          accessKey: accessKey,
+          password: '1234',
+          phone: sale.buyerPhone,
+          isActive: true,
+          createdAt: sale.saleDate,
+        );
+        await insertSellerCustomer(autoSeller);
+      }
+    } catch (_) {}
+  }
+
   Future<TicketSaleModel> insertTicketSale(
     TicketSaleModel sale, {
     bool isSilent = false,
@@ -279,12 +390,99 @@ class DatabaseService {
       _ticketSaleToMap(sale),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    // Auto-save Customer/Seller into Seller Master
+    _autoRegisterSellerFromTicket(sale);
+
     if (!isSilent) {
       debugPrint(
         '✅ [DATABASE LOG] Saved Ticket Booking to opscore_pro.db -> Receipt: ${sale.receiptNumber}, Buyer: ${sale.buyerName}, Amount: ₹${sale.totalAmount}',
       );
     }
     return sale;
+  }
+
+  Future<void> insertTicketSalesBulk(List<TicketSaleModel> sales) async {
+    if (sales.isEmpty) return;
+    final db = await database;
+    final batch = db.batch();
+    for (final sale in sales) {
+      batch.insert(
+        'ticket_sales',
+        _ticketSaleToMap(sale),
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+    }
+    await batch.commit(noResult: true);
+    debugPrint('⚡ [SQLITE BATCH] Bulk inserted ${sales.length} tickets in single transaction.');
+
+    // Auto-register distinct sellers from batch
+    for (final sale in sales) {
+      _autoRegisterSellerFromTicket(sale);
+    }
+  }
+
+  Future<void> updateTicketSalesSeriesBulk({
+    required List<String> ids,
+    required String newSeries,
+    double? newPricePerTicket,
+  }) async {
+    if (ids.isEmpty) return;
+    final db = await database;
+    final batch = db.batch();
+
+    for (final id in ids) {
+      final existingRows = await db.query('ticket_sales', where: 'id = ?', whereArgs: [id]);
+      if (existingRows.isNotEmpty) {
+        final row = existingRows.first;
+        final rawTkt = row['ticketNumber']?.toString() ?? '';
+        final parts = rawTkt.trim().split(' ');
+        final tNo = parts.length > 1 ? parts.last : rawTkt;
+        final updatedTktNumber = '$newSeries $tNo';
+
+        final Map<String, dynamic> updateValues = {
+          'ticketSeries': newSeries,
+          'ticketNumber': updatedTktNumber,
+        };
+
+        if (newPricePerTicket != null && newPricePerTicket > 0) {
+          final qty = (row['quantity'] as num?)?.toInt() ?? 1;
+          updateValues['pricePerTicket'] = newPricePerTicket;
+          updateValues['totalAmount'] = newPricePerTicket * qty;
+          updateValues['commissionAmount'] = (newPricePerTicket * qty) * 0.05;
+        }
+
+        batch.update('ticket_sales', updateValues, where: 'id = ?', whereArgs: [id]);
+      }
+    }
+
+    await batch.commit(noResult: true);
+    debugPrint('⚡ [SQLITE BATCH] Bulk updated series to "$newSeries" for ${ids.length} tickets.');
+  }
+
+  Future<void> updateTicketSaleFields({
+    required String id,
+    required String oldSeries,
+    required String oldTicketNo,
+    required String newSeries,
+    required String newTicketNo,
+    required String newSellerName,
+    required double newAmount,
+  }) async {
+    final db = await database;
+    await db.update(
+      'ticket_sales',
+      {
+        'ticketSeries': newSeries,
+        'ticketNumber': '$newSeries $newTicketNo',
+        'buyerName': newSellerName,
+        'agentName': newSellerName,
+        'pricePerTicket': newAmount,
+        'totalAmount': newAmount,
+      },
+      where: 'id = ? OR (ticketSeries = ? AND (ticketNumber = ? OR ticketNumber = ?))',
+      whereArgs: [id, oldSeries, oldTicketNo, '$oldSeries $oldTicketNo'],
+    );
+    debugPrint('✏️ [SQLITE LOG] Updated ticket $oldSeries-$oldTicketNo to $newSeries-$newTicketNo ($newSellerName, ₹$newAmount)');
   }
 
   Future<void> updateTicketSale(TicketSaleModel sale) async {
@@ -327,7 +525,51 @@ class DatabaseService {
       'seller_customers',
       orderBy: 'createdAt DESC',
     );
-    return maps.map((m) => _sellerCustomerFromMap(m)).toList();
+    final List<SellerCustomerModel> sellers = maps.map((m) => _sellerCustomerFromMap(m)).toList();
+    final Set<String> existingNames = sellers.map((s) => s.name.trim().toLowerCase()).toSet();
+
+    // Auto-discover any unique customers/sellers from ticket bookings that aren't yet in seller_customers
+    try {
+      final List<Map<String, dynamic>> bookingNames = await db.rawQuery('''
+        SELECT DISTINCT 
+          CASE WHEN TRIM(agentName) != '' THEN TRIM(agentName) ELSE TRIM(buyerName) END as sName,
+          buyerPhone as sPhone,
+          MIN(saleDate) as firstSale
+        FROM ticket_sales 
+        WHERE TRIM(buyerName) != '' OR TRIM(agentName) != ''
+        GROUP BY sName
+      ''');
+
+      for (final row in bookingNames) {
+        final rawName = (row['sName']?.toString() ?? '').trim();
+        if (rawName.isEmpty || rawName.toLowerCase() == 'walk-in customer' || rawName.toLowerCase() == 'default' || rawName.toLowerCase() == 'general') {
+          continue;
+        }
+
+        if (!existingNames.contains(rawName.toLowerCase())) {
+          final cleanKey = rawName.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toUpperCase();
+          final accessKey = cleanKey.isNotEmpty ? (cleanKey.length > 8 ? cleanKey.substring(0, 8) : cleanKey) : 'SEL${DateTime.now().millisecondsSinceEpoch % 10000}';
+          final phone = row['sPhone']?.toString() ?? '';
+          final autoSeller = SellerCustomerModel(
+            id: 'sc_${rawName.hashCode.abs()}',
+            name: rawName,
+            accessKey: accessKey,
+            password: '1234',
+            phone: phone,
+            isActive: true,
+            createdAt: DateTime.tryParse(row['firstSale']?.toString() ?? '') ?? DateTime.now(),
+          );
+
+          await insertSellerCustomer(autoSeller);
+          sellers.add(autoSeller);
+          existingNames.add(rawName.toLowerCase());
+        }
+      }
+    } catch (e) {
+      debugPrint('Error auto-syncing sellers from ticket bookings: $e');
+    }
+
+    return sellers;
   }
 
   Future<SellerCustomerModel> insertSellerCustomer(
@@ -461,12 +703,10 @@ class DatabaseService {
 
   Future<List<Map<String, dynamic>>> getLotteryResults() async {
     final db = await database;
-    // Query distinct results grouped by drawName and drawDateStr to prevent duplicate display
-    final List<Map<String, dynamic>> results = await db.rawQuery('''
-      SELECT * FROM lottery_results 
-      GROUP BY drawName, drawDateStr 
-      ORDER BY publishedAt DESC
-    ''');
+    final List<Map<String, dynamic>> results = await db.query(
+      'lottery_results',
+      orderBy: 'publishedAt DESC',
+    );
     return results;
   }
 
@@ -643,5 +883,233 @@ class DatabaseService {
     final db = await database;
     await db.delete('ticket_sales');
     debugPrint('🧹 [SQLITE LOG] Local ticket_sales table wiped clean!');
+  }
+
+  Future<void> wipeAllLocalDataOnLogout() async {
+    final db = await database;
+    await db.delete('ticket_sales');
+    await db.delete('seller_customers');
+    await db.delete('lottery_results');
+    await db.delete('collectors');
+    await db.delete('collector_payments');
+    try {
+      await db.delete('unsold_tickets');
+    } catch (_) {}
+    try {
+      await db.delete('pending_photo_bookings');
+    } catch (_) {}
+    debugPrint('🧹 [SQLITE LOG] All local tables wiped completely on logout!');
+  }
+
+  // ─── AUTHENTICATION & USER MANAGEMENT CRUD ────────────────────────────────
+
+  Future<Map<String, dynamic>?> authenticateUser(
+    String username,
+    String password,
+  ) async {
+    final cleanUser = username.trim().toLowerCase();
+    final cleanPass = password.trim();
+
+    // Default emergency owner/admin accounts
+    if ((cleanUser == 'admin' && (cleanPass == 'admin123' || cleanPass == 'admin')) ||
+        (cleanUser == 'owner' && (cleanPass == 'owner123' || cleanPass == 'admin123'))) {
+      return {
+        'id': 'admin_root',
+        'username': cleanUser,
+        'fullName': cleanUser == 'owner' ? 'Business Owner' : 'System Administrator',
+        'role': 'Administrator',
+        'phone': '9876543210',
+        'isActive': 1,
+      };
+    }
+
+    try {
+      final db = await database;
+      final results = await db.query(
+        'app_users',
+        where: 'LOWER(username) = ? AND password = ? AND isActive = 1',
+        whereArgs: [cleanUser, cleanPass],
+        limit: 1,
+      );
+
+      if (results.isNotEmpty) {
+        return results.first;
+      }
+    } catch (e) {
+      debugPrint('⚠️ [AUTH DB ERROR] $e');
+    }
+    return null;
+  }
+
+  Future<bool> checkUsernameExists(String username) async {
+    final cleanUser = username.trim().toLowerCase();
+    if (cleanUser == 'admin' || cleanUser == 'owner') return true;
+
+    try {
+      final db = await database;
+      final results = await db.query(
+        'app_users',
+        where: 'LOWER(username) = ?',
+        whereArgs: [cleanUser],
+        limit: 1,
+      );
+      return results.isNotEmpty;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<bool> registerAppUser(Map<String, dynamic> user) async {
+    try {
+      final db = await database;
+      await db.insert(
+        'app_users',
+        user,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      debugPrint('✅ [AUTH DB] Registered new user: ${user['username']} (${user['role']})');
+      return true;
+    } catch (e) {
+      debugPrint('❌ [AUTH DB REGISTER ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<List<Map<String, dynamic>>> getAllAppUsers() async {
+    try {
+      final db = await database;
+      return await db.query('app_users', orderBy: 'createdAt DESC');
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<bool> resetPasswordWithPin({
+    required String username,
+    required String pin,
+    required String newPassword,
+  }) async {
+    final cleanUser = username.trim().toLowerCase();
+    if (pin.trim() == '1234' && (cleanUser == 'admin' || cleanUser == 'owner')) {
+      return true;
+    }
+
+    try {
+      final db = await database;
+      final rowsUpdated = await db.update(
+        'app_users',
+        {'password': newPassword.trim()},
+        where: 'LOWER(username) = ? AND securityPin = ?',
+        whereArgs: [cleanUser, pin.trim()],
+      );
+      return rowsUpdated > 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // ─── AI CONFIGURATION (GEMINI VISION OCR) ───────────────────────────────────
+
+  Future<String?> getGeminiApiKey() async {
+    try {
+      final db = await database;
+      final List<Map<String, dynamic>> res = await db.query(
+        'ai_settings',
+        where: 'key = ?',
+        whereArgs: ['gemini_api_key'],
+        limit: 1,
+      );
+      if (res.isNotEmpty && res.first['value'] != null) {
+        return res.first['value'].toString().trim();
+      }
+    } catch (e) {
+      debugPrint('⚠️ [AI CONFIG DB ERROR] $e');
+    }
+    return null;
+  }
+
+  Future<bool> saveGeminiApiKey(String apiKey) async {
+    try {
+      final db = await database;
+      await db.insert(
+        'ai_settings',
+        {
+          'key': 'gemini_api_key',
+          'value': apiKey.trim(),
+          'updatedAt': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      debugPrint('🔑 [AI CONFIG DB] Saved Gemini API Key successfully to opscore_pro.db');
+      return true;
+    } catch (e) {
+      debugPrint('❌ [AI CONFIG DB SAVE ERROR] $e');
+      return false;
+    }
+  }
+
+  // ─── PENDING PHOTO BOOKINGS QUEUE (HUMAN-IN-THE-LOOP) ──────────────────────
+
+  Future<List<Map<String, dynamic>>> getPendingPhotoBookings() async {
+    try {
+      final db = await database;
+      return await db.query(
+        'pending_photo_bookings',
+        where: 'status = ?',
+        whereArgs: ['pending'],
+        orderBy: 'createdAt DESC',
+      );
+    } catch (e) {
+      debugPrint('⚠️ [PENDING PHOTOS DB ERROR] $e');
+      return [];
+    }
+  }
+
+  Future<bool> updatePendingPhotoStatus(String id, String status) async {
+    try {
+      final db = await database;
+      final count = await db.update(
+        'pending_photo_bookings',
+        {'status': status},
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      return count > 0;
+    } catch (e) {
+      debugPrint('❌ [PENDING PHOTO UPDATE ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> deletePendingPhotoBooking(String id) async {
+    try {
+      final db = await database;
+      final count = await db.delete(
+        'pending_photo_bookings',
+        where: 'id = ?',
+        whereArgs: [id],
+      );
+      return count > 0;
+    } catch (e) {
+      debugPrint('❌ [PENDING PHOTO DELETE ERROR] $e');
+      return false;
+    }
+  }
+
+  /// 🧹 MASTER WIPE: Clears all operational ticket bookings, pending photos, lottery results, and payments
+  Future<void> wipeAllOperationalData() async {
+    try {
+      final db = await database;
+      await db.transaction((txn) async {
+        await txn.delete('ticket_sales');
+        await txn.delete('pending_photo_bookings');
+        await txn.delete('lottery_results');
+        await txn.delete('collector_payments');
+      });
+      debugPrint('✅ [DATABASE SERVICE] Master Wipe Completed! All operational data cleared.');
+    } catch (e) {
+      debugPrint('❌ [DATABASE SERVICE WIPE ERROR] $e');
+      rethrow;
+    }
   }
 }

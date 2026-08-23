@@ -7,7 +7,9 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/constants/app_constants.dart';
+import '../viewmodels/auth_viewmodel.dart';
 
+// Retain legacy provider for backwards compatibility
 final isAdminAuthenticatedProvider = StateProvider<bool>((ref) => false);
 
 class AdminLoginScreen extends ConsumerStatefulWidget {
@@ -18,306 +20,409 @@ class AdminLoginScreen extends ConsumerStatefulWidget {
 }
 
 class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
-  final _userCtrl = TextEditingController(text: 'admin');
-  final _passCtrl = TextEditingController(text: 'admin123');
-  bool _obscurePassword = true;
+  final _loginEmailCtrl = TextEditingController(text: 'admin@opscore.com');
+  final _loginPassCtrl = TextEditingController(text: 'admin123');
+  bool _loginObscure = true;
+
   bool _isLoading = false;
   String? _errorMessage;
+  String? _successMessage;
 
   @override
   void dispose() {
-    _userCtrl.dispose();
-    _passCtrl.dispose();
+    _loginEmailCtrl.dispose();
+    _loginPassCtrl.dispose();
     super.dispose();
   }
 
-  void _handleAdminLogin() {
-    final user = _userCtrl.text.trim().toLowerCase();
-    final pass = _passCtrl.text.trim();
+  Future<void> _handleSignIn() async {
+    final email = _loginEmailCtrl.text.trim();
+    final pass = _loginPassCtrl.text.trim();
 
-    if (user.isEmpty || pass.isEmpty) {
-      setState(() => _errorMessage = 'Please enter both Admin Username ID and Password.');
+    if (email.isEmpty || pass.isEmpty) {
+      setState(() => _errorMessage = 'Please enter both Email and Password.');
       return;
     }
 
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _successMessage = null;
     });
 
-    Future.delayed(const Duration(milliseconds: 400), () {
-      if (!mounted) return;
+    final res = await ref.read(authControllerProvider).login(
+      emailOrUsername: email,
+      password: pass,
+    );
 
-      // Allow admin / admin123 OR owner / owner123 OR admin / admin
-      final isValid = (user == 'admin' && (pass == 'admin123' || pass == 'admin')) ||
-          (user == 'owner' && (pass == 'owner123' || pass == 'admin123'));
+    if (!mounted) return;
+    setState(() => _isLoading = false);
 
-      if (isValid) {
-        ref.read(isAdminAuthenticatedProvider.notifier).state = true;
+    if (res['success'] == true) {
+      ref.read(isAdminAuthenticatedProvider.notifier).state = true;
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                const Icon(Icons.verified, color: Colors.greenAccent),
-                const SizedBox(width: 10),
-                Text('Admin Access Granted! Welcome to $user session.', style: const TextStyle(fontWeight: FontWeight.bold)),
-              ],
-            ),
-            backgroundColor: AppColors.surfaceContainerHigh,
-            duration: const Duration(seconds: 2),
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              const Icon(Icons.verified_user_rounded, color: Colors.greenAccent),
+              const SizedBox(width: 10),
+              Text(
+                'Welcome, ${res['user']?.fullName ?? email}! Cloud Access Granted.',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ],
           ),
-        );
+          backgroundColor: AppColors.surfaceContainerHigh,
+          duration: const Duration(seconds: 2),
+        ),
+      );
 
-        context.go(AppConstants.routeDashboard);
-      } else {
-        setState(() {
-          _isLoading = false;
-          _errorMessage = 'Invalid Admin ID or Password!\nDefault Credentials: User ID = admin | Password = admin123';
-        });
-      }
-    });
+      context.go(AppConstants.routeDashboard);
+    } else {
+      setState(() {
+        _errorMessage = res['message']?.toString() ?? 'Invalid cloud credentials.';
+      });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: AppColors.bgPrimary,
+      backgroundColor: const Color(0xFF0B0F17),
       body: Stack(
         children: [
-          // Background Gradient Orbs
+          // 1. Ambient Background Gradient Orbs
           Positioned(
-            top: -100,
+            top: -120,
             right: -100,
             child: Container(
-              width: 400,
-              height: 400,
+              width: 500,
+              height: 500,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: AppColors.primary.withAlpha(25),
+                gradient: RadialGradient(
+                  colors: [
+                    const Color(0xFF0072FF).withValues(alpha: 0.20),
+                    Colors.transparent,
+                  ],
+                ),
               ),
             ),
           ),
           Positioned(
-            bottom: -100,
+            bottom: -120,
             left: -100,
             child: Container(
-              width: 400,
-              height: 400,
+              width: 500,
+              height: 500,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: Colors.purple.withAlpha(20),
+                gradient: RadialGradient(
+                  colors: [
+                    const Color(0xFF43E97B).withValues(alpha: 0.15),
+                    Colors.transparent,
+                  ],
+                ),
               ),
             ),
           ),
 
+          // 2. Central Login Card
           Center(
             child: SingleChildScrollView(
-              padding: const EdgeInsets.all(32),
+              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
               child: SizedBox(
-                width: 460,
+                width: 480,
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // App Logo Header
+                    // Brand Logo & Header
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Container(
+                          width: 58,
+                          height: 58,
+                          padding: const EdgeInsets.all(3),
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(18),
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF0072FF), Color(0xFF43E97B)],
+                            ),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF0072FF).withValues(alpha: 0.4),
+                                blurRadius: 20,
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(15),
+                            child: Image.asset(
+                              'assets/images/pm_royal_logo.png',
+                              fit: BoxFit.cover,
+                              errorBuilder: (ctx, err, stack) => const Icon(
+                                Icons.shield_rounded,
+                                color: Colors.cyanAccent,
+                                size: 30,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              AppConstants.appName.toUpperCase(),
+                              style: AppTypography.headlineLg.copyWith(
+                                fontWeight: FontWeight.w900,
+                                letterSpacing: 1.5,
+                                fontSize: 24,
+                              ),
+                            ),
+                            Text(
+                              'SUPABASE CLOUD AUTHENTICATION',
+                              style: AppTypography.labelSm.copyWith(
+                                color: const Color(0xFF43E97B),
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 1.2,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 28),
+
+                    // Security Protection Notice Badge
                     Container(
-                      padding: const EdgeInsets.all(18),
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                       decoration: BoxDecoration(
-                        gradient: AppColors.primaryGradient,
-                        borderRadius: AppDecorations.radiusXl,
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.primary.withAlpha(90),
-                            blurRadius: 24,
-                            spreadRadius: 2,
+                        color: const Color(0xFF0072FF).withValues(alpha: 0.12),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF0072FF).withValues(alpha: 0.4)),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.lock_outline_rounded, size: 14, color: Color(0xFF00C6FF)),
+                          SizedBox(width: 8),
+                          Text(
+                            'Authorized Access Only  •  Managed by Owner in Supabase',
+                            style: TextStyle(
+                              color: Color(0xFF00C6FF),
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                            ),
                           ),
                         ],
                       ),
-                      child: const Icon(
-                        Icons.shield_outlined,
-                        color: Colors.white,
-                        size: 44,
-                      ),
                     ),
                     const SizedBox(height: 20),
-                    Text(
-                      AppConstants.appName.toUpperCase(),
-                      style: AppTypography.headlineLg.copyWith(
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1.5,
-                        fontSize: 26,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Enterprise Master Control & Admin Portal',
-                      style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 32),
 
-                    // Admin Login Card
+                    // Main Glassmorphism Login Container
                     GlassCard(
-                      child: Padding(
-                        padding: const EdgeInsets.all(28),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
-                          children: [
-                            Row(
-                              children: [
-                                const Icon(Icons.admin_panel_settings_outlined, color: AppColors.primary, size: 22),
-                                const SizedBox(width: 10),
-                                Text(
-                                  'OWNER / ADMIN LOGIN',
-                                  style: AppTypography.titleLg.copyWith(
-                                    fontWeight: FontWeight.bold,
-                                    letterSpacing: 0.8,
-                                  ),
-                                ),
-                              ],
+                      borderRadius: AppDecorations.radiusXl,
+                      padding: const EdgeInsets.all(32),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'Owner & Admin Sign In',
+                            style: TextStyle(
+                              fontSize: 20,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
                             ),
-                            const SizedBox(height: 6),
-                            Text(
-                              'Enter your administrator credentials to access system controls',
-                              style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary),
+                          ),
+                          const SizedBox(height: 4),
+                          const Text(
+                            'Enter your registered Supabase Cloud Email & Password to unlock the system.',
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: AppColors.textSecondary,
                             ),
-                            const Divider(height: 28, color: AppColors.border),
+                          ),
+                          const SizedBox(height: 24),
 
-                            if (_errorMessage != null) ...[
-                              Container(
-                                padding: const EdgeInsets.all(12),
-                                decoration: BoxDecoration(
-                                  color: Colors.red.withAlpha(30),
-                                  borderRadius: AppDecorations.radiusDefault,
-                                  border: Border.all(color: Colors.red.withAlpha(100)),
-                                ),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const Icon(Icons.error_outline, color: Colors.redAccent, size: 20),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: Text(
-                                        _errorMessage!,
-                                        style: const TextStyle(color: Colors.redAccent, fontSize: 13, fontWeight: FontWeight.bold),
+                          // Error Banner
+                          if (_errorMessage != null) ...[
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: AppColors.error.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: AppColors.error.withValues(alpha: 0.5)),
+                              ),
+                              child: Row(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  const Icon(Icons.error_outline_rounded, color: AppColors.error, size: 20),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      _errorMessage!,
+                                      style: const TextStyle(
+                                        color: AppColors.error,
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w500,
                                       ),
                                     ),
-                                  ],
-                                ),
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 18),
-                            ],
-
-                            // Admin Username Input
-                            const Text(
-                              'Admin Username / ID',
-                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
-                            ),
-                            const SizedBox(height: 6),
-                            TextField(
-                              controller: _userCtrl,
-                              decoration: InputDecoration(
-                                hintText: 'e.g. admin',
-                                prefixIcon: const Icon(Icons.person_outline, size: 20),
-                                border: OutlineInputBorder(
-                                  borderRadius: AppDecorations.radiusDefault,
-                                  borderSide: const BorderSide(color: AppColors.border),
-                                ),
-                                filled: true,
-                                fillColor: AppColors.surfaceContainerLow,
-                              ),
-                              style: const TextStyle(fontWeight: FontWeight.bold),
                             ),
                             const SizedBox(height: 18),
+                          ],
 
-                            // Admin Password Input
-                            const Text(
-                              'Admin Password',
-                              style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
-                            ),
-                            const SizedBox(height: 6),
-                            TextField(
-                              controller: _passCtrl,
-                              obscureText: _obscurePassword,
-                              onSubmitted: (_) => _handleAdminLogin(),
-                              decoration: InputDecoration(
-                                hintText: 'Enter admin password',
-                                prefixIcon: const Icon(Icons.lock_outline, size: 20),
-                                suffixIcon: IconButton(
-                                  icon: Icon(_obscurePassword ? Icons.visibility_off : Icons.visibility, size: 20),
-                                  onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
-                                ),
-                                border: OutlineInputBorder(
-                                  borderRadius: AppDecorations.radiusDefault,
-                                  borderSide: const BorderSide(color: AppColors.border),
-                                ),
-                                filled: true,
-                                fillColor: AppColors.surfaceContainerLow,
+                          // Success Banner
+                          if (_successMessage != null) ...[
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: AppColors.success.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: AppColors.success.withValues(alpha: 0.5)),
+                              ),
+                              child: Row(
+                                children: [
+                                  const Icon(Icons.check_circle_outline, color: AppColors.success, size: 20),
+                                  const SizedBox(width: 10),
+                                  Expanded(
+                                    child: Text(
+                                      _successMessage!,
+                                      style: const TextStyle(
+                                        color: AppColors.success,
+                                        fontSize: 12.5,
+                                        fontWeight: FontWeight.w500,
+                                      ),
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
-                            const SizedBox(height: 28),
+                            const SizedBox(height: 18),
+                          ],
 
-                            // Submit Button
-                            ElevatedButton(
-                              onPressed: _isLoading ? null : _handleAdminLogin,
+                          // Email / Username Input
+                          TextField(
+                            controller: _loginEmailCtrl,
+                            keyboardType: TextInputType.emailAddress,
+                            textInputAction: TextInputAction.next,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            decoration: InputDecoration(
+                              labelText: 'Supabase Registered Email *',
+                              hintText: 'e.g. admin@opscore.com',
+                              prefixIcon: const Icon(Icons.email_outlined, color: AppColors.primary),
+                              filled: true,
+                              fillColor: AppColors.surfaceContainerLow,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: AppColors.border),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: AppColors.border),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+
+                          // Password Input
+                          TextField(
+                            controller: _loginPassCtrl,
+                            obscureText: _loginObscure,
+                            textInputAction: TextInputAction.done,
+                            onSubmitted: (_) => _handleSignIn(),
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                            decoration: InputDecoration(
+                              labelText: 'Password *',
+                              prefixIcon: const Icon(Icons.lock_outline, color: AppColors.primary),
+                              suffixIcon: IconButton(
+                                icon: Icon(
+                                  _loginObscure ? Icons.visibility_outlined : Icons.visibility_off_outlined,
+                                  color: AppColors.textSecondary,
+                                  size: 18,
+                                ),
+                                onPressed: () => setState(() => _loginObscure = !_loginObscure),
+                              ),
+                              filled: true,
+                              fillColor: AppColors.surfaceContainerLow,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: AppColors.border),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: AppColors.border),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: const BorderSide(color: AppColors.primary, width: 1.5),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 28),
+
+                          // Submit Button
+                          SizedBox(
+                            height: 48,
+                            child: ElevatedButton(
+                              onPressed: _isLoading ? null : _handleSignIn,
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: AppColors.primary,
-                                padding: const EdgeInsets.symmetric(vertical: 16),
+                                backgroundColor: const Color(0xFF0072FF),
+                                foregroundColor: Colors.white,
+                                elevation: 4,
                                 shape: RoundedRectangleBorder(
-                                  borderRadius: AppDecorations.radiusDefault,
+                                  borderRadius: BorderRadius.circular(10),
                                 ),
                               ),
                               child: _isLoading
                                   ? const SizedBox(
                                       width: 22,
                                       height: 22,
-                                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2.5,
+                                        color: Colors.white,
+                                      ),
                                     )
                                   : const Row(
                                       mainAxisAlignment: MainAxisAlignment.center,
                                       children: [
-                                        Icon(Icons.login, size: 20, color: Colors.white),
+                                        Icon(Icons.lock_open_rounded, size: 18),
                                         SizedBox(width: 10),
                                         Text(
                                           'AUTHENTICATE & ENTER',
-                                          style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white, letterSpacing: 0.8),
+                                          style: TextStyle(
+                                            fontWeight: FontWeight.bold,
+                                            letterSpacing: 1.1,
+                                            fontSize: 14,
+                                          ),
                                         ),
                                       ],
                                     ),
                             ),
-                          ],
-                        ),
+                          ),
+                        ],
                       ),
                     ),
                     const SizedBox(height: 24),
 
-                    // Default Credentials Hint Box
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      decoration: BoxDecoration(
-                        color: AppColors.surfaceContainerHigh.withAlpha(120),
-                        borderRadius: AppDecorations.radiusDefault,
-                        border: Border.all(color: AppColors.border),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.info_outline, color: AppColors.textSecondary, size: 16),
-                          const SizedBox(width: 8),
-                          RichText(
-                            text: const TextSpan(
-                              style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                              children: [
-                                TextSpan(text: 'Default Access Credentials: '),
-                                TextSpan(text: 'ID: ', style: TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary)),
-                                TextSpan(text: 'admin', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-                                TextSpan(text: '  |  Password: '),
-                                TextSpan(text: 'admin123', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-                              ],
-                            ),
-                          ),
-                        ],
+                    // Anti-Piracy Security Footer
+                    const Text(
+                      '🔒 Proprietary Software  •  Single-Tenant Cloud Secured  •  Unauthorized Resale Prohibited',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 10.5,
+                        letterSpacing: 0.5,
                       ),
                     ),
                   ],

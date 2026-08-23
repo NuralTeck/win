@@ -2,7 +2,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../shared/models/series_price_model.dart';
 import '../../shared/repositories/series_price_repository.dart';
-import '../../../core/database/supabase_service.dart';
 
 class SeriesPriceState {
   final bool isLoading;
@@ -65,49 +64,28 @@ class SeriesPriceViewModel extends StateNotifier<SeriesPriceState> {
   Future<void> loadSeriesPrices() async {
     state = state.copyWith(isLoading: true);
     try {
-      // First try to load from Supabase Cloud (so all devices see same prices)
-      final cloudList = await SupabaseService.instance.fetchCloudSeriesPrices();
-      if (cloudList.isNotEmpty) {
-        state = state.copyWith(isLoading: false, seriesList: cloudList);
-        return;
-      }
-      // Fallback to local SQLite
       final list = await _repo.getSeriesPrices();
       state = state.copyWith(isLoading: false, seriesList: list);
-
-      // 🔄 AUTO-PUSH: If Supabase was empty but local SQLite has data,
-      // push all local prices to Supabase so WhatsApp bot can read them
-      if (list.isNotEmpty) {
-        debugPrint('☁️ [PRICE SYNC] Supabase empty but ${list.length} local prices found. Auto-pushing to Cloud...');
-        for (final item in list) {
-          await SupabaseService.instance.upsertSeriesPrice(item);
-        }
-        debugPrint('☁️ [PRICE SYNC] All ${list.length} series prices pushed to Supabase Cloud!');
-      }
     } catch (e) {
-      state = state.copyWith(isLoading: false, errorMessage: 'Failed to load series & prices');
+      state = state.copyWith(
+          isLoading: false, errorMessage: 'Failed to load series & prices');
     }
   }
 
   Future<void> addSeriesPrice(UniversalSeriesPriceModel item) async {
     final created = await _repo.createSeriesPrice(item);
-    // Sync to Supabase Cloud so WhatsApp bot picks it up
-    await SupabaseService.instance.upsertSeriesPrice(created);
     state = state.copyWith(seriesList: [created, ...state.seriesList]);
   }
 
   Future<void> updateSeriesPrice(UniversalSeriesPriceModel item) async {
     await _repo.updateSeriesPrice(item);
-    // Sync to Supabase Cloud
-    await SupabaseService.instance.upsertSeriesPrice(item);
-    final updated = state.seriesList.map((i) => i.id == item.id ? item : i).toList();
+    final updated =
+        state.seriesList.map((i) => i.id == item.id ? item : i).toList();
     state = state.copyWith(seriesList: updated);
   }
 
   Future<void> deleteSeriesPrice(String id) async {
     await _repo.deleteSeriesPrice(id);
-    // Delete from Supabase Cloud
-    await SupabaseService.instance.deleteCloudSeriesPrice(id);
     final filtered = state.seriesList.where((i) => i.id != id).toList();
     state = state.copyWith(seriesList: filtered);
   }

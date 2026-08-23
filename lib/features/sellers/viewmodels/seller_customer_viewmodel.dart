@@ -1,7 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/seller_customer_model.dart';
 import '../../../core/database/database_service.dart';
-import '../../../core/database/supabase_service.dart';
 
 class SellerCustomerState {
   final List<SellerCustomerModel> sellers;
@@ -85,7 +84,6 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
     );
 
     await _dbService.insertSellerCustomer(newSeller);
-    await SupabaseService.instance.upsertSeller(newSeller);
     state = state.copyWith(
       sellers: [newSeller, ...state.sellers],
     );
@@ -110,7 +108,6 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
     );
 
     await _dbService.updateSellerCustomer(updated);
-    await SupabaseService.instance.upsertSeller(updated);
     final updatedList = state.sellers.map((s) {
       return s.id == id ? updated : s;
     }).toList();
@@ -120,7 +117,6 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
 
   Future<void> deleteSeller(String id) async {
     await _dbService.deleteSellerCustomer(id);
-    await SupabaseService.instance.deleteSeller(id);
     state = state.copyWith(
       sellers: state.sellers.where((s) => s.id != id).toList(),
     );
@@ -130,7 +126,6 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
     final seller = state.sellers.firstWhere((s) => s.id == id);
     final updated = seller.copyWith(isActive: !seller.isActive);
     await _dbService.updateSellerCustomer(updated);
-    await SupabaseService.instance.upsertSeller(updated);
 
     final updatedList = state.sellers.map((s) {
       return s.id == id ? updated : s;

@@ -9,7 +9,6 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/database/database_service.dart';
-import '../../../core/database/supabase_service.dart';
 import '../models/collector_model.dart';
 
 class CollectorManagementScreen extends ConsumerStatefulWidget {
@@ -38,14 +37,13 @@ class _CollectorManagementScreenState extends ConsumerState<CollectorManagementS
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
 
-    // 1. Load Collectors from SQLite & Supabase Cloud
+    // Load Collectors from local SQLite only
     final localCollectors = await DatabaseService.instance.getCollectors();
-    final cloudCollectors = await SupabaseService.instance.fetchCollectors();
 
     final Map<String, CollectorModel> collectorMap = {};
 
     // Seed demo collector if empty
-    if (localCollectors.isEmpty && cloudCollectors.isEmpty) {
+    if (localCollectors.isEmpty) {
       final demo = CollectorModel(
         id: 'col_101',
         accessKey: 'COL-101',
@@ -63,22 +61,12 @@ class _CollectorManagementScreenState extends ConsumerState<CollectorManagementS
       final model = CollectorModel.fromMap(c);
       collectorMap[model.id] = model;
     }
-    for (final c in cloudCollectors) {
-      final model = CollectorModel.fromMap(c);
-      collectorMap[model.id] = model;
-      await DatabaseService.instance.insertCollector(model.toMap());
-    }
 
-    // 2. Load Collector Payments from SQLite & Supabase Cloud
+    // Load Collector Payments from local SQLite only
     final localPayments = await DatabaseService.instance.getCollectorPayments();
-    final cloudPayments = await SupabaseService.instance.fetchCloudCollectorPayments();
 
     final Map<String, CollectorPaymentModel> paymentMap = {};
     for (final p in localPayments) {
-      final model = CollectorPaymentModel.fromMap(p);
-      paymentMap[model.id] = model;
-    }
-    for (final p in cloudPayments) {
       final model = CollectorPaymentModel.fromMap(p);
       paymentMap[model.id] = model;
     }
@@ -204,7 +192,6 @@ class _CollectorManagementScreenState extends ConsumerState<CollectorManagementS
                 );
 
                 await DatabaseService.instance.insertCollector(newCollector.toMap());
-                await SupabaseService.instance.saveCollectorToCloud(newCollector.toMap());
 
                 if (dialogCtx.mounted && Navigator.canPop(dialogCtx)) Navigator.pop(dialogCtx);
                 _loadData();
@@ -315,7 +302,6 @@ class _CollectorManagementScreenState extends ConsumerState<CollectorManagementS
                 );
 
                 await DatabaseService.instance.insertCollector(updatedCollector.toMap());
-                await SupabaseService.instance.saveCollectorToCloud(updatedCollector.toMap());
 
                 if (dialogCtx.mounted && Navigator.canPop(dialogCtx)) Navigator.pop(dialogCtx);
                 _loadData();

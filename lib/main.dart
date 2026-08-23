@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
 import 'core/config/app_routes.dart';
 import 'core/theme/app_theme.dart';
-import 'core/constants/app_constants.dart';
 
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'core/database/database_service.dart';
@@ -30,33 +29,34 @@ void main() async {
   
   const WindowOptions windowOptions = WindowOptions(
     size: Size(1440, 900),
-    minimumSize: Size(AppConstants.minWindowWidth, AppConstants.minWindowHeight),
+    minimumSize: Size(1280, 800),
     center: true,
     backgroundColor: Colors.transparent,
     skipTaskbar: false,
     titleBarStyle: TitleBarStyle.normal,
-    title: 'NagaLand TicketCore | Lottery & Ticket Management Platform',
+    title: 'PhantomManagement | Operations & Hisab Management Platform',
   );
   
   windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.maximize();
     await windowManager.show();
     await windowManager.focus();
   });
 
   runApp(
     const ProviderScope(
-      child: OpsCoreProApp(),
+      child: TicketCoreApp(),
     ),
   );
 }
 
-class OpsCoreProApp extends StatelessWidget {
-  const OpsCoreProApp({super.key});
+class TicketCoreApp extends ConsumerWidget {
+  const TicketCoreApp({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     return MaterialApp.router(
-      title: 'NagaLand TicketCore',
+      title: 'PhantomManagement',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.darkTheme,
       darkTheme: AppTheme.darkTheme,

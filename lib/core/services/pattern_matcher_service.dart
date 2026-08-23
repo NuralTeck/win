@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'package:flutter/foundation.dart';
-import '../database/supabase_service.dart';
+import '../database/database_service.dart';
 
 /// Represents a dynamic regex pattern learned from operator feedback
 class LearnedPattern {
@@ -45,6 +45,7 @@ class LearnedPattern {
       'ticket_group_index': ticketGroupIndex,
       'qty_group_index': qtyGroupIndex,
       'sample_text': sampleText,
+      'created_at': (createdAt ?? DateTime.now()).toIso8601String(),
     };
   }
 }
@@ -70,9 +71,9 @@ class UnparsedMessage {
   factory UnparsedMessage.fromMap(Map<String, dynamic> map) {
     return UnparsedMessage(
       id: map['id'] is int ? map['id'] : (int.tryParse(map['id']?.toString() ?? '0') ?? 0),
-      rawText: map['raw_text']?.toString() ?? '',
-      senderPhone: map['sender_phone']?.toString() ?? 'Unknown',
-      senderName: map['sender_name']?.toString(),
+      rawText: (map['raw_text'] ?? map['raw_message'])?.toString() ?? '',
+      senderPhone: (map['sender_phone'] ?? map['sender'])?.toString() ?? 'Unknown',
+      senderName: (map['sender_name'])?.toString(),
       status: map['status']?.toString() ?? 'pending',
       receivedAt: map['received_at'] != null
           ? DateTime.tryParse(map['received_at'].toString())?.toLocal() ?? DateTime.now()
@@ -94,7 +95,7 @@ class ParsedTicketItem {
   });
 }
 
-/// High-performance Pattern Matcher & Dynamic Self-Learning Service
+/// High-performance Pattern Matcher & Dynamic Self-Learning Service (100% Offline SQLite)
 class PatternMatcherService {
   PatternMatcherService._internal();
   static final PatternMatcherService instance = PatternMatcherService._internal();
@@ -125,16 +126,14 @@ class PatternMatcherService {
     _pollingTimer?.cancel();
   }
 
-  /// Load all dynamic patterns from Supabase
+  /// Load all dynamic patterns from local SQLite
   Future<List<LearnedPattern>> loadLearnedPatterns() async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return _cachedPatterns;
-
-      final res = await client
-          .from('learned_patterns')
-          .select('*')
-          .order('created_at', ascending: false);
+      final db = await DatabaseService.instance.database;
+      final res = await db.query(
+        'learned_patterns',
+        orderBy: 'created_at DESC',
+      );
 
       final List<LearnedPattern> loaded = [];
       for (final row in res) {
@@ -143,26 +142,22 @@ class PatternMatcherService {
 
       _cachedPatterns.clear();
       _cachedPatterns.addAll(loaded);
-      debugPrint('🧠 [PATTERN MATCHER] Loaded ${_cachedPatterns.length} learned dynamic regex rule(s)');
+      debugPrint('🧠 [PATTERN MATCHER] Loaded ${_cachedPatterns.length} learned dynamic regex rule(s) from SQLite');
       return _cachedPatterns;
     } catch (e) {
-      debugPrint('⚠️ [PATTERN MATCHER] Failed to load learned patterns: $e');
+      debugPrint('⚠️ [PATTERN MATCHER] SQLite query error: $e');
       return _cachedPatterns;
     }
   }
 
-  /// Refresh pending unparsed messages badge count
+  /// Refresh pending unparsed messages badge count from SQLite
   Future<int> refreshPendingCount() async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return 0;
-
-      final res = await client
-          .from('unparsed_messages')
-          .select('id')
-          .eq('status', 'pending');
-
-      final count = (res as List).length;
+      final db = await DatabaseService.instance.database;
+      final res = await db.rawQuery(
+        "SELECT COUNT(*) as count FROM unparsed_messages WHERE status = 'pending'",
+      );
+      final count = (res.isNotEmpty ? (res.first['count'] as int? ?? 0) : 0);
       pendingUnparsedCountNotifier.value = count;
       return count;
     } catch (e) {
@@ -170,18 +165,17 @@ class PatternMatcherService {
     }
   }
 
-  /// Fetch all pending unparsed messages
+  /// Fetch all pending unparsed messages from SQLite
   Future<List<UnparsedMessage>> fetchPendingUnparsedMessages() async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return [];
-
-      final res = await client
-          .from('unparsed_messages')
-          .select('*')
-          .eq('status', 'pending')
-          .order('received_at', ascending: false)
-          .limit(50);
+      final db = await DatabaseService.instance.database;
+      final res = await db.query(
+        'unparsed_messages',
+        where: 'status = ?',
+        whereArgs: ['pending'],
+        orderBy: 'received_at DESC',
+        limit: 50,
+      );
 
       final List<UnparsedMessage> list = [];
       for (final r in res) {
@@ -190,7 +184,7 @@ class PatternMatcherService {
       pendingUnparsedCountNotifier.value = list.length;
       return list;
     } catch (e) {
-      debugPrint('⚠️ Error fetching unparsed messages: $e');
+      debugPrint('⚠️ Error fetching unparsed messages from SQLite: $e');
       return [];
     }
   }
@@ -258,87 +252,88 @@ class PatternMatcherService {
     return items;
   }
 
-  /// Save new learned pattern to Supabase and cache
+  /// Save new learned pattern to SQLite and memory cache
   Future<bool> saveLearnedPattern(LearnedPattern pattern) async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return false;
-
-      final res = await client
-          .from('learned_patterns')
-          .insert(pattern.toMap())
-          .select()
-          .single();
-
-      final newPattern = LearnedPattern.fromMap(res);
+      final db = await DatabaseService.instance.database;
+      final id = await db.insert('learned_patterns', pattern.toMap());
+      final newPattern = LearnedPattern(
+        id: id,
+        patternName: pattern.patternName,
+        regexPattern: pattern.regexPattern,
+        seriesGroupIndex: pattern.seriesGroupIndex,
+        ticketGroupIndex: pattern.ticketGroupIndex,
+        qtyGroupIndex: pattern.qtyGroupIndex,
+        sampleText: pattern.sampleText,
+        createdAt: DateTime.now(),
+      );
       _cachedPatterns.insert(0, newPattern);
-      debugPrint('✅ [PATTERN MATCHER] Saved new pattern "${newPattern.patternName}" (ID: ${newPattern.id})');
+      debugPrint('✅ [PATTERN MATCHER] Saved new pattern "${newPattern.patternName}" (ID: $id) to local SQLite');
       return true;
     } catch (e) {
-      debugPrint('⚠️ Failed to save learned pattern: $e');
+      debugPrint('⚠️ Failed to save learned pattern to SQLite: $e');
       return false;
     }
   }
 
-  /// Mark unparsed message as resolved or ignored
+  /// Mark unparsed message as resolved or ignored in SQLite
   Future<bool> updateUnparsedStatus(int id, {String status = 'resolved'}) async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return false;
-
-      await client
-          .from('unparsed_messages')
-          .update({
-            'status': status,
-            'resolved_at': DateTime.now().toUtc().toIso8601String(),
-          })
-          .eq('id', id);
+      final db = await DatabaseService.instance.database;
+      await db.update(
+        'unparsed_messages',
+        {
+          'status': status,
+          'resolved_at': DateTime.now().toIso8601String(),
+        },
+        where: 'id = ?',
+        whereArgs: [id],
+      );
 
       await refreshPendingCount();
       return true;
     } catch (e) {
-      debugPrint('⚠️ Failed to update unparsed message status: $e');
+      debugPrint('⚠️ Failed to update unparsed message status in SQLite: $e');
       return false;
     }
   }
 
-  /// Dismiss / Clear all pending unparsed messages in batch
+  /// Dismiss / Clear all pending unparsed messages in batch in SQLite
   Future<bool> clearAllPendingUnparsedMessages() async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return false;
-
-      await client
-          .from('unparsed_messages')
-          .update({
-            'status': 'ignored',
-            'resolved_at': DateTime.now().toUtc().toIso8601String(),
-          })
-          .eq('status', 'pending');
+      final db = await DatabaseService.instance.database;
+      await db.update(
+        'unparsed_messages',
+        {
+          'status': 'ignored',
+          'resolved_at': DateTime.now().toIso8601String(),
+        },
+        where: 'status = ?',
+        whereArgs: ['pending'],
+      );
 
       await refreshPendingCount();
       return true;
     } catch (e) {
-      debugPrint('⚠️ Error clearing all unparsed messages: $e');
+      debugPrint('⚠️ Error clearing all unparsed messages in SQLite: $e');
       return false;
     }
   }
 
-  /// Log an unknown message to unparsed_messages
+  /// Log an unknown message to unparsed_messages table in SQLite
   Future<void> logUnparsedMessage(String rawText, String senderPhone, {String? senderName}) async {
     try {
-      final client = SupabaseService.instance.client;
-      if (client == null) return;
-
-      await client.from('unparsed_messages').insert({
-        'raw_text': rawText.trim(),
-        'sender_phone': senderPhone,
+      final db = await DatabaseService.instance.database;
+      await db.insert('unparsed_messages', {
+        'raw_message': rawText.trim(),
+        'sender': senderPhone,
         'sender_name': senderName,
         'status': 'pending',
+        'received_at': DateTime.now().toIso8601String(),
       });
       await refreshPendingCount();
     } catch (e) {
-      debugPrint('⚠️ Error logging unparsed message: $e');
+      debugPrint('⚠️ Error logging unparsed message to SQLite: $e');
     }
   }
 }
