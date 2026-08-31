@@ -29,6 +29,7 @@ class MainLayoutScreen extends ConsumerStatefulWidget {
 class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
   Timer? _pendingPhotoGlobalTimer;
   bool _isReviewModalOpen = false;
+  bool _isSidebarVisible = true;
 
   @override
   void initState() {
@@ -114,7 +115,7 @@ class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
       if (saved == true && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('✅ WhatsApp Photo confirmed & tickets booked for $buyerName!'),
+            content: Text('✅ WhatsApp Photo confirmed & numbers booked for $buyerName!'),
             backgroundColor: AppColors.success,
             duration: const Duration(seconds: 3),
           ),
@@ -145,19 +146,23 @@ class _MainLayoutScreenState extends ConsumerState<MainLayoutScreen> {
         children: [
           Row(
             children: [
-              // Fixed Sidebar Navigation
-              SideNavBar(
-                currentRoute: currentRoute,
-                onNewOperationPressed: () => _openNewTicketDialog(context),
-                navigationShell: widget.navigationShell,
-              ),
+              // Collapsible Sidebar Navigation
+              if (_isSidebarVisible)
+                SideNavBar(
+                  currentRoute: currentRoute,
+                  onNewOperationPressed: () => _openNewTicketDialog(context),
+                  navigationShell: widget.navigationShell,
+                  onToggleCollapse: () => setState(() => _isSidebarVisible = false),
+                ),
 
               // Main Workspace Area
               Expanded(
                 child: Column(
                   children: [
-                    const TopAppBar(
+                    TopAppBar(
                       title: 'PhantomManagement — Hisab Management Platform',
+                      isSidebarVisible: _isSidebarVisible,
+                      onToggleSidebar: () => setState(() => _isSidebarVisible = !_isSidebarVisible),
                     ),
 
                     Expanded(

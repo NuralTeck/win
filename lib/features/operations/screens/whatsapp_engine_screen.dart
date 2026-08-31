@@ -5,6 +5,7 @@ import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/services/whatsapp_engine_service.dart';
+import '../../../core/database/database_service.dart';
 
 class WhatsAppEngineScreen extends StatefulWidget {
   const WhatsAppEngineScreen({super.key});
@@ -18,11 +19,15 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
   final ScrollController _logScrollController = ScrollController();
   bool _isLoadingAction = false;
   bool _autoScrollLogs = true;
+  String _activeBotMode = 'auto';
 
   @override
   void initState() {
     super.initState();
     _engineService.launchBackgroundEngine();
+    DatabaseService.instance.getBotMode().then((m) {
+      if (mounted) setState(() => _activeBotMode = m);
+    });
   }
 
   void _scrollToBottom() {
@@ -103,6 +108,10 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
           children: [
             // 1. Top Header Banner
             _buildHeaderBar(status),
+            const SizedBox(height: 16),
+
+            // 1.5 Bot Operating Mode Selector Card
+            _buildBotModeSelectorCard(),
             const SizedBox(height: 20),
 
             // 2. Metrics & KPI Grid (4 Cards)
@@ -752,6 +761,114 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildBotModeSelectorCard() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E293B),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF334155), width: 1.2),
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: const Icon(Icons.smart_toy_rounded, color: AppColors.primary, size: 20),
+          ),
+          const SizedBox(width: 12),
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                'BOT OPERATING MODE (ऑपरेटिंग मोड चुनें)',
+                style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold, letterSpacing: 0.8),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                _activeBotMode == 'offline'
+                    ? '💻 100% Offline Mode Active — Local SQLite & Rule Engine (Zero Internet)'
+                    : _activeBotMode == 'online'
+                        ? '🌐 Online AI Mode Active — Gemini AI Vision & Natural Speech NLP'
+                        : '⚡ Auto Hybrid Mode Active — Online AI with instant Offline fallback',
+                style: TextStyle(
+                  color: _activeBotMode == 'offline'
+                      ? Colors.cyanAccent
+                      : _activeBotMode == 'online'
+                          ? Colors.greenAccent
+                          : Colors.purpleAccent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+          const Spacer(),
+          Container(
+            padding: const EdgeInsets.all(4),
+            decoration: BoxDecoration(
+              color: const Color(0xFF0F172A),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF334155)),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildModeBtn('auto', '⚡ Auto Hybrid', Colors.purpleAccent),
+                const SizedBox(width: 4),
+                _buildModeBtn('offline', '💻 100% Offline', Colors.cyanAccent),
+                const SizedBox(width: 4),
+                _buildModeBtn('online', '🌐 Online AI', Colors.greenAccent),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildModeBtn(String mode, String label, Color activeColor) {
+    final isSelected = _activeBotMode == mode;
+    return InkWell(
+      onTap: () {
+        setState(() => _activeBotMode = mode);
+        DatabaseService.instance.saveBotMode(mode);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('🤖 Bot Operating Mode switched to "$label"!'),
+            backgroundColor: activeColor,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      },
+      borderRadius: BorderRadius.circular(6),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? activeColor.withValues(alpha: 0.2) : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected ? activeColor : Colors.transparent,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? activeColor : Colors.grey.shade400,
+            fontSize: 12,
+            fontWeight: isSelected ? FontWeight.w900 : FontWeight.bold,
+          ),
+        ),
       ),
     );
   }

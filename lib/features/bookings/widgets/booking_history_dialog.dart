@@ -30,6 +30,7 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
   String _exportRange = 'Today'; // Options: 'Today', 'Weekly', 'Monthly', 'Custom'
   String _selectedShiftFilter = 'All'; // 'All', 'Dear 1 PM', 'Dear 6 PM', 'Dear 8 PM'
   String _selectedCustomerFilter = 'All'; // 'All' or specific customer/seller name
+  bool _isExporting = false;
 
   @override
   void initState() {
@@ -278,7 +279,7 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
     required int grandQty,
     required double grandAmt,
   }) async {
-    if (_filteredSales.isEmpty) return;
+    if (_isExporting || _filteredSales.isEmpty) return;
 
     // 🔒 Check if Result Entry has been completed for this date/shift
     final hasResult = await _hasDeclaredResultForDateAndShift(_selectedDate, _selectedShiftFilter);
@@ -288,51 +289,68 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
       return;
     }
 
-    final suffix = isSummaryOnly ? ' (SUMMARY ONLY)' : '';
-    String dateRangeLabel = '';
-    if (_exportRange == 'Today') {
-      dateRangeLabel = DateFormat('dd/MM/yyyy').format(_selectedDate);
-    } else if (_exportRange == 'Weekly') {
-      final start = _selectedDate.subtract(const Duration(days: 6));
-      dateRangeLabel = '${DateFormat('dd/MM/yyyy').format(start)} TO ${DateFormat('dd/MM/yyyy').format(_selectedDate)} (WEEKLY)';
-    } else if (_exportRange == 'Monthly') {
-      final start = _selectedDate.subtract(const Duration(days: 29));
-      dateRangeLabel = '${DateFormat('dd/MM/yyyy').format(start)} TO ${DateFormat('dd/MM/yyyy').format(_selectedDate)} (MONTHLY)';
-    } else if (_exportRange == 'Custom' && _rangeStartDate != null && _rangeEndDate != null) {
-      dateRangeLabel = '${DateFormat('dd/MM/yyyy').format(_rangeStartDate!)} TO ${DateFormat('dd/MM/yyyy').format(_rangeEndDate!)}';
-    } else {
-      dateRangeLabel = DateFormat('dd/MM/yyyy').format(_selectedDate);
+    setState(() => _isExporting = true);
+
+    try {
+      final suffix = isSummaryOnly ? ' (SUMMARY ONLY)' : '';
+      String dateRangeLabel = '';
+      if (_exportRange == 'Today') {
+        dateRangeLabel = DateFormat('dd/MM/yyyy').format(_selectedDate);
+      } else if (_exportRange == 'Weekly') {
+        final start = _selectedDate.subtract(const Duration(days: 6));
+        dateRangeLabel = '${DateFormat('dd/MM/yyyy').format(start)} TO ${DateFormat('dd/MM/yyyy').format(_selectedDate)} (WEEKLY)';
+      } else if (_exportRange == 'Monthly') {
+        final start = _selectedDate.subtract(const Duration(days: 29));
+        dateRangeLabel = '${DateFormat('dd/MM/yyyy').format(start)} TO ${DateFormat('dd/MM/yyyy').format(_selectedDate)} (MONTHLY)';
+      } else if (_exportRange == 'Custom' && _rangeStartDate != null && _rangeEndDate != null) {
+        dateRangeLabel = '${DateFormat('dd/MM/yyyy').format(_rangeStartDate!)} TO ${DateFormat('dd/MM/yyyy').format(_rangeEndDate!)}';
+      } else {
+        dateRangeLabel = DateFormat('dd/MM/yyyy').format(_selectedDate);
+      }
+
+      final rangeTitle = _selectedCustomerFilter == 'All'
+          ? 'BOOKINGS & HISAB REPORT [$dateRangeLabel]$suffix'
+          : '$_selectedCustomerFilter - HISAB REPORT [$dateRangeLabel]$suffix';
+
+      // 1. Generate & Save PDF to C:\Lottery_Reports
+      final res = await BookingPdfService.instance.savePdfToDisk(
+        date: _selectedDate,
+        sales: _filteredSales,
+        customerName: _selectedCustomerFilter == 'All' ? null : _selectedCustomerFilter,
+        rangeTitle: rangeTitle,
+        isSummaryOnly: isSummaryOnly,
+      );
+
+      final savedPath = res['filePath'] as String;
+      final fileName = res['fileName'] as String;
+      final pdfBytes = res['bytes'];
+      final custName = res['customerName'] as String;
+
+      if (!mounted) return;
+
+      // 2. Open action modal with Open, Share WhatsApp, Print Preview, and Explorer
+      _showPdfExportOptionsModal(
+        filePath: savedPath,
+        fileName: fileName,
+        bytes: pdfBytes,
+        customerName: custName,
+        totalTickets: grandQty,
+        totalSales: grandAmt,
+      );
+    } catch (err) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('⚠️ PDF Export Note: $err'),
+            backgroundColor: AppColors.error,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isExporting = false);
+      }
     }
-
-    final rangeTitle = _selectedCustomerFilter == 'All'
-        ? 'BOOKINGS & HISAB REPORT [$dateRangeLabel]$suffix'
-        : '$_selectedCustomerFilter - HISAB REPORT [$dateRangeLabel]$suffix';
-
-    // 1. Generate & Save PDF to C:\Lottery_Reports
-    final res = await BookingPdfService.instance.savePdfToDisk(
-      date: _selectedDate,
-      sales: _filteredSales,
-      customerName: _selectedCustomerFilter == 'All' ? null : _selectedCustomerFilter,
-      rangeTitle: rangeTitle,
-      isSummaryOnly: isSummaryOnly,
-    );
-
-    final savedPath = res['filePath'] as String;
-    final fileName = res['fileName'] as String;
-    final pdfBytes = res['bytes'];
-    final custName = res['customerName'] as String;
-
-    if (!mounted) return;
-
-    // 2. Open action modal with Open, Share WhatsApp, Print Preview, and Explorer
-    _showPdfExportOptionsModal(
-      filePath: savedPath,
-      fileName: fileName,
-      bytes: pdfBytes,
-      customerName: custName,
-      totalTickets: grandQty,
-      totalSales: grandAmt,
-    );
   }
 
   String _getShift(String drawName) {
@@ -593,12 +611,18 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
                       borderRadius: BorderRadius.circular(8),
                     ),
                   ),
-                  icon: const Icon(Icons.picture_as_pdf_rounded, size: 15),
-                  label: const Text(
-                    'Full PDF',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
+                  icon: _isExporting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.picture_as_pdf_rounded, size: 15),
+                  label: Text(
+                    _isExporting ? 'Exporting...' : 'Full PDF',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
                   ),
-                  onPressed: _filteredSales.isEmpty
+                  onPressed: (_filteredSales.isEmpty || _isExporting)
                       ? null
                       : () => _handlePdfExport(
                             isSummaryOnly: false,
@@ -617,12 +641,18 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
                       borderRadius: BorderRadius.circular(8),
                     ),
                   ),
-                  icon: const Icon(Icons.analytics_rounded, size: 15),
-                  label: const Text(
-                    'Summary PDF',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
+                  icon: _isExporting
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                        )
+                      : const Icon(Icons.analytics_rounded, size: 15),
+                  label: Text(
+                    _isExporting ? 'Exporting...' : 'Summary PDF',
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
                   ),
-                  onPressed: _filteredSales.isEmpty
+                  onPressed: (_filteredSales.isEmpty || _isExporting)
                       ? null
                       : () => _handlePdfExport(
                             isSummaryOnly: true,
@@ -951,7 +981,7 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
                             ),
                             const SizedBox(width: 14),
 
-                            // RIGHT SIDE: BOOKINGS DETAILED TABLE
+                            // RIGHT SIDE: BOOKINGS DETAILED TABLE (HIGH-PERFORMANCE VIRTUALIZED LIST)
                             Expanded(
                               child: Container(
                                 decoration: BoxDecoration(
@@ -960,112 +990,141 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
                                   border: Border.all(color: AppColors.border),
                                 ),
                                 clipBehavior: Clip.antiAlias,
-                                child: SingleChildScrollView(
-                                  child: DataTable(
-                                    columnSpacing: 16,
-                                    headingRowColor: WidgetStateProperty.all(
-                                      AppColors.surfaceContainerHigh,
+                                child: Column(
+                                  children: [
+                                    // Sticky Header Row
+                                    Container(
+                                      color: AppColors.surfaceContainerHigh,
+                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+                                      child: const Row(
+                                        children: [
+                                          SizedBox(width: 45, child: Text('#', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 90, child: Text('Shift', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 80, child: Text('Series', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 115, child: Text('Ticket No.', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 55, child: Text('Qty', textAlign: TextAlign.center, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 90, child: Text('Rate (₹)', textAlign: TextAlign.right, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 95, child: Text('Total (₹)', textAlign: TextAlign.right, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                          SizedBox(width: 16),
+                                          Expanded(child: Text('Seller / Customer', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                                        ],
+                                      ),
                                     ),
-                                    headingTextStyle: AppTypography.bodySm
-                                        .copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.bold),
-                                    dataTextStyle: AppTypography.bodySm.copyWith(
-                                      color: AppColors.textPrimary,
-                                    ),
-                                    columns: const [
-                                      DataColumn(label: Text('#')),
-                                      DataColumn(label: Text('Shift')),
-                                      DataColumn(label: Text('Series')),
-                                      DataColumn(label: Text('Ticket No.')),
-                                      DataColumn(label: Text('Qty')),
-                                      DataColumn(label: Text('Rate (₹)')),
-                                      DataColumn(label: Text('Total (₹)')),
-                                      DataColumn(label: Text('Seller/Buyer')),
-                                    ],
-                                    rows: List.generate(_filteredSales.length, (idx) {
-                                      final sale = _filteredSales[idx];
-                                      final shift = _getShift(sale.drawName);
-                                      return DataRow(
-                                        cells: [
-                                          DataCell(Text('${idx + 1}')),
-                                          DataCell(
-                                            Container(
-                                              padding: const EdgeInsets.symmetric(
-                                                horizontal: 6,
-                                                vertical: 2,
-                                              ),
-                                              decoration: BoxDecoration(
-                                                color: shift.contains('1 PM')
-                                                    ? Colors.amber.withValues(alpha: 0.2)
-                                                    : shift.contains('6 PM')
-                                                        ? Colors.orange.withValues(alpha: 0.2)
-                                                        : Colors.purple.withValues(alpha: 0.2),
-                                                borderRadius:
-                                                    BorderRadius.circular(4),
-                                              ),
-                                              child: Text(
-                                                shift,
-                                                style: TextStyle(
-                                                  fontSize: 11,
-                                                  fontWeight: FontWeight.bold,
-                                                  color: shift.contains('1 PM')
-                                                      ? Colors.amber
-                                                      : shift.contains('6 PM')
-                                                          ? Colors.orangeAccent
-                                                          : Colors.purpleAccent,
-                                                ),
-                                              ),
-                                            ),
-                                          ),
-                                          DataCell(
-                                            (sale.ticketSeries == '?' || sale.ticketSeries.isEmpty || sale.ticketSeries == 'UNKNOWN' || sale.ticketSeries == 'MISSING')
-                                                ? Container(
+                                    const Divider(height: 1, color: AppColors.border),
+                                    // Virtualized Scroll List (Only renders visible rows — Zero Hang / 60 FPS)
+                                    Expanded(
+                                      child: ListView.separated(
+                                        itemCount: _filteredSales.length,
+                                        separatorBuilder: (context, index) => const Divider(height: 1, color: AppColors.border),
+                                        itemBuilder: (context, idx) {
+                                          final sale = _filteredSales[idx];
+                                          final shift = _getShift(sale.drawName);
+                                          final isNoSeries = sale.ticketSeries == '?' ||
+                                              sale.ticketSeries.isEmpty ||
+                                              sale.ticketSeries == 'UNKNOWN' ||
+                                              sale.ticketSeries == 'MISSING';
+
+                                          return Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                                            color: idx.isEven ? Colors.transparent : AppColors.surfaceContainerHighest.withAlpha(25),
+                                            child: Row(
+                                              children: [
+                                                SizedBox(width: 45, child: Text('${idx + 1}', style: const TextStyle(fontSize: 12, color: AppColors.textSecondary))),
+                                                SizedBox(
+                                                  width: 90,
+                                                  child: Container(
                                                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                                                     decoration: BoxDecoration(
-                                                      color: Colors.amber.withValues(alpha: 0.25),
+                                                      color: shift.contains('1 PM')
+                                                          ? Colors.amber.withValues(alpha: 0.18)
+                                                          : shift.contains('6 PM')
+                                                              ? Colors.orange.withValues(alpha: 0.18)
+                                                              : Colors.purple.withValues(alpha: 0.18),
                                                       borderRadius: BorderRadius.circular(4),
-                                                      border: Border.all(color: Colors.amber, width: 1.2),
                                                     ),
-                                                    child: const Row(
-                                                      mainAxisSize: MainAxisSize.min,
-                                                      children: [
-                                                        Icon(Icons.warning_amber_rounded, size: 12, color: Colors.amber),
-                                                        SizedBox(width: 3),
-                                                        Text('NO SERIES', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 10)),
-                                                      ],
-                                                    ),
-                                                  )
-                                                : Text(
-                                                    sale.ticketSeries,
-                                                    style: const TextStyle(
-                                                      fontWeight: FontWeight.bold,
+                                                    child: Text(
+                                                      shift,
+                                                      style: TextStyle(
+                                                        fontSize: 10.5,
+                                                        fontWeight: FontWeight.bold,
+                                                        color: shift.contains('1 PM')
+                                                            ? Colors.amber
+                                                            : shift.contains('6 PM')
+                                                                ? Colors.orangeAccent
+                                                                : Colors.purpleAccent,
+                                                      ),
+                                                      overflow: TextOverflow.ellipsis,
                                                     ),
                                                   ),
-                                          ),
-                                          DataCell(Text(sale.ticketNumber)),
-                                          DataCell(Text('${sale.quantity}')),
-                                          DataCell(
-                                            Text('₹${sale.pricePerTicket.toStringAsFixed(2)}'),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              '₹${sale.totalAmount.toStringAsFixed(2)}',
-                                              style: const TextStyle(
-                                                color: AppColors.success,
-                                                fontWeight: FontWeight.bold,
-                                              ),
+                                                ),
+                                                SizedBox(
+                                                  width: 80,
+                                                  child: isNoSeries
+                                                      ? Container(
+                                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                                          decoration: BoxDecoration(
+                                                            color: Colors.amber.withValues(alpha: 0.25),
+                                                            borderRadius: BorderRadius.circular(4),
+                                                            border: Border.all(color: Colors.amber, width: 1),
+                                                          ),
+                                                          child: const Text('NO SER', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 9.5)),
+                                                        )
+                                                      : Text(
+                                                          sale.ticketSeries,
+                                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.primary),
+                                                        ),
+                                                ),
+                                                SizedBox(
+                                                  width: 115,
+                                                  child: Text(
+                                                    sale.ticketNumber,
+                                                    style: const TextStyle(
+                                                      fontFamily: 'monospace',
+                                                      fontWeight: FontWeight.bold,
+                                                      fontSize: 12,
+                                                      color: AppColors.textPrimary,
+                                                    ),
+                                                  ),
+                                                ),
+                                                SizedBox(
+                                                  width: 55,
+                                                  child: Text(
+                                                    '${sale.quantity}',
+                                                    textAlign: TextAlign.center,
+                                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textPrimary),
+                                                  ),
+                                                ),
+                                                SizedBox(
+                                                  width: 90,
+                                                  child: Text(
+                                                    '₹${sale.pricePerTicket.toStringAsFixed(2)}',
+                                                    textAlign: TextAlign.right,
+                                                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                                                  ),
+                                                ),
+                                                SizedBox(
+                                                  width: 95,
+                                                  child: Text(
+                                                    '₹${sale.totalAmount.toStringAsFixed(2)}',
+                                                    textAlign: TextAlign.right,
+                                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5, color: AppColors.success),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 16),
+                                                Expanded(
+                                                  child: Text(
+                                                    sale.buyerName.isNotEmpty ? sale.buyerName : sale.agentName,
+                                                    style: const TextStyle(fontSize: 12, color: AppColors.textPrimary),
+                                                    overflow: TextOverflow.ellipsis,
+                                                  ),
+                                                ),
+                                              ],
                                             ),
-                                          ),
-                                          DataCell(
-                                            Text(
-                                              sale.buyerName.isNotEmpty
-                                                  ? sale.buyerName
-                                                  : sale.agentName,
-                                            ),
-                                          ),
-                                        ],
-                                      );
-                                    }),
-                                  ),
+                                          );
+                                        },
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
                             ),

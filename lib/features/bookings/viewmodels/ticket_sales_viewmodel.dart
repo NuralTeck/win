@@ -114,10 +114,6 @@ class TicketSalesViewModel extends StateNotifier<TicketSalesState> {
     );
   }
 
-  @override
-  void dispose() {
-    super.dispose();
-  }
 }
 
 final ticketSalesViewModelProvider =

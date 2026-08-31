@@ -217,43 +217,60 @@ class DashboardScreen extends ConsumerWidget {
             const SizedBox(height: 24),
 
             // ── 4 KPI Cards ─────────────────────────────────────────────────
-            GridView.count(
-              crossAxisCount: 4,
-              crossAxisSpacing: 16,
-              mainAxisSpacing: 16,
-              childAspectRatio: 2.2,
-              shrinkWrap: true,
-              physics: const NeverScrollableScrollPhysics(),
-              children: [
-                _KpiCard(
-                  title: 'Total Collection',
-                  value: 'Rs. ${fmt.format(state.totalCollection)}',
-                  subtitle: '${state.filter} Revenue',
-                  icon: Icons.currency_rupee_rounded,
-                  color: const Color(0xFF22C55E),
-                ),
-                _KpiCard(
-                  title: 'Total Tickets',
-                  value: fmt.format(state.totalTickets),
-                  subtitle: '${state.filter} Booked',
-                  icon: Icons.local_activity_rounded,
-                  color: const Color(0xFF6366F1),
-                ),
-                _KpiCard(
-                  title: 'Active Parties',
-                  value: state.totalParties.toString(),
-                  subtitle: 'Sellers / Agents',
-                  icon: Icons.groups_rounded,
-                  color: const Color(0xFFF59E0B),
-                ),
-                _KpiCard(
-                  title: 'Total Inami',
-                  value: 'Rs. ${fmt.format(state.totalInami)}',
-                  subtitle: 'Winning Payout',
-                  icon: Icons.emoji_events_rounded,
-                  color: const Color(0xFFEF4444),
-                ),
-              ],
+            LayoutBuilder(
+              builder: (context, constraints) {
+                final int crossAxisCount;
+                final double childAspectRatio;
+                if (constraints.maxWidth > 1100) {
+                  crossAxisCount = 4;
+                  childAspectRatio = 1.9;
+                } else if (constraints.maxWidth > 650) {
+                  crossAxisCount = 2;
+                  childAspectRatio = 2.4;
+                } else {
+                  crossAxisCount = 1;
+                  childAspectRatio = 3.2;
+                }
+
+                return GridView.count(
+                  crossAxisCount: crossAxisCount,
+                  crossAxisSpacing: 16,
+                  mainAxisSpacing: 16,
+                  childAspectRatio: childAspectRatio,
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  children: [
+                    _KpiCard(
+                      title: 'Total Collection',
+                      value: 'Rs. ${fmt.format(state.totalCollection)}',
+                      subtitle: '${state.filter} Revenue',
+                      icon: Icons.currency_rupee_rounded,
+                      color: const Color(0xFF22C55E),
+                    ),
+                    _KpiCard(
+                      title: 'Total Tickets',
+                      value: fmt.format(state.totalTickets),
+                      subtitle: '${state.filter} Booked',
+                      icon: Icons.local_activity_rounded,
+                      color: const Color(0xFF6366F1),
+                    ),
+                    _KpiCard(
+                      title: 'Active Parties',
+                      value: state.totalParties.toString(),
+                      subtitle: 'Sellers / Agents',
+                      icon: Icons.groups_rounded,
+                      color: const Color(0xFFF59E0B),
+                    ),
+                    _KpiCard(
+                      title: 'Total Inami',
+                      value: 'Rs. ${fmt.format(state.totalInami)}',
+                      subtitle: 'Winning Payout',
+                      icon: Icons.emoji_events_rounded,
+                      color: const Color(0xFFEF4444),
+                    ),
+                  ],
+                );
+              },
             ),
             const SizedBox(height: 24),
 
@@ -457,7 +474,7 @@ class _KpiCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(18),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
       decoration: BoxDecoration(
         color: AppColors.surfaceContainerHigh,
         borderRadius: AppDecorations.radiusLg,
@@ -473,30 +490,36 @@ class _KpiCard extends StatelessWidget {
             ),
             child: Icon(icon, color: color, size: 22),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
                   title,
                   style: AppTypography.labelSm.copyWith(
                       color: AppColors.textSecondary,
                       fontWeight: FontWeight.w600),
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
-                const SizedBox(height: 4),
-                Text(
-                  value,
-                  style: AppTypography.titleLg.copyWith(
-                      color: color, fontWeight: FontWeight.w800),
-                  overflow: TextOverflow.ellipsis,
+                const SizedBox(height: 2),
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    value,
+                    style: AppTypography.titleLg.copyWith(
+                        color: color, fontWeight: FontWeight.w800),
+                  ),
                 ),
                 Text(
                   subtitle,
                   style: AppTypography.labelSm
                       .copyWith(color: AppColors.textSecondary),
+                  maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                 ),
               ],

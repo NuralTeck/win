@@ -30,7 +30,7 @@ class _ParsedItem {
 
 /// Real-time Visual Syntax Highlighting Controller for Ticket Text Input
 class _TicketSyntaxHighlightingController extends TextEditingController {
-  _TicketSyntaxHighlightingController({super.text});
+  _TicketSyntaxHighlightingController();
 
   @override
   TextSpan buildTextSpan({
@@ -71,7 +71,7 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
         continue;
       }
 
-      // Check if line has a WhatsApp chat export / copy header e.g. "[10:10 pm, 21/08/2026] l) sanjeet: 12"
+      // Check if line has a WhatsApp chat export / copy header
       final waHeaderMatch = RegExp(
         r'^(\s*\[[^\]]+\]\s*[^:\n]+:\s*|\s*\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|AM|PM)?\s*-\s*[^:\n]+:\s*)(.*)$',
         caseSensitive: false,
@@ -87,7 +87,32 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
 
       final contentTrimmed = contentToHighlight.trim();
 
-      // 1. Shift Tag (Cyan Highlight) — require 'pm'/'baje' for standalone digits
+      // 1. Check for Invalid long digit numbers (> 5 continuous digits without separator)
+      final hasTooLongDigits = RegExp(r'\b\d{6,}\b').hasMatch(contentTrimmed);
+      if (hasTooLongDigits) {
+        final List<TextSpan> lineSpans = [];
+        if (waHeaderPrefix != null) {
+          lineSpans.add(TextSpan(
+            text: waHeaderPrefix,
+            style: (style ?? const TextStyle()).copyWith(color: const Color(0xFF94A3B8), fontSize: 11),
+          ));
+        }
+        lineSpans.add(TextSpan(
+          text: contentToHighlight + lineEnding,
+          style: (style ?? const TextStyle()).copyWith(
+            color: const Color(0xFFF87171),
+            backgroundColor: const Color(0xFF7F1D1D).withAlpha(150),
+            decoration: TextDecoration.underline,
+            decorationColor: Colors.redAccent,
+            decorationStyle: TextDecorationStyle.wavy,
+            fontWeight: FontWeight.bold,
+          ),
+        ));
+        spans.add(TextSpan(children: lineSpans));
+        continue;
+      }
+
+      // 2. Shift Tag (Cyan Highlight)
       if (RegExp(
         r'(?:=|\b)(?:dear\s*)?[168](?::00|\.00|\.)?\s*pm\b'
         r'|^\bmorning\b$|^\bday\b$|^\bnight\b$|^\bevening\b$'
@@ -114,7 +139,7 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
         continue;
       }
 
-      // 2. Date Tag (Indigo / Blue Highlight)
+      // 3. Date Tag (Indigo / Blue Highlight)
       if (RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})([=\/\.-]\d{2,4})?\b|\b(?:kal|tomorrow|aaj|today)\b', caseSensitive: false).hasMatch(contentTrimmed) &&
           !RegExp(r'\b\d{5}\b').hasMatch(contentTrimmed)) {
         final List<TextSpan> lineSpans = [];
@@ -136,7 +161,7 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
         continue;
       }
 
-      // 3. Standalone Series Tag (Purple) — e.g. "12", "24", "6", "6."
+      // 4. Standalone Series Tag (Purple)
       if (RegExp(r'^\s*(?:series|serial|sere|sereis)?\s*[:=-]?\s*\(?\d{1,4}[a-z.]?\)?\s*[:=-]?\s*$', caseSensitive: false).hasMatch(contentTrimmed) &&
           !RegExp(r'\b\d{5}\b').hasMatch(contentTrimmed)) {
         final List<TextSpan> lineSpans = [];
@@ -158,11 +183,24 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
         continue;
       }
 
-      // 4. Valid 5-Digit Ticket Line — inline series (purple) + ticket (green) coloring
-      final has5Digits = RegExp(r'\b\d{5}\b').hasMatch(contentTrimmed);
-      final isRangeFormat = RegExp(r'\d{5}\s*[-–to]+\s*\d{1,5}', caseSensitive: false).hasMatch(contentTrimmed);
+      // 5. Metadata / Note lines
+      if (RegExp(r'^\s*(?:wakil|sk|booking|bokakg|updated|note|total)\b', caseSensitive: false).hasMatch(contentTrimmed) &&
+          !RegExp(r'\b\d{5}\b').hasMatch(contentTrimmed)) {
+        spans.add(TextSpan(
+          text: line + lineEnding,
+          style: (style ?? const TextStyle()).copyWith(
+            color: Colors.lightBlueAccent.shade100,
+            fontStyle: FontStyle.italic,
+          ),
+        ));
+        continue;
+      }
 
-      if (has5Digits || isRangeFormat) {
+      // 6. Valid 5-Digit Ticket Line
+      final hasExact5Digits = RegExp(r'\b\d{5}\b').hasMatch(contentTrimmed);
+      final isRangeFormat = RegExp(r'\d{5}\s*(?:--|\s+to\s+|-)\s*\d{1,5}', caseSensitive: false).hasMatch(contentTrimmed);
+
+      if (hasExact5Digits || isRangeFormat) {
         const purpleStyle = TextStyle(
           color: Color(0xFFC084FC),
           backgroundColor: Color(0x806B21A8),
@@ -182,18 +220,15 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
           ));
         }
 
-        // Match 5-digit number inside contentToHighlight
         final fiveDigitMatchInContent = RegExp(r'\d{5}').firstMatch(contentToHighlight);
 
         if (fiveDigitMatchInContent != null) {
           final beforeTicket = contentToHighlight.substring(0, fiveDigitMatchInContent.start);
-          final fromTicket   = contentToHighlight.substring(fiveDigitMatchInContent.start);
+          final fromTicket = contentToHighlight.substring(fiveDigitMatchInContent.start);
 
-          // Is the part before the ticket a series prefix? (1-4 digits, optional letter, any symbol/whitespace separator)
           final isSeriesPrefix = beforeTicket.trim().isNotEmpty &&
               RegExp(r'^\s*\(?\d{1,4}[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]*\s*$', caseSensitive: false).hasMatch(beforeTicket);
 
-          // Is the part after the ticket a series suffix? e.g. "=24", "**36", "*24", ",24c", "/12"
           final suffixMatchInLine = RegExp(r'^(\d{5})((?:[=\-*\/#:\._,~@|\\!\$%\^&+\s]+\s*\(?\d{1,4}[a-z]?\)?).*)$', caseSensitive: false).firstMatch(fromTicket);
           final isSeriesSuffix = !isSeriesPrefix && suffixMatchInLine != null;
 
@@ -204,14 +239,12 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
             lineSpans.add(TextSpan(text: suffixMatchInLine.group(1)!, style: (style ?? const TextStyle()).merge(greenStyle)));
             lineSpans.add(TextSpan(text: suffixMatchInLine.group(2)! + lineEnding, style: (style ?? const TextStyle()).merge(purpleStyle)));
           } else {
-            // Plain 5-digit ticket — green
             lineSpans.add(TextSpan(
               text: contentToHighlight + lineEnding,
               style: (style ?? const TextStyle()).merge(greenStyle),
             ));
           }
         } else {
-          // Range without clear split — all green
           lineSpans.add(TextSpan(
             text: contentToHighlight + lineEnding,
             style: (style ?? const TextStyle()).merge(greenStyle),
@@ -221,7 +254,7 @@ class _TicketSyntaxHighlightingController extends TextEditingController {
         continue;
       }
 
-      // 5. Error / Unrecognized Line (Bright Red / Wavy Underline Highlight!)
+      // 7. Error / Unrecognized Line
       spans.add(TextSpan(
         text: line + lineEnding,
         style: (style ?? const TextStyle()).copyWith(
@@ -260,6 +293,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
   final FocusNode _rawTextFocusNode = FocusNode();
   final ScrollController _rawTextScrollCtrl = ScrollController();
   final TextEditingController _customerCtrl = TextEditingController();
+  final TextEditingController _leftSearchCtrl = TextEditingController();
   late String _selectedShift;
   late DateTime _selectedDate;
   String _fallbackSeries = '12';
@@ -273,6 +307,16 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
 
   int _lastJumpedOccurrence = 0;
   String _lastJumpedText = '';
+
+  int _leftSearchMatchCount = 0;
+  int _currentLeftSearchIndex = 0;
+
+  final TextEditingController _quickSeriesCtrl = TextEditingController();
+  final TextEditingController _quickFromTicketCtrl = TextEditingController();
+  final TextEditingController _quickToRangeCtrl = TextEditingController();
+  final FocusNode _quickFromTicketFocusNode = FocusNode();
+  final FocusNode _quickToRangeFocusNode = FocusNode();
+  final FocusNode _quickSeriesFocusNode = FocusNode();
 
   @override
   void initState() {
@@ -291,11 +335,231 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     _rawTextFocusNode.dispose();
     _rawTextScrollCtrl.dispose();
     _customerCtrl.dispose();
+    _leftSearchCtrl.dispose();
     _searchCtrl.dispose();
+    _quickSeriesCtrl.dispose();
+    _quickFromTicketCtrl.dispose();
+    _quickToRangeCtrl.dispose();
+    _quickFromTicketFocusNode.dispose();
+    _quickToRangeFocusNode.dispose();
+    _quickSeriesFocusNode.dispose();
     super.dispose();
   }
 
-  /// Jump cursor and select the clicked unrecognized line in the left text editor
+  /// Add quick 2-box range or single ticket directly into the parser text box
+  void _addQuickRangeToParser() {
+    final fromText = _quickFromTicketCtrl.text.trim();
+    if (fromText.isEmpty || fromText.length != 5) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⚠️ First box requires an exact 5-digit number (e.g. 28311)'),
+          backgroundColor: Colors.orangeAccent,
+          duration: Duration(seconds: 2),
+        ),
+      );
+      _quickFromTicketFocusNode.requestFocus();
+      return;
+    }
+
+    final seriesVal = _quickSeriesCtrl.text.trim().isNotEmpty
+        ? _quickSeriesCtrl.text.trim().toUpperCase()
+        : _fallbackSeries;
+    _fallbackSeries = seriesVal;
+    _quickSeriesCtrl.text = seriesVal;
+
+    final toText = _quickToRangeCtrl.text.trim();
+
+    String lineToAdd = '';
+    if (toText.isNotEmpty) {
+      // Range format e.g. "12- 28311-15" or "12- 28311-315"
+      lineToAdd = '$seriesVal- $fromText-$toText';
+    } else {
+      // Single 5-digit format e.g. "12- 28311"
+      lineToAdd = '$seriesVal- $fromText';
+    }
+
+    final currentText = _rawTextCtrl.text;
+    final newText = currentText.isEmpty
+        ? lineToAdd
+        : (currentText.endsWith('\n') ? '$currentText$lineToAdd' : '$currentText\n$lineToAdd');
+
+    _rawTextCtrl.text = newText;
+    _quickFromTicketCtrl.clear();
+    _quickToRangeCtrl.clear();
+    
+    // Focus returns to Series field pre-filled so operator can press Enter to keep it or type new series!
+    _quickSeriesFocusNode.requestFocus();
+    _quickSeriesCtrl.selection = TextSelection(
+      baseOffset: 0,
+      extentOffset: _quickSeriesCtrl.text.length,
+    );
+  }
+
+  /// Open Modal to edit an existing parsed ticket entry
+  Future<void> _editParsedItem(_ParsedItem item) async {
+    final seriesCtrl = TextEditingController(text: item.series);
+    final ticketNoCtrl = TextEditingController(text: item.ticketNo);
+    final qtyCtrl = TextEditingController(text: item.quantity.toString());
+    final priceCtrl = TextEditingController(text: item.pricePerTicket.toStringAsFixed(0));
+
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1E293B),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: Color(0xFF334155))),
+          title: Row(
+            children: [
+              const Icon(Icons.edit_note_rounded, color: Colors.cyanAccent, size: 22),
+              const SizedBox(width: 8),
+              const Text('Edit Ticket Entry', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: seriesCtrl,
+                  keyboardType: TextInputType.number,
+                  style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold),
+                  decoration: const InputDecoration(
+                    labelText: 'Series',
+                    labelStyle: TextStyle(color: Colors.grey),
+                    isDense: true,
+                    filled: true,
+                    fillColor: Color(0xFF0F172A),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: ticketNoCtrl,
+                  keyboardType: TextInputType.number,
+                  maxLength: 5,
+                  style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.bold, fontFamily: 'monospace'),
+                  decoration: const InputDecoration(
+                    labelText: '5-Digit Ticket No',
+                    labelStyle: TextStyle(color: Colors.grey),
+                    counterText: '',
+                    isDense: true,
+                    filled: true,
+                    fillColor: Color(0xFF0F172A),
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: qtyCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Quantity',
+                          labelStyle: TextStyle(color: Colors.grey),
+                          isDense: true,
+                          filled: true,
+                          fillColor: Color(0xFF0F172A),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: TextField(
+                        controller: priceCtrl,
+                        keyboardType: TextInputType.number,
+                        style: const TextStyle(color: Colors.white),
+                        decoration: const InputDecoration(
+                          labelText: 'Price (₹)',
+                          labelStyle: TextStyle(color: Colors.grey),
+                          isDense: true,
+                          filled: true,
+                          fillColor: Color(0xFF0F172A),
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: AppColors.primary, foregroundColor: Colors.white),
+              onPressed: () {
+                if (ticketNoCtrl.text.trim().isNotEmpty) {
+                  Navigator.of(ctx).pop(true);
+                }
+              },
+              child: const Text('Save Changes'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (result == true) {
+      setState(() {
+        item.series = _cleanSeries(seriesCtrl.text.trim(), fallback: item.series);
+        item.ticketNo = ticketNoCtrl.text.trim().padLeft(5, '0');
+        item.quantity = int.tryParse(qtyCtrl.text.trim()) ?? item.quantity;
+        item.pricePerTicket = double.tryParse(priceCtrl.text.trim()) ?? item.pricePerTicket;
+      });
+    }
+  }
+
+  /// Perform search & navigation in left text editor
+  void _performLeftSearch(String query, {bool jumpNext = true}) {
+    final q = query.trim();
+    if (q.isEmpty) {
+      setState(() {
+        _leftSearchMatchCount = 0;
+        _currentLeftSearchIndex = 0;
+      });
+      return;
+    }
+
+    final text = _rawTextCtrl.text;
+    final matches = RegExp(RegExp.escape(q), caseSensitive: false).allMatches(text).toList();
+
+    if (matches.isEmpty) {
+      setState(() {
+        _leftSearchMatchCount = 0;
+        _currentLeftSearchIndex = 0;
+      });
+      return;
+    }
+
+    final offsets = matches.map((m) => m.start).toList();
+    int nextIdx = _currentLeftSearchIndex;
+    if (jumpNext) {
+      nextIdx = (_currentLeftSearchIndex + 1) % offsets.length;
+    } else {
+      nextIdx = (_currentLeftSearchIndex - 1 + offsets.length) % offsets.length;
+    }
+
+    setState(() {
+      _leftSearchMatchCount = offsets.length;
+      _currentLeftSearchIndex = nextIdx;
+    });
+
+    final targetOffset = offsets[nextIdx];
+    _rawTextFocusNode.requestFocus();
+    _rawTextCtrl.selection = TextSelection(
+      baseOffset: targetOffset,
+      extentOffset: targetOffset + q.length,
+    );
+  }
+
+  /// Jump cursor and select the clicked unrecognized/invalid line in the left text editor
   void _jumpToUnparsedLine(String targetLine) {
     final fullText = _rawTextCtrl.text;
     if (fullText.isEmpty) return;
@@ -310,7 +574,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         matchOffsets.add(currentOffset);
         matchLengths.add(line.length);
       }
-      currentOffset += line.length + 1; // +1 for '\n'
+      currentOffset += line.length + 1;
     }
 
     if (matchOffsets.isEmpty) return;
@@ -332,11 +596,32 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     );
   }
 
-  void _onTextChanged() {
-    _parseRawText(_rawTextCtrl.text);
+  void _updateLeftSearchCountOnly(String query) {
+    final q = query.trim();
+    if (q.isEmpty) {
+      setState(() {
+        _leftSearchMatchCount = 0;
+        _currentLeftSearchIndex = 0;
+      });
+      return;
+    }
+    final text = _rawTextCtrl.text;
+    final matches = RegExp(RegExp.escape(q), caseSensitive: false).allMatches(text).toList();
+    setState(() {
+      _leftSearchMatchCount = matches.length;
+      if (_currentLeftSearchIndex >= matches.length) {
+        _currentLeftSearchIndex = 0;
+      }
+    });
   }
 
-  /// Clean series number e.g. "12c" -> "12", "12s" -> "12", "(24)" -> "24"
+  void _onTextChanged() {
+    _parseRawText(_rawTextCtrl.text);
+    if (_leftSearchCtrl.text.isNotEmpty) {
+      _updateLeftSearchCountOnly(_leftSearchCtrl.text);
+    }
+  }
+
   String _cleanSeries(String raw, {String fallback = '12'}) {
     final digits = raw.replaceAll(RegExp(r'\D'), '');
     if (digits.isNotEmpty && digits.length <= 4) {
@@ -345,7 +630,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     return digits.isNotEmpty ? digits.substring(0, 3) : fallback;
   }
 
-  /// Calculate ticket price based on active series price configuration
   double _getPriceForSeries(String series) {
     final state = ref.read(seriesPriceViewModelProvider);
     final calculated = state.getPriceForSeries(series);
@@ -356,7 +640,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     return numVal * 3.75;
   }
 
-  /// Expand short & full ticket ranges e.g. "04560 - 61" -> ["04560", "04561"], "12345-9" -> ["12345"..."12349"]
   List<String>? _expandTicketRange(String startTkt, String endPart) {
     if (startTkt.length != 5) return null;
 
@@ -365,19 +648,16 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
 
     int? endFull;
     if (endPart.length == 1) {
-      // e.g. 12345-9 -> prefix "1234", start digit 5, end digit 9
       final prefix = startTkt.substring(0, 4);
       final lastDigit = int.tryParse(endPart);
       if (lastDigit == null) return null;
       endFull = int.tryParse('$prefix$lastDigit');
     } else if (endPart.length == 2) {
-      // e.g. 04560-61 -> prefix "045", start digits 60, end digits 61
       final prefix = startTkt.substring(0, 3);
       final last2 = int.tryParse(endPart);
       if (last2 == null) return null;
       endFull = int.tryParse('$prefix$endPart');
     } else if (endPart.length == 3) {
-      // e.g. 04560-565 -> prefix "04", start 560, end 565
       final prefix = startTkt.substring(0, 2);
       final last3 = int.tryParse(endPart);
       if (last3 == null) return null;
@@ -399,7 +679,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
 
   List<String> _unparsedLines = [];
 
-  /// Main text parsing engine matching WhatsApp & Parcha formats
   void _parseRawText(String text) {
     if (text.trim().isEmpty) {
       setState(() {
@@ -413,12 +692,10 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     DateTime detectedDate = _selectedDate;
 
     final rawLines = text.split(RegExp(r'[\r\n]+'));
-    // Filter and clean WhatsApp noise
     final List<String> lines = [];
     for (final rLine in rawLines) {
       final t = rLine.trim();
       if (t.isEmpty) continue;
-      // Skip forwarded message markers
       if (RegExp(r'^\s*(?:forwarded|forwarded message|fwd|forward|\*forwarded\*)\s*$', caseSensitive: false).hasMatch(t)) {
         continue;
       }
@@ -429,10 +706,11 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     final List<String> unparsed = [];
     String currentSeries = _fallbackSeries;
 
+    final standardShares = {'1', '2', '3', '4', '5', '6', '10', '12', '18', '20', '24', '25', '30', '36', '40', '50', '60', '100'};
+
     for (int i = 0; i < lines.length; i++) {
       var line = lines[i];
 
-      // Check and strip WhatsApp message headers e.g. "[10:10 pm, 21/08/2026] l) sanjeet: 12"
       final waHeader = RegExp(
         r'^\s*\[([^\]]+)\]\s*([^:\n]+):\s*(.*)$',
         caseSensitive: false,
@@ -445,7 +723,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         final metaPart = waHeader.group(1) ?? '';
         final bodyPart = waHeader.group(3) ?? '';
 
-        // Extract Date from WhatsApp metadata if present
         if (_autoDetectDate) {
           final dateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})[=\/\.-](\d{2,4})\b').firstMatch(metaPart);
           if (dateMatch != null) {
@@ -463,7 +740,12 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         if (line.isEmpty) continue;
       }
 
-      // Strip WhatsApp delivery timestamps (e.g. " 10:10 pm", " 10:10 am") if line has ticket/series
+      // STRICT INVALIDATION: Any unbroken number with more than 5 digits is immediately invalid!
+      if (RegExp(r'\b\d{6,}\b').hasMatch(line)) {
+        unparsed.add(line);
+        continue;
+      }
+
       final has5Digits = RegExp(r'\b\d{5}\b').hasMatch(line);
       final isSeriesOnly = RegExp(r'^\s*\(?\d{1,4}[a-z]?\)?\s*[:=-]?\s*$', caseSensitive: false).hasMatch(line);
       if (has5Digits || isSeriesOnly) {
@@ -472,7 +754,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
 
       bool isDateOrShiftHeader = false;
 
-      // 1. Check Shift Tag on this line
+      // 1. Shift Tag
       if (_autoDetectShift) {
         if (RegExp(r'(?:=|\b)(?:dear\s*)?1(?:\.00|:00|\.)?\s*pm\b|morning|^\s*dear\s*1(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*1(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
           detectedShift = 'Dear 1 PM';
@@ -486,7 +768,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         }
       }
 
-      // 2. Check Date Tag on this line (supports combined lines like "26/7/26. 1:00 pm")
+      // 2. Date Tag
       if (_autoDetectDate) {
         final fullDateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})[=\/\.-](\d{2,4})\b').firstMatch(line);
         final shortDateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})\b').firstMatch(line);
@@ -511,44 +793,47 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         }
       }
 
-      // If line is purely a Date/Shift header line without ticket numbers, skip to next line
+      // Skip party/metadata lines without tickets
+      if (RegExp(r'^\s*(?:wakil|sk|booking|bokakg|updated|note|total)\b', caseSensitive: false).hasMatch(line) &&
+          !RegExp(r'\b\d{5}\b').hasMatch(line)) {
+        continue;
+      }
+
       if (isDateOrShiftHeader && !RegExp(r'\b\d{5}\b').hasMatch(line)) {
         continue;
       }
 
-      // 3. Standalone Series line e.g. "Series: 12", "12c", "24", "36=", "5"
+      // 3. Standalone Series line
       final seriesOnlyMatch = RegExp(r'^\s*(?:series|serial|sere|sereis)?\s*[:=-]?\s*\(?(\d{1,4})[a-z]?\)?\s*[:=-]?\s*$', caseSensitive: false).firstMatch(line);
       if (seriesOnlyMatch != null && !RegExp(r'\b\d{5}\b').hasMatch(line)) {
         currentSeries = seriesOnlyMatch.group(1) ?? currentSeries;
         continue;
       }
 
-      // Lookahead: If this line is a 5-digit ticket without a series prefix, check if next line is a standalone series tag (e.g. 71586 followed by 24c)
-      final hasNoExplicitPrefix = !RegExp(r'^\s*\(?\d{1,4}[a-z]?\)?\s*[-=:\s]+', caseSensitive: false).hasMatch(line);
-      if (has5Digits && hasNoExplicitPrefix && i + 1 < lines.length) {
-        final nextLineClean = lines[i + 1].replaceFirst(RegExp(r'\s+\d{1,2}:\d{2}\s*(?:am|pm)\b', caseSensitive: false), '').trim();
-        final nextSeriesMatch = RegExp(r'^\s*(?:series|serial|sere|sereis)?\s*[:=-]?\s*\(?(\d{1,4})[a-z]?\)?\s*[:=-]?\s*$', caseSensitive: false).firstMatch(nextLineClean);
-        if (nextSeriesMatch != null && !RegExp(r'\b\d{5}\b').hasMatch(nextLineClean)) {
-          currentSeries = nextSeriesMatch.group(1) ?? currentSeries;
-        }
-      }
-
-      // 4. Parse Ticket Formats on this line:
+      // 4. Parse Tickets:
       int previousCount = items.length;
 
-      // Pattern A: Range format with or without leading series:
-      // Examples: "04560 - 61 = 2", "12345-9", "36**65491-95", "36 65491-95-5", "12- 45671-75", "12 45671 to 45675"
-      final rangeMatch = RegExp(r'^(?:\(?(\d{1,4})[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]+)?(\d{5})\s*[-–to]+\s*(\d{1,5})(?:\s*[-=x*:\s]\s*(\d+))?\s*$', caseSensitive: false).firstMatch(line);
-      if (rangeMatch != null) {
-        final seriesPart = rangeMatch.group(1);
-        final s = seriesPart != null ? _cleanSeries(seriesPart, fallback: currentSeries) : currentSeries;
-        currentSeries = s;
+      // Range format e.g. "12- 31112-20", "12- 12345-9", "31112 to 31120", "28311--28315"
+      final explicitRangeMatch = RegExp(
+        r'^(?:\(?(\d{1,4})[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]+)?(\d{5})\s*(?:--|\s+to\s+|-)(\d{1,5})(?:\s*[-=x*:\s]\s*(\d+))?\s*$',
+        caseSensitive: false,
+      ).firstMatch(line);
 
-        final startTkt = rangeMatch.group(2)!;
-        final endPart = rangeMatch.group(3)!;
+      bool handledAsRange = false;
+      if (explicitRangeMatch != null) {
+        final seriesPart = explicitRangeMatch.group(1);
+        final startTkt = explicitRangeMatch.group(2)!;
+        final endPart = explicitRangeMatch.group(3)!;
+        final countPart = explicitRangeMatch.group(4);
+
+        final isExplicit = line.contains('--') || line.toLowerCase().contains('to') || countPart != null;
+        final isShortShare = standardShares.contains(endPart.trim());
 
         final expandedNumbers = _expandTicketRange(startTkt, endPart);
-        if (expandedNumbers != null && expandedNumbers.isNotEmpty) {
+        // If series prefix is given (e.g. "12- 31112-20") or explicit range or expandedNumbers is valid, treat as RANGE!
+        if (expandedNumbers != null && expandedNumbers.isNotEmpty && (seriesPart != null || isExplicit || !isShortShare || expandedNumbers.length > 1)) {
+          final s = seriesPart != null ? _cleanSeries(seriesPart, fallback: currentSeries) : currentSeries;
+          currentSeries = s;
           final price = _getPriceForSeries(s);
           for (final tNo in expandedNumbers) {
             items.add(_ParsedItem(
@@ -558,12 +843,18 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
               pricePerTicket: price,
             ));
           }
-          continue;
+          handledAsRange = true;
         }
       }
 
-      // Pattern B: Suffix Series format e.g. "81489=24", "88060**36", "88060*36", "04576,24c", "04576, 24", "84288=12", "92254=20"
-      final suffixSeriesMatch = RegExp(r'^(\d{5})\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]+\s*\(?(\d{1,4})[a-z]?\)?(?:\s*[-=x*:\s]\s*(\d+))?\s*$', caseSensitive: false).firstMatch(line);
+      if (handledAsRange) continue;
+
+      // Pattern B: Suffix Series format (e.g. 57952 -60, 52725 -40, 27269-12)
+      final suffixSeriesMatch = RegExp(
+        r'^(\d{5})\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]+\s*\(?(\d{1,4})[a-z]?\)?(?:\s*[-=x*:\s]\s*(\d+))?\s*$',
+        caseSensitive: false,
+      ).firstMatch(line);
+
       if (suffixSeriesMatch != null) {
         final s = _cleanSeries(suffixSeriesMatch.group(2)!, fallback: currentSeries);
         currentSeries = s;
@@ -579,8 +870,12 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         continue;
       }
 
-      // Pattern C: Prefix Series format with ANY symbol e.g. "36**88060", "36*88060", "36.88060", "(12)26180", "(24) 57655", "12- 15204", "12= 18255", "24 57655", "12=23423"
-      final prefixTktMatch = RegExp(r'^\(?(\d{1,4})[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]*\s*(\d{5})(?:\s*[-=x*:\s]\s*(\d+))?\s*$', caseSensitive: false).firstMatch(line);
+      // Pattern C: Prefix Series format (e.g. 12=14371, 6=09379, 12-46751)
+      final prefixTktMatch = RegExp(
+        r'^\(?(\d{1,4})[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]*\s*(\d{5})(?:\s*[-=x*:\s]\s*(\d+))?\s*$',
+        caseSensitive: false,
+      ).firstMatch(line);
+
       if (prefixTktMatch != null) {
         final s = _cleanSeries(prefixTktMatch.group(1)!, fallback: currentSeries);
         currentSeries = s;
@@ -596,10 +891,9 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         continue;
       }
 
-      // Pattern D: Comma or Space separated 5-digit tickets on one line e.g. "12- 15204, 15205, 15206" or "04570, 04573"
+      // Pattern D: Plain 5-digit tickets (single or multiple on same line)
       final all5Digits = RegExp(r'\b\d{5}\b').allMatches(line);
       if (all5Digits.isNotEmpty) {
-        // Look for leading series
         final leadSeriesMatch = RegExp(r'^\s*\(?(\d{1,4})[a-z]?\)?\s*[-=:\s]').firstMatch(line);
         if (leadSeriesMatch != null) {
           currentSeries = _cleanSeries(leadSeriesMatch.group(1)!, fallback: currentSeries);
@@ -617,7 +911,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         continue;
       }
 
-      // If line did not match any format and did not produce tickets:
       if (items.length == previousCount) {
         unparsed.add(line);
       }
@@ -635,7 +928,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     });
   }
 
-  /// Paste directly from system clipboard
   Future<void> _pasteFromClipboard() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
     if (data != null && data.text != null && data.text!.isNotEmpty) {
@@ -644,7 +936,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     }
   }
 
-  /// Change series for all parsed items
   void _applySeriesToAll(String newSeries) {
     final clean = _cleanSeries(newSeries);
     setState(() {
@@ -657,7 +948,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     });
   }
 
-  /// Save all parsed tickets directly into SQLite database & Riverpod
   Future<void> _confirmAndBookAll() async {
     if (_parsedItems.isEmpty) return;
 
@@ -698,10 +988,8 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         ));
       }
 
-      // Save Bulk to SQLite & Riverpod State
       await ref.read(ticketSalesViewModelProvider.notifier).addTicketSalesBulk(salesToSave);
 
-      // Auto-register customer if not exists
       try {
         final existingCustomers = ref.read(sellerCustomerViewModelProvider).sellers;
         final match = existingCustomers.any((c) => c.name.trim().toLowerCase() == customer.toLowerCase());
@@ -728,7 +1016,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                 const Icon(Icons.check_circle_rounded, color: Colors.greenAccent, size: 20),
                 const SizedBox(width: 10),
                 Text(
-                  '✅ Successfully Booked ${salesToSave.length} Ticket(s) for "$customer" ($_selectedShift)!',
+                  '✅ Successfully Booked ${salesToSave.length} Number(s) for "$customer" ($_selectedShift)!',
                   style: const TextStyle(fontWeight: FontWeight.bold),
                 ),
               ],
@@ -743,7 +1031,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         setState(() => _isSaving = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('❌ Error saving tickets: $e'),
+            content: Text('❌ Error saving numbers: $e'),
             backgroundColor: AppColors.error,
           ),
         );
@@ -789,7 +1077,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         ),
         child: Column(
           children: [
-            // ─── TOP HEADER BAR ──────────────────────────────────────────────
+            // TOP HEADER BAR
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               decoration: const BoxDecoration(
@@ -816,7 +1104,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'TICKET BOOKING TEXT PARSER',
+                          'NUMBER BOOKING TEXT PARSER',
                           style: TextStyle(
                             color: Colors.white,
                             fontSize: 16,
@@ -825,7 +1113,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                           ),
                         ),
                         Text(
-                          'Paste raw WhatsApp / Parcha text to automatically extract party, shift, date & tickets',
+                          'Paste raw WhatsApp / Parcha text to automatically extract party, shift, date & numbers',
                           style: TextStyle(color: Colors.grey.shade400, fontSize: 11.5),
                         ),
                       ],
@@ -851,11 +1139,11 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
               ),
             ),
 
-            // ─── MAIN TWO-COLUMN WORKSPACE ────────────────────────────────────
+            // MAIN TWO-COLUMN WORKSPACE
             Expanded(
               child: Row(
                 children: [
-                  // ─── LEFT PANEL: TEXT INPUT & SESSION CONTROLS ───────────────
+                  // LEFT PANEL: TEXT INPUT & SESSION CONTROLS
                   Container(
                     width: 440,
                     padding: const EdgeInsets.all(16),
@@ -866,10 +1154,8 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Controls Row: Shift, Date & Customer
                         Row(
                           children: [
-                            // Customer Field
                             Expanded(
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -913,7 +1199,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                               ),
                             ),
                             const SizedBox(width: 10),
-                            // Date Picker
                             Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
@@ -969,7 +1254,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                         ),
                         const SizedBox(height: 12),
 
-                        // Shift Selection Chips
                         const Text('Draw Shift Timing', style: TextStyle(color: Colors.grey, fontSize: 11, fontWeight: FontWeight.bold)),
                         const SizedBox(height: 4),
                         Row(
@@ -999,7 +1283,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                         ),
                         const SizedBox(height: 12),
 
-                        // Default Series selector
                         Row(
                           children: [
                             const Text('Default Series: ', style: TextStyle(color: Colors.grey, fontSize: 11.5, fontWeight: FontWeight.bold)),
@@ -1034,7 +1317,8 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                             ),
                           ],
                         ),
-                        // Color Legend Bar
+                        const SizedBox(height: 8),
+
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                           decoration: BoxDecoration(
@@ -1048,7 +1332,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                               const SizedBox(width: 4),
                               _buildLegendTag('🟢 Valid 5-Digit', const Color(0xFF4ADE80), const Color(0xFF14532D)),
                               const SizedBox(width: 6),
-                              _buildLegendTag('🔴 Invalid Error', const Color(0xFFF87171), const Color(0xFF7F1D1D)),
+                              _buildLegendTag('🔴 Invalid / >5 Digit', const Color(0xFFF87171), const Color(0xFF7F1D1D)),
                               const SizedBox(width: 6),
                               _buildLegendTag('🔵 Shift', const Color(0xFF38BDF8), const Color(0xFF0369A1)),
                             ],
@@ -1056,7 +1340,211 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                         ),
                         const SizedBox(height: 8),
 
-                        // Raw Text Multi-line Field with visible Scrollbar & Line Counter
+                        // LEFT TEXT EDITOR SEARCH & JUMP BAR
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0B1120),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFF334155)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.find_in_page_rounded, size: 16, color: Colors.cyanAccent),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: TextField(
+                                  controller: _leftSearchCtrl,
+                                  onChanged: (v) => _performLeftSearch(v, jumpNext: true),
+                                  style: const TextStyle(color: Colors.white, fontSize: 12, fontFamily: 'monospace'),
+                                  decoration: InputDecoration(
+                                    isDense: true,
+                                    border: InputBorder.none,
+                                    hintText: 'Search text in left box...',
+                                    hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 11.5),
+                                  ),
+                                ),
+                              ),
+                              if (_leftSearchMatchCount > 0)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  margin: const EdgeInsets.only(right: 6),
+                                  decoration: BoxDecoration(
+                                    color: Colors.cyan.withAlpha(40),
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: Border.all(color: Colors.cyanAccent.withAlpha(100)),
+                                  ),
+                                  child: Text(
+                                    '${_currentLeftSearchIndex + 1}/$_leftSearchMatchCount',
+                                    style: const TextStyle(color: Colors.cyanAccent, fontSize: 10, fontWeight: FontWeight.bold),
+                                  ),
+                                ),
+                              IconButton(
+                                icon: const Icon(Icons.arrow_upward_rounded, size: 15, color: Colors.grey),
+                                tooltip: 'Previous Match',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                                onPressed: _leftSearchMatchCount > 0
+                                    ? () => _performLeftSearch(_leftSearchCtrl.text, jumpNext: false)
+                                    : null,
+                              ),
+                              IconButton(
+                                icon: const Icon(Icons.arrow_downward_rounded, size: 15, color: Colors.grey),
+                                tooltip: 'Next Match',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+                                onPressed: _leftSearchMatchCount > 0
+                                    ? () => _performLeftSearch(_leftSearchCtrl.text, jumpNext: true)
+                                    : null,
+                              ),
+                              if (_leftSearchCtrl.text.isNotEmpty)
+                                IconButton(
+                                  icon: const Icon(Icons.clear_rounded, size: 14, color: Colors.grey),
+                                  tooltip: 'Clear search',
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(minWidth: 20, minHeight: 20),
+                                  onPressed: () {
+                                    _leftSearchCtrl.clear();
+                                    _performLeftSearch('', jumpNext: false);
+                                  },
+                                ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+
+                        // FAST 2-BOX RANGE & NUMBER ENTRY BAR (Series + From 5-Digits + To Max 3-Digits)
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF0F172A),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: const Color(0xFF2563EB).withAlpha(150)),
+                          ),
+                          child: Row(
+                            children: [
+                              // Series Input
+                              SizedBox(
+                                width: 80,
+                                height: 32,
+                                child: TextField(
+                                  controller: _quickSeriesCtrl,
+                                  focusNode: _quickSeriesFocusNode,
+                                  textCapitalization: TextCapitalization.characters,
+                                  textInputAction: TextInputAction.next,
+                                  style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.cyanAccent, fontSize: 12),
+                                  decoration: InputDecoration(
+                                    isDense: true,
+                                    hintText: 'Ser ($_fallbackSeries)',
+                                    hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 10.5),
+                                    contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+                                    filled: true,
+                                    fillColor: const Color(0xFF1E293B),
+                                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Colors.cyanAccent, width: 1.5)),
+                                  ),
+                                  onSubmitted: (val) {
+                                    final s = val.trim().isNotEmpty ? val.trim().toUpperCase() : _fallbackSeries;
+                                    _fallbackSeries = s;
+                                    _quickSeriesCtrl.text = s;
+                                    _quickFromTicketFocusNode.requestFocus();
+                                  },
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              // Box 1: From (Strictly 5-Digits Only)
+                              Expanded(
+                                flex: 3,
+                                child: SizedBox(
+                                  height: 32,
+                                  child: TextField(
+                                    controller: _quickFromTicketCtrl,
+                                    focusNode: _quickFromTicketFocusNode,
+                                    maxLength: 5,
+                                    keyboardType: TextInputType.number,
+                                    textInputAction: TextInputAction.next,
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.digitsOnly,
+                                      LengthLimitingTextInputFormatter(5),
+                                    ],
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Color(0xFF4ADE80), fontSize: 13),
+                                    decoration: InputDecoration(
+                                      isDense: true,
+                                      counterText: '',
+                                      hintText: 'From (5-Digits) *',
+                                      hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                      filled: true,
+                                      fillColor: const Color(0xFF1E293B),
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF4ADE80), width: 1.5)),
+                                    ),
+                                    onSubmitted: (_) {
+                                      if (_quickToRangeCtrl.text.isNotEmpty) {
+                                        _addQuickRangeToParser();
+                                      } else {
+                                        _quickToRangeFocusNode.requestFocus();
+                                      }
+                                    },
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              // Box 2: To Range End (Strictly Max 3-Digits Only)
+                              Expanded(
+                                flex: 2,
+                                child: SizedBox(
+                                  height: 32,
+                                  child: TextField(
+                                    controller: _quickToRangeCtrl,
+                                    focusNode: _quickToRangeFocusNode,
+                                    maxLength: 3,
+                                    keyboardType: TextInputType.number,
+                                    textInputAction: TextInputAction.done,
+                                    inputFormatters: [
+                                      FilteringTextInputFormatter.digitsOnly,
+                                      LengthLimitingTextInputFormatter(3),
+                                    ],
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontFamily: 'monospace', color: Colors.amberAccent, fontSize: 13),
+                                    decoration: InputDecoration(
+                                      isDense: true,
+                                      counterText: '',
+                                      hintText: 'To (Max 3-Dig)',
+                                      hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 11),
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                      filled: true,
+                                      fillColor: const Color(0xFF1E293B),
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Color(0xFF334155))),
+                                      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(6), borderSide: const BorderSide(color: Colors.amberAccent, width: 1.5)),
+                                    ),
+                                    onSubmitted: (_) => _addQuickRangeToParser(),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              // + Add Button
+                              SizedBox(
+                                height: 32,
+                                child: ElevatedButton.icon(
+                                  onPressed: _addQuickRangeToParser,
+                                  icon: const Icon(Icons.add, size: 14),
+                                  label: const Text('ADD', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5)),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF2563EB),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+
                         Expanded(
                           child: Stack(
                             children: [
@@ -1141,11 +1629,10 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                     ),
                   ),
 
-                  // ─── RIGHT PANEL: LIVE PARSED PREVIEW TABLE ──────────────────
+                  // RIGHT PANEL: LIVE PARSED PREVIEW TABLE
                   Expanded(
                     child: Column(
                       children: [
-                        // KPI Summary Header
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
                           decoration: const BoxDecoration(
@@ -1180,7 +1667,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                     spacing: 6,
                                     runSpacing: 4,
                                     children: [
-                                      // ALL Series Chip
                                       InkWell(
                                         onTap: () {
                                           setState(() => _selectedSeriesFilter = 'All');
@@ -1206,7 +1692,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                           ),
                                         ),
                                       ),
-                                      // Individual Series Chips
                                       ...seriesBreakdown.entries.map((e) {
                                         final isSel = _selectedSeriesFilter == e.key;
                                         return InkWell(
@@ -1245,7 +1730,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                           ),
                         ),
 
-                        // ⚠️ Unrecognized / Skipped Lines Warning Banner (Prominent at Top)
+                        // Unrecognized / Invalid Lines Warning Banner
                         if (_unparsedLines.isNotEmpty)
                           Container(
                             margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
@@ -1270,7 +1755,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                     const Icon(Icons.error_outline_rounded, color: Colors.redAccent, size: 20),
                                     const SizedBox(width: 8),
                                     Text(
-                                      '⚠️ ${_unparsedLines.length} Line(s) Samajh Nahi Aayi (Edit in Left Box):',
+                                      '⚠️ ${_unparsedLines.length} Invalid / >5 Digit Line(s) (Click to Jump & Edit):',
                                       style: const TextStyle(
                                         color: Colors.white,
                                         fontWeight: FontWeight.w900,
@@ -1285,7 +1770,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                         borderRadius: BorderRadius.circular(4),
                                       ),
                                       child: const Text(
-                                        'UNRECOGNIZED',
+                                        'INVALID',
                                         style: TextStyle(
                                           color: Colors.redAccent,
                                           fontSize: 10,
@@ -1298,7 +1783,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                 ),
                                 const SizedBox(height: 6),
                                 Text(
-                                  'Ye text ticket/series format me fit nahi hua. Left panel me red wavy line dekhein aur edit karein:',
+                                  'Ye number 5-digit se bada hai ya ticket format me match nahi hua. Click karke seedha theek karein:',
                                   style: TextStyle(color: Colors.grey.shade300, fontSize: 11.5),
                                 ),
                                 const SizedBox(height: 8),
@@ -1323,13 +1808,18 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                             children: [
                                               const Icon(Icons.edit_note_rounded, size: 14, color: Colors.redAccent),
                                               const SizedBox(width: 5),
-                                              Text(
-                                                unp,
-                                                style: const TextStyle(
-                                                  color: Color(0xFFFCA5A5),
-                                                  fontSize: 12,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontFamily: 'monospace',
+                                              ConstrainedBox(
+                                                constraints: const BoxConstraints(maxWidth: 220),
+                                                child: Text(
+                                                  unp,
+                                                  maxLines: 1,
+                                                  overflow: TextOverflow.ellipsis,
+                                                  style: const TextStyle(
+                                                    color: Color(0xFFFCA5A5),
+                                                    fontSize: 12,
+                                                    fontWeight: FontWeight.bold,
+                                                    fontFamily: 'monospace',
+                                                  ),
                                                 ),
                                               ),
                                               const SizedBox(width: 4),
@@ -1345,7 +1835,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                             ),
                           ),
 
-                        // Search Bar
                         if (_parsedItems.isNotEmpty)
                           Container(
                             margin: const EdgeInsets.fromLTRB(12, 10, 12, 0),
@@ -1355,7 +1844,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                               style: const TextStyle(color: Colors.white, fontSize: 13),
                               decoration: InputDecoration(
                                 isDense: true,
-                                hintText: 'Search ticket no, series…',
+                                hintText: 'Search parsed ticket no, series…',
                                 hintStyle: TextStyle(color: Colors.grey.shade500, fontSize: 12),
                                 prefixIcon: const Icon(Icons.search_rounded, size: 18, color: Colors.purpleAccent),
                                 suffixIcon: _searchQuery.isNotEmpty
@@ -1386,7 +1875,6 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                             ),
                           ),
 
-                        // Parsed Table Content
                         Expanded(
                           child: _parsedItems.isEmpty
                               ? Center(
@@ -1431,88 +1919,97 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                       separatorBuilder: (ctx, i) => const Divider(color: Color(0xFF1E293B), height: 1),
                                       itemBuilder: (context, idx) {
                                         final item = displayedItems[idx];
-                                        return Container(
-                                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                                          decoration: BoxDecoration(
-                                            color: idx % 2 == 0 ? const Color(0xFF111C33) : const Color(0xFF0F172A),
-                                            borderRadius: BorderRadius.circular(6),
-                                          ),
-                                          child: Row(
-                                            children: [
-                                              SizedBox(
-                                                width: 32,
-                                                child: Text(
-                                                  '#${idx + 1}',
-                                                  style: TextStyle(color: Colors.grey.shade500, fontSize: 11.5, fontWeight: FontWeight.bold),
-                                                ),
-                                              ),
-                                              Container(
-                                                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                                                decoration: BoxDecoration(
-                                                  color: AppColors.primary.withAlpha(40),
-                                                  borderRadius: BorderRadius.circular(4),
-                                                ),
-                                                child: Text(
-                                                  'Series ${item.series}',
-                                                  style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 11.5),
-                                                ),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              Container(
-                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                                decoration: BoxDecoration(
-                                                  color: const Color(0xFF14532D).withAlpha(160),
-                                                  borderRadius: BorderRadius.circular(4),
-                                                  border: Border.all(color: const Color(0xFF4ADE80).withAlpha(130)),
-                                                ),
-                                                child: const Row(
-                                                  mainAxisSize: MainAxisSize.min,
-                                                  children: [
-                                                    Icon(Icons.check_circle_rounded, size: 11, color: Color(0xFF4ADE80)),
-                                                    SizedBox(width: 3),
-                                                    Text(
-                                                      '5-DIGIT',
-                                                      style: TextStyle(color: Color(0xFF4ADE80), fontSize: 9.5, fontWeight: FontWeight.w900),
-                                                    ),
-                                                  ],
-                                                ),
-                                              ),
-                                              const SizedBox(width: 10),
-                                              Expanded(
-                                                child: Text(
-                                                  '${item.series} ${item.ticketNo}',
-                                                  style: const TextStyle(
-                                                    color: Color(0xFF4ADE80),
-                                                    fontWeight: FontWeight.w900,
-                                                    fontSize: 14,
-                                                    fontFamily: 'monospace',
-                                                    letterSpacing: 1.1,
+                                        return InkWell(
+                                          onTap: () => _editParsedItem(item),
+                                          borderRadius: BorderRadius.circular(6),
+                                          child: Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                            decoration: BoxDecoration(
+                                              color: idx % 2 == 0 ? const Color(0xFF111C33) : const Color(0xFF0F172A),
+                                              borderRadius: BorderRadius.circular(6),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                SizedBox(
+                                                  width: 32,
+                                                  child: Text(
+                                                    '#${idx + 1}',
+                                                    style: TextStyle(color: Colors.grey.shade500, fontSize: 11.5, fontWeight: FontWeight.bold),
                                                   ),
                                                 ),
-                                              ),
-                                              Text(
-                                                'Qty: ${item.quantity}',
-                                                style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
-                                              ),
-                                              const SizedBox(width: 16),
-                                              Text(
-                                                '₹${item.pricePerTicket.toStringAsFixed(0)}',
-                                                style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
-                                              ),
-                                              const SizedBox(width: 16),
-                                              Text(
-                                                '₹${item.totalAmount.toStringAsFixed(2)}',
-                                                style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13),
-                                              ),
-                                              const SizedBox(width: 8),
-                                              IconButton(
-                                                icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 18),
-                                                tooltip: 'Remove',
-                                                onPressed: () {
-                                                  setState(() => _parsedItems.remove(item));
-                                                },
-                                              ),
-                                            ],
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                                  decoration: BoxDecoration(
+                                                    color: AppColors.primary.withAlpha(40),
+                                                    borderRadius: BorderRadius.circular(4),
+                                                  ),
+                                                  child: Text(
+                                                    'Series ${item.series}',
+                                                    style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 11.5),
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(0xFF14532D).withAlpha(160),
+                                                    borderRadius: BorderRadius.circular(4),
+                                                    border: Border.all(color: const Color(0xFF4ADE80).withAlpha(130)),
+                                                  ),
+                                                  child: const Row(
+                                                    mainAxisSize: MainAxisSize.min,
+                                                    children: [
+                                                      Icon(Icons.check_circle_rounded, size: 11, color: Color(0xFF4ADE80)),
+                                                      SizedBox(width: 3),
+                                                      Text(
+                                                        '5-DIGIT',
+                                                        style: TextStyle(color: Color(0xFF4ADE80), fontSize: 9.5, fontWeight: FontWeight.w900),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                                const SizedBox(width: 10),
+                                                Expanded(
+                                                  child: Text(
+                                                    '${item.series} ${item.ticketNo}',
+                                                    style: const TextStyle(
+                                                      color: Color(0xFF4ADE80),
+                                                      fontWeight: FontWeight.w900,
+                                                      fontSize: 14,
+                                                      fontFamily: 'monospace',
+                                                      letterSpacing: 1.1,
+                                                    ),
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'Qty: ${item.quantity}',
+                                                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                                                ),
+                                                const SizedBox(width: 16),
+                                                Text(
+                                                  '₹${item.pricePerTicket.toStringAsFixed(0)}',
+                                                  style: TextStyle(color: Colors.grey.shade400, fontSize: 12),
+                                                ),
+                                                const SizedBox(width: 16),
+                                                Text(
+                                                  '₹${item.totalAmount.toStringAsFixed(2)}',
+                                                  style: const TextStyle(color: Colors.greenAccent, fontWeight: FontWeight.bold, fontSize: 13),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                IconButton(
+                                                  icon: const Icon(Icons.edit_note_rounded, color: Colors.cyanAccent, size: 20),
+                                                  tooltip: 'Edit Entry',
+                                                  onPressed: () => _editParsedItem(item),
+                                                ),
+                                                IconButton(
+                                                  icon: const Icon(Icons.delete_outline_rounded, color: Colors.redAccent, size: 18),
+                                                  tooltip: 'Remove',
+                                                  onPressed: () {
+                                                    setState(() => _parsedItems.remove(item));
+                                                  },
+                                                ),
+                                              ],
+                                            ),
                                           ),
                                         );
                                       },
@@ -1527,7 +2024,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
               ),
             ),
 
-            // ─── BOTTOM ACTION FOOTER BAR ────────────────────────────────────
+            // BOTTOM ACTION FOOTER BAR
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
               decoration: const BoxDecoration(
@@ -1571,7 +2068,7 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                           )
                         : const Icon(Icons.check_circle_rounded, size: 18),
                     label: Text(
-                      _isSaving ? 'BOOKING...' : '⚡ CONFIRM & BOOK ALL ($totalTickets TICKETS)',
+                      _isSaving ? 'BOOKING...' : '⚡ CONFIRM & BOOK ALL ($totalTickets NUMBERS)',
                       style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, letterSpacing: 0.8),
                     ),
                     onPressed: (_parsedItems.isEmpty || _isSaving) ? null : _confirmAndBookAll,

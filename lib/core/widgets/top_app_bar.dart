@@ -11,8 +11,15 @@ import '../../features/auth/models/user_model.dart';
 
 class TopAppBar extends ConsumerWidget {
   final String title;
+  final VoidCallback? onToggleSidebar;
+  final bool isSidebarVisible;
 
-  const TopAppBar({super.key, required this.title});
+  const TopAppBar({
+    super.key,
+    required this.title,
+    this.onToggleSidebar,
+    this.isSidebarVisible = true,
+  });
 
   void _showUserProfileModal(BuildContext context, WidgetRef ref, UserModel? user) {
     final displayName = user?.fullName.isNotEmpty == true
@@ -224,12 +231,29 @@ class TopAppBar extends ConsumerWidget {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
+          // Sidebar Toggle Button
+          if (onToggleSidebar != null) ...[
+            IconButton(
+              icon: Icon(
+                isSidebarVisible ? Icons.menu_open_rounded : Icons.menu_rounded,
+                color: isSidebarVisible ? Colors.white70 : const Color(0xFF38BDF8),
+                size: 22,
+              ),
+              tooltip: isSidebarVisible ? 'Hide Sidebar (Full Screen)' : 'Show Sidebar',
+              onPressed: onToggleSidebar,
+            ),
+            const SizedBox(width: 8),
+          ],
+
           // Platform Title
-          Text(
-            title,
-            style: AppTypography.titleLg.copyWith(
-              fontWeight: FontWeight.bold,
-              fontSize: 16,
+          Expanded(
+            child: Text(
+              title,
+              overflow: TextOverflow.ellipsis,
+              style: AppTypography.titleLg.copyWith(
+                fontWeight: FontWeight.bold,
+                fontSize: 16,
+              ),
             ),
           ),
 

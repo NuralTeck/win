@@ -43,6 +43,11 @@ class DatabaseService {
     await db.execute('PRAGMA journal_mode=WAL;');
     await db.execute('PRAGMA busy_timeout=10000;');
     await db.execute('PRAGMA synchronous=NORMAL;');
+    // ⚡ High performance indexes for instant voucher & unsold queries with thousands of entries!
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_date_shift ON vouchers(date, draw_shift);');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_party ON vouchers(party_name);');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_date_shift ON unsold_tickets(date, draw_shift);');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_party ON unsold_tickets(party_name);');
     await _createTables(db);
     return db;
   }
@@ -209,6 +214,48 @@ class DatabaseService {
         resolved_at TEXT
       )
     ''');
+
+    // 📦 Vouchers Table (Stock Issue)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS vouchers (
+        id TEXT PRIMARY KEY,
+        voucher_no TEXT NOT NULL,
+        date TEXT NOT NULL,
+        draw_shift TEXT NOT NULL,
+        party_name TEXT NOT NULL,
+        series TEXT NOT NULL,
+        from_ticket TEXT NOT NULL,
+        to_ticket TEXT NOT NULL,
+        total_qty INTEGER NOT NULL,
+        price_per_ticket REAL NOT NULL,
+        total_amount REAL NOT NULL,
+        created_at TEXT NOT NULL
+      )
+    ''');
+
+    // 🚫 Unsold Tickets Table (Draw Return)
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS unsold_tickets (
+        id TEXT PRIMARY KEY,
+        return_no TEXT NOT NULL,
+        date TEXT NOT NULL,
+        draw_shift TEXT NOT NULL,
+        party_name TEXT NOT NULL,
+        series TEXT NOT NULL,
+        from_ticket TEXT NOT NULL,
+        to_ticket TEXT NOT NULL,
+        total_qty INTEGER NOT NULL,
+        price_per_ticket REAL NOT NULL,
+        total_amount REAL NOT NULL,
+        is_locked INTEGER DEFAULT 0,
+        created_at TEXT NOT NULL
+      )
+    ''');
+    // Create performance indexes for high-speed date range queries and reporting
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ticket_sales_drawDate ON ticket_sales(drawDate);');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ticket_sales_saleDate ON ticket_sales(saleDate);');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ticket_sales_buyer ON ticket_sales(buyerName);');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_ticket_sales_series ON ticket_sales(ticketSeries);');
   }
 
   Future<void> _seedInitialData(Database db) async {
@@ -353,7 +400,15 @@ class DatabaseService {
 
   Future<void> _autoRegisterSellerFromTicket(TicketSaleModel sale) async {
     final name = (sale.agentName.trim().isNotEmpty ? sale.agentName : sale.buyerName).trim();
-    if (name.isEmpty || name.toLowerCase() == 'walk-in customer' || name.toLowerCase() == 'default') return;
+    if (name.isEmpty ||
+        name.toLowerCase() == 'walk-in customer' ||
+        name.toLowerCase() == 'default' ||
+        name.startsWith('Party ') ||
+        name.length <= 2 ||
+        RegExp(r'^\d+$').hasMatch(name) ||
+        !RegExp(r'[a-zA-Z]').hasMatch(name)) {
+      return;
+    }
 
     try {
       final db = await database;
@@ -390,8 +445,7 @@ class DatabaseService {
       _ticketSaleToMap(sale),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
-    // Auto-save Customer/Seller into Seller Master
-    _autoRegisterSellerFromTicket(sale);
+    // Do NOT auto-register customer from message text to prevent polluting customer master
 
     if (!isSilent) {
       debugPrint(
@@ -525,51 +579,7 @@ class DatabaseService {
       'seller_customers',
       orderBy: 'createdAt DESC',
     );
-    final List<SellerCustomerModel> sellers = maps.map((m) => _sellerCustomerFromMap(m)).toList();
-    final Set<String> existingNames = sellers.map((s) => s.name.trim().toLowerCase()).toSet();
-
-    // Auto-discover any unique customers/sellers from ticket bookings that aren't yet in seller_customers
-    try {
-      final List<Map<String, dynamic>> bookingNames = await db.rawQuery('''
-        SELECT DISTINCT 
-          CASE WHEN TRIM(agentName) != '' THEN TRIM(agentName) ELSE TRIM(buyerName) END as sName,
-          buyerPhone as sPhone,
-          MIN(saleDate) as firstSale
-        FROM ticket_sales 
-        WHERE TRIM(buyerName) != '' OR TRIM(agentName) != ''
-        GROUP BY sName
-      ''');
-
-      for (final row in bookingNames) {
-        final rawName = (row['sName']?.toString() ?? '').trim();
-        if (rawName.isEmpty || rawName.toLowerCase() == 'walk-in customer' || rawName.toLowerCase() == 'default' || rawName.toLowerCase() == 'general') {
-          continue;
-        }
-
-        if (!existingNames.contains(rawName.toLowerCase())) {
-          final cleanKey = rawName.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '').toUpperCase();
-          final accessKey = cleanKey.isNotEmpty ? (cleanKey.length > 8 ? cleanKey.substring(0, 8) : cleanKey) : 'SEL${DateTime.now().millisecondsSinceEpoch % 10000}';
-          final phone = row['sPhone']?.toString() ?? '';
-          final autoSeller = SellerCustomerModel(
-            id: 'sc_${rawName.hashCode.abs()}',
-            name: rawName,
-            accessKey: accessKey,
-            password: '1234',
-            phone: phone,
-            isActive: true,
-            createdAt: DateTime.tryParse(row['firstSale']?.toString() ?? '') ?? DateTime.now(),
-          );
-
-          await insertSellerCustomer(autoSeller);
-          sellers.add(autoSeller);
-          existingNames.add(rawName.toLowerCase());
-        }
-      }
-    } catch (e) {
-      debugPrint('Error auto-syncing sellers from ticket bookings: $e');
-    }
-
-    return sellers;
+    return maps.map((m) => _sellerCustomerFromMap(m)).toList();
   }
 
   Future<SellerCustomerModel> insertSellerCustomer(
@@ -759,18 +769,25 @@ class DatabaseService {
     };
   }
 
+  static String _cleanUtf16(dynamic val, [String fallback = '']) {
+    if (val == null) return fallback;
+    final str = val.toString();
+    final sanitized = str.replaceAll(RegExp(r'[\uD800-\uDFFF]'), '').trim();
+    return sanitized.isNotEmpty ? sanitized : fallback;
+  }
+
   TicketSaleModel _ticketSaleFromMap(Map<String, dynamic> m) {
     return TicketSaleModel(
-      id: m['id'] as String,
-      receiptNumber: m['receiptNumber'] as String,
-      buyerName: m['buyerName'] as String,
-      buyerPhone: m['buyerPhone'] as String,
-      agentCode: m['agentCode'] as String,
-      agentName: m['agentName'] as String,
-      drawCode: m['drawCode'] as String,
-      drawName: m['drawName'] as String,
-      ticketSeries: m['ticketSeries'] as String,
-      ticketNumber: m['ticketNumber'] as String,
+      id: _cleanUtf16(m['id']),
+      receiptNumber: _cleanUtf16(m['receiptNumber']),
+      buyerName: _cleanUtf16(m['buyerName'], 'Walk-in Customer'),
+      buyerPhone: _cleanUtf16(m['buyerPhone']),
+      agentCode: _cleanUtf16(m['agentCode'], 'AG-WA'),
+      agentName: _cleanUtf16(m['agentName'], 'Walk-in Customer'),
+      drawCode: _cleanUtf16(m['drawCode']),
+      drawName: _cleanUtf16(m['drawName']),
+      ticketSeries: _cleanUtf16(m['ticketSeries'], '12'),
+      ticketNumber: _cleanUtf16(m['ticketNumber']),
       quantity: m['quantity'] as int,
       pricePerTicket: (m['pricePerTicket'] as num).toDouble(),
       totalAmount: (m['totalAmount'] as num).toDouble(),
@@ -790,11 +807,11 @@ class DatabaseService {
 
   Map<String, dynamic> _sellerCustomerToMap(SellerCustomerModel s) {
     return {
-      'id': s.id,
-      'name': s.name,
-      'accessKey': s.accessKey,
-      'password': s.password,
-      'phone': s.phone,
+      'id': _cleanUtf16(s.id),
+      'name': _cleanUtf16(s.name, 'Customer'),
+      'accessKey': _cleanUtf16(s.accessKey),
+      'password': _cleanUtf16(s.password, '1234'),
+      'phone': _cleanUtf16(s.phone),
       'isActive': s.isActive ? 1 : 0,
       'createdAt': s.createdAt.toIso8601String(),
     };
@@ -802,11 +819,11 @@ class DatabaseService {
 
   SellerCustomerModel _sellerCustomerFromMap(Map<String, dynamic> m) {
     return SellerCustomerModel(
-      id: m['id'] as String,
-      name: m['name'] as String,
-      accessKey: m['accessKey'] as String,
-      password: m['password'] as String,
-      phone: m['phone'] as String,
+      id: _cleanUtf16(m['id']),
+      name: _cleanUtf16(m['name'], 'Customer'),
+      accessKey: _cleanUtf16(m['accessKey'], 'SEL'),
+      password: _cleanUtf16(m['password'], '1234'),
+      phone: _cleanUtf16(m['phone']),
       isActive: (m['isActive'] as int) == 1,
       createdAt: DateTime.parse(m['createdAt'] as String),
     );
@@ -1028,6 +1045,44 @@ class DatabaseService {
     return null;
   }
 
+  Future<String> getBotMode() async {
+    try {
+      final db = await database;
+      final res = await db.query(
+        'ai_settings',
+        where: 'key = ?',
+        whereArgs: ['bot_operation_mode'],
+        limit: 1,
+      );
+      if (res.isNotEmpty && res.first['value'] != null) {
+        return res.first['value'].toString().trim().toLowerCase();
+      }
+    } catch (e) {
+      debugPrint('⚠️ [BOT MODE GET ERROR] $e');
+    }
+    return 'auto'; // 'auto' (Hybrid), 'offline' (100% Local), 'online' (Cloud AI)
+  }
+
+  Future<bool> saveBotMode(String mode) async {
+    try {
+      final db = await database;
+      await db.insert(
+        'ai_settings',
+        {
+          'key': 'bot_operation_mode',
+          'value': mode.trim().toLowerCase(),
+          'updatedAt': DateTime.now().toIso8601String(),
+        },
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      debugPrint('🤖 [BOT MODE DB] Saved bot operation mode: $mode');
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BOT MODE SAVE ERROR] $e');
+      return false;
+    }
+  }
+
   Future<bool> saveGeminiApiKey(String apiKey) async {
     try {
       final db = await database;
@@ -1105,6 +1160,8 @@ class DatabaseService {
         await txn.delete('pending_photo_bookings');
         await txn.delete('lottery_results');
         await txn.delete('collector_payments');
+        await txn.delete('vouchers');
+        await txn.delete('unsold_tickets');
       });
       debugPrint('✅ [DATABASE SERVICE] Master Wipe Completed! All operational data cleared.');
     } catch (e) {
@@ -1112,4 +1169,399 @@ class DatabaseService {
       rethrow;
     }
   }
+
+  // ─── 📦 VOUCHERS CRUD ───────────────────────────────────────────────────────
+
+  Future<List<Map<String, dynamic>>> getVouchers({
+    String? date,
+    String? startDate,
+    String? endDate,
+    String? drawShift,
+    String? partyName,
+  }) async {
+    try {
+      final db = await database;
+      String whereClause = '';
+      List<dynamic> whereArgs = [];
+
+      final List<String> conditions = [];
+      if (startDate != null && startDate.isNotEmpty && endDate != null && endDate.isNotEmpty) {
+        conditions.add('(date >= ? AND date <= ?)');
+        whereArgs.add(startDate);
+        whereArgs.add(endDate);
+      } else if (date != null && date.isNotEmpty) {
+        final dShort = date.split('-').last.trim();
+        conditions.add('(date = ? OR date = ? OR date = ? OR date LIKE ?)');
+        whereArgs.add(date);
+        whereArgs.add('$dShort/');
+        whereArgs.add(dShort);
+        whereArgs.add('%$dShort');
+      }
+      if (drawShift != null && drawShift.isNotEmpty && drawShift != 'All Shifts' && drawShift != 'ALL') {
+        final cleanShift = drawShift.toLowerCase().replaceAll('dear ', '').trim();
+        conditions.add('(draw_shift = ? OR LOWER(draw_shift) = ? OR LOWER(draw_shift) LIKE ?)');
+        whereArgs.add(drawShift);
+        whereArgs.add(drawShift.toLowerCase());
+        whereArgs.add('%$cleanShift%');
+      }
+      if (partyName != null && partyName.isNotEmpty && partyName != 'All' && partyName != 'All Parties') {
+        conditions.add('party_name = ?');
+        whereArgs.add(partyName);
+      }
+
+      if (conditions.isNotEmpty) {
+        whereClause = conditions.join(' AND ');
+      }
+
+      return await db.query(
+        'vouchers',
+        where: whereClause.isNotEmpty ? whereClause : null,
+        whereArgs: whereArgs.isNotEmpty ? whereArgs : null,
+        orderBy: 'created_at DESC',
+      );
+    } catch (e) {
+      debugPrint('❌ [GET VOUCHERS ERROR] $e');
+      return [];
+    }
+  }
+
+  Future<bool> insertVoucher(Map<String, dynamic> voucherMap) async {
+    try {
+      final db = await database;
+      await db.insert(
+        'vouchers',
+        voucherMap,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      return true;
+    } catch (e) {
+      debugPrint('❌ [INSERT VOUCHER ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> insertVouchersBatch(List<Map<String, dynamic>> vouchersList) async {
+    if (vouchersList.isEmpty) return true;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final v in vouchersList) {
+        batch.insert(
+          'vouchers',
+          v,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BATCH INSERT VOUCHERS ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> deleteVoucher(String id) async {
+    try {
+      final db = await database;
+      final count = await db.delete('vouchers', where: 'id = ?', whereArgs: [id]);
+      return count > 0;
+    } catch (e) {
+      debugPrint('❌ [DELETE VOUCHER ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> bulkUpdateVoucherParty(List<String> ids, String newParty) async {
+    if (ids.isEmpty) return false;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final id in ids) {
+        batch.update(
+          'vouchers',
+          {'party_name': newParty},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BULK UPDATE VOUCHER PARTY ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> bulkUpdateVoucherSeries(List<String> ids, String newSeries, double newRate) async {
+    if (ids.isEmpty) return false;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final id in ids) {
+        batch.rawUpdate(
+          'UPDATE vouchers SET series = ?, price_per_ticket = ?, total_amount = total_qty * ? WHERE id = ?',
+          [newSeries, newRate, newRate, id],
+        );
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BULK UPDATE VOUCHER SERIES ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> bulkDeleteVouchers(List<String> ids) async {
+    if (ids.isEmpty) return false;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final id in ids) {
+        batch.delete('vouchers', where: 'id = ?', whereArgs: [id]);
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BULK DELETE VOUCHERS ERROR] $e');
+      return false;
+    }
+  }
+
+ // ─── 🚫 UNSOLD TICKETS CRUD ─────────────────────────────────────────────────
+
+  Future<List<Map<String, dynamic>>> getUnsoldTickets({
+    String? date,
+    String? startDate,
+    String? endDate,
+    String? drawShift,
+    String? partyName,
+  }) async {
+    try {
+      final db = await database;
+      String whereClause = '';
+      List<dynamic> whereArgs = [];
+
+      final List<String> conditions = [];
+      if (startDate != null && startDate.isNotEmpty && endDate != null && endDate.isNotEmpty) {
+        conditions.add('(date >= ? AND date <= ?)');
+        whereArgs.add(startDate);
+        whereArgs.add(endDate);
+      } else if (date != null && date.isNotEmpty) {
+        final dShort = date.split('-').last.trim();
+        conditions.add('(date = ? OR date = ? OR date = ? OR date LIKE ?)');
+        whereArgs.add(date);
+        whereArgs.add('$dShort/');
+        whereArgs.add(dShort);
+        whereArgs.add('%$dShort');
+      }
+      if (drawShift != null && drawShift.isNotEmpty && drawShift != 'All Shifts' && drawShift != 'ALL') {
+        final cleanShift = drawShift.toLowerCase().replaceAll('dear ', '').trim();
+        conditions.add('(draw_shift = ? OR LOWER(draw_shift) = ? OR LOWER(draw_shift) LIKE ?)');
+        whereArgs.add(drawShift);
+        whereArgs.add(drawShift.toLowerCase());
+        whereArgs.add('%$cleanShift%');
+      }
+      if (partyName != null && partyName.isNotEmpty && partyName != 'All' && partyName != 'All Parties') {
+        conditions.add('party_name = ?');
+        whereArgs.add(partyName);
+      }
+
+      if (conditions.isNotEmpty) {
+        whereClause = conditions.join(' AND ');
+      }
+
+      return await db.query(
+        'unsold_tickets',
+        where: whereClause.isNotEmpty ? whereClause : null,
+        whereArgs: whereArgs.isNotEmpty ? whereArgs : null,
+        orderBy: 'created_at DESC',
+      );
+    } catch (e) {
+      debugPrint('❌ [GET UNSOLD ERROR] $e');
+      return [];
+    }
+  }
+
+  Future<bool> insertUnsoldTicket(Map<String, dynamic> unsoldMap) async {
+    try {
+      final db = await database;
+      await db.insert(
+        'unsold_tickets',
+        unsoldMap,
+        conflictAlgorithm: ConflictAlgorithm.replace,
+      );
+      return true;
+    } catch (e) {
+      debugPrint('❌ [INSERT UNSOLD ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> insertUnsoldTicketsBatch(List<Map<String, dynamic>> unsoldList) async {
+    if (unsoldList.isEmpty) return true;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final u in unsoldList) {
+        batch.insert(
+          'unsold_tickets',
+          u,
+          conflictAlgorithm: ConflictAlgorithm.replace,
+        );
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BATCH INSERT UNSOLD ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> deleteUnsoldTicket(String id) async {
+    try {
+      final db = await database;
+      final count = await db.delete('unsold_tickets', where: 'id = ?', whereArgs: [id]);
+      return count > 0;
+    } catch (e) {
+      debugPrint('❌ [DELETE UNSOLD ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> bulkUpdateUnsoldParty(List<String> ids, String newParty) async {
+    if (ids.isEmpty) return false;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final id in ids) {
+        batch.update(
+          'unsold_tickets',
+          {'party_name': newParty},
+          where: 'id = ?',
+          whereArgs: [id],
+        );
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BULK UPDATE UNSOLD PARTY ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> bulkUpdateUnsoldSeries(List<String> ids, String newSeries, double newRate) async {
+    if (ids.isEmpty) return false;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final id in ids) {
+        batch.rawUpdate(
+          'UPDATE unsold_tickets SET series = ?, price_per_ticket = ?, total_amount = total_qty * ? WHERE id = ?',
+          [newSeries, newRate, newRate, id],
+        );
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BULK UPDATE UNSOLD SERIES ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> bulkDeleteUnsold(List<String> ids) async {
+    if (ids.isEmpty) return false;
+    try {
+      final db = await database;
+      final batch = db.batch();
+      for (final id in ids) {
+        batch.delete('unsold_tickets', where: 'id = ?', whereArgs: [id]);
+      }
+      await batch.commit(noResult: true);
+      return true;
+    } catch (e) {
+      debugPrint('❌ [BULK DELETE UNSOLD ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> lockUnsoldForShift(String date, String drawShift) async {
+    try {
+      final db = await database;
+      final count = await db.update(
+        'unsold_tickets',
+        {'is_locked': 1},
+        where: 'date = ? AND draw_shift = ?',
+        whereArgs: [date, drawShift],
+      );
+      return count > 0;
+    } catch (e) {
+      debugPrint('❌ [LOCK UNSOLD ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> deleteAllVouchers({String? date, String? drawShift, String? partyName}) async {
+    try {
+      final db = await database;
+      String? where;
+      List<dynamic>? whereArgs;
+      final List<String> conds = [];
+      final List<dynamic> args = [];
+      if (date != null && date.isNotEmpty) {
+        conds.add('date = ?');
+        args.add(date);
+      }
+      if (drawShift != null && drawShift.isNotEmpty && drawShift != 'All Shifts') {
+        conds.add('draw_shift = ?');
+        args.add(drawShift);
+      }
+      if (partyName != null && partyName.isNotEmpty && partyName != 'All' && partyName != 'All Parties') {
+        conds.add('party_name = ?');
+        args.add(partyName);
+      }
+      if (conds.isNotEmpty) {
+        where = conds.join(' AND ');
+        whereArgs = args;
+      }
+      await db.delete('vouchers', where: where, whereArgs: whereArgs);
+      debugPrint('🗑️ [DATABASE LOG] Deleted vouchers matching where: $where, args: $whereArgs');
+      return true;
+    } catch (e) {
+      debugPrint('❌ [DELETE ALL VOUCHERS ERROR] $e');
+      return false;
+    }
+  }
+
+  Future<bool> deleteAllUnsold({String? date, String? drawShift, String? partyName}) async {
+    try {
+      final db = await database;
+      String? where;
+      List<dynamic>? whereArgs;
+      final List<String> conds = [];
+      final List<dynamic> args = [];
+      if (date != null && date.isNotEmpty) {
+        conds.add('date = ?');
+        args.add(date);
+      }
+      if (drawShift != null && drawShift.isNotEmpty && drawShift != 'All Shifts') {
+        conds.add('draw_shift = ?');
+        args.add(drawShift);
+      }
+      if (partyName != null && partyName.isNotEmpty && partyName != 'All' && partyName != 'All Parties') {
+        conds.add('party_name = ?');
+        args.add(partyName);
+      }
+      if (conds.isNotEmpty) {
+        where = conds.join(' AND ');
+        whereArgs = args;
+      }
+      await db.delete('unsold_tickets', where: where, whereArgs: whereArgs);
+      debugPrint('🗑️ [DATABASE LOG] Deleted unsold_tickets matching where: $where, args: $whereArgs');
+      return true;
+    } catch (e) {
+      debugPrint('❌ [DELETE ALL UNSOLD ERROR] $e');
+      return false;
+    }
+  }
 }
+

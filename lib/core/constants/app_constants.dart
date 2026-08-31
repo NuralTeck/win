@@ -24,6 +24,8 @@ class AppConstants {
   static const String routeDrawTimes = '/draw-times';   // Master Draw Times & Shifts Setup
   static const String routeResultEntry = '/result-entry'; // Official Lottery Sambad Result Entry
   static const String routeGeneratedHisab = '/generated-hisab'; // Generated Hisab & Draw Settlements
+  static const String routeUnsold = '/unsold';                 // Unsold & Voucher Management
+  static const String routeGetFileReports = '/get-file-reports'; // Party Hisab & Get File Reports
   static const String routeAnalytics = '/analytics';   // Revenue & Payouts
   static const String routeCollectors = '/collectors'; // Money Collector Management & Payments
   static const String routeSettings = '/settings';     // Pricing & Series Setup

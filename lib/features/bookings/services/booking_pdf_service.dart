@@ -14,6 +14,21 @@ class BookingPdfService {
   BookingPdfService._internal();
   static final BookingPdfService instance = BookingPdfService._internal();
 
+  static pw.Font? _cachedRegularFont;
+  static pw.Font? _cachedBoldFont;
+
+  static Future<void> _ensureFontsLoaded() async {
+    if (_cachedRegularFont != null && _cachedBoldFont != null) return;
+    try {
+      _cachedRegularFont = await PdfGoogleFonts.robotoRegular().timeout(const Duration(milliseconds: 1800));
+      _cachedBoldFont = await PdfGoogleFonts.robotoBold().timeout(const Duration(milliseconds: 1800));
+    } catch (e) {
+      debugPrint('ℹ️ PDF Font loader using standard typography fallback: $e');
+      _cachedRegularFont = pw.Font.helvetica();
+      _cachedBoldFont = pw.Font.helveticaBold();
+    }
+  }
+
   /// Helper to categorize draw name into standard shift
   String getDrawShift(String drawName) {
     final lower = drawName.toLowerCase();
@@ -63,7 +78,21 @@ class BookingPdfService {
     final List<WinningClaimModel> winningClaims = [];
     try {
       final rawResults = await DatabaseService.instance.getLotteryResults();
+      final dateStr1 = DateFormat('dd/MM/yyyy').format(date);
+      final dateStr2 = DateFormat('yyyy-MM-dd').format(date);
+
       for (final raw in rawResults) {
+        final dDateStr = raw['drawDateStr']?.toString() ?? '';
+        // Fast filter: Only process results matching the target date or date range
+        final isDateMatch = dDateStr == dateStr1 ||
+            dDateStr == dateStr2 ||
+            dDateStr.contains(dateStr1) ||
+            sales.any((s) {
+              final sD = DateFormat('dd/MM/yyyy').format(s.drawDate);
+              return dDateStr.contains(sD);
+            });
+        if (!isDateMatch) continue;
+
         final drawTimeStr = raw['drawTimeStr']?.toString() ?? '';
         final firstP = raw['firstPrize']?.toString() ?? '';
         List<String> splitNums(String key) {
@@ -177,9 +206,10 @@ class BookingPdfService {
     final netProfitLoss = grandTotalAmount - grandTotalWinningPayout;
     final isProfit = netProfitLoss >= 0;
 
-    // Fetch Roboto Unicode fonts for clean text rendering
-    final regularFont = await PdfGoogleFonts.robotoRegular();
-    final boldFont = await PdfGoogleFonts.robotoBold();
+    // Fetch Roboto Unicode fonts (cached & offline-safe)
+    await _ensureFontsLoaded();
+    final regularFont = _cachedRegularFont ?? pw.Font.helvetica();
+    final boldFont = _cachedBoldFont ?? pw.Font.helveticaBold();
 
     pdf.addPage(
       pw.MultiPage(

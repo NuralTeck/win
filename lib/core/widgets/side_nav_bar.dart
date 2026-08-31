@@ -22,12 +22,14 @@ class SideNavBar extends StatelessWidget {
   final String currentRoute;
   final VoidCallback onNewOperationPressed;
   final StatefulNavigationShell? navigationShell;
+  final VoidCallback? onToggleCollapse;
 
   const SideNavBar({
     super.key,
     required this.currentRoute,
     required this.onNewOperationPressed,
     this.navigationShell,
+    this.onToggleCollapse,
   });
 
   static const List<SideNavBarItem> mainItems = [
@@ -37,7 +39,7 @@ class SideNavBar extends StatelessWidget {
       routePath: AppConstants.routeDashboard,
     ),
     SideNavBarItem(
-      label: 'Ticket Booking',
+      label: 'Number Booking',
       icon: Icons.local_activity_outlined,
       routePath: AppConstants.routeBookings,
     ),
@@ -50,6 +52,16 @@ class SideNavBar extends StatelessWidget {
       label: 'Generated Hisab',
       icon: Icons.receipt_long_outlined,
       routePath: AppConstants.routeGeneratedHisab,
+    ),
+    SideNavBarItem(
+      label: 'Number Unsold',
+      icon: Icons.inventory_2_outlined,
+      routePath: AppConstants.routeUnsold,
+    ),
+    SideNavBarItem(
+      label: 'Get File (Party Hisab)',
+      icon: Icons.folder_shared_outlined,
+      routePath: AppConstants.routeGetFileReports,
     ),
     SideNavBarItem(
       label: 'System Config',
@@ -76,12 +88,12 @@ class SideNavBar extends StatelessWidget {
 
           // App Header & Logo
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 24),
+            padding: const EdgeInsets.symmetric(horizontal: 20),
             child: Row(
               children: [
                 Container(
-                  width: 40,
-                  height: 40,
+                  width: 38,
+                  height: 38,
                   decoration: BoxDecoration(
                     color: AppColors.primaryContainer,
                     borderRadius: AppDecorations.radiusDefault,
@@ -89,10 +101,10 @@ class SideNavBar extends StatelessWidget {
                   child: const Icon(
                     Icons.local_activity,
                     color: AppColors.onPrimaryContainer,
-                    size: 24,
+                    size: 22,
                   ),
                 ),
-                const SizedBox(width: 12),
+                const SizedBox(width: 10),
                 Expanded(
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -100,13 +112,13 @@ class SideNavBar extends StatelessWidget {
                       Text(
                         AppConstants.appName,
                         style: AppTypography.headlineMd.copyWith(
-                          fontSize: 18,
+                          fontSize: 17,
                           fontWeight: FontWeight.w700,
                         ),
                         overflow: TextOverflow.ellipsis,
                       ),
                       Text(
-                        'Hisab Management Platform',
+                        'Hisab Platform',
                         style: AppTypography.labelSm.copyWith(
                           color: AppColors.textSecondary.withAlpha(150),
                           fontWeight: FontWeight.bold,
@@ -116,6 +128,12 @@ class SideNavBar extends StatelessWidget {
                     ],
                   ),
                 ),
+                if (onToggleCollapse != null)
+                  IconButton(
+                    icon: const Icon(Icons.chevron_left_rounded, color: Colors.grey, size: 22),
+                    tooltip: 'Hide Sidebar',
+                    onPressed: onToggleCollapse,
+                  ),
               ],
             ),
           ),

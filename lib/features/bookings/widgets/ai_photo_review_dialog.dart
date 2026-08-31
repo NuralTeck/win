@@ -12,6 +12,7 @@ import '../../sellers/viewmodels/seller_customer_viewmodel.dart';
 
 class AiPhotoReviewDialog extends ConsumerStatefulWidget {
   final Uint8List imageBytes;
+  final List<Uint8List>? allImageBytes;
   final List<GeminiScannedItem> initialItems;
   final String activeShift;
   final DateTime activeDate;
@@ -21,6 +22,7 @@ class AiPhotoReviewDialog extends ConsumerStatefulWidget {
   const AiPhotoReviewDialog({
     super.key,
     required this.imageBytes,
+    this.allImageBytes,
     required this.initialItems,
     required this.activeShift,
     required this.activeDate,
@@ -39,6 +41,15 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
   String _searchQuery = '';
   late ValueNotifier<double> _totalAmountNotifier;
   bool _isSaving = false;
+  int _currentImageIndex = 0;
+
+  Uint8List get _currentImageBytes {
+    if (widget.allImageBytes != null && widget.allImageBytes!.isNotEmpty) {
+      final idx = _currentImageIndex.clamp(0, widget.allImageBytes!.length - 1);
+      return widget.allImageBytes![idx];
+    }
+    return widget.imageBytes;
+  }
 
   @override
   void initState() {
@@ -232,7 +243,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
               children: [
                 const Icon(Icons.check_circle_rounded, color: Colors.white),
                 const SizedBox(width: 10),
-                Text('✅ Successfully booked ${salesToSave.length} tickets from Scanned Photo! (₹${_totalAmountNotifier.value.toStringAsFixed(0)})'),
+                Text('✅ Successfully booked ${salesToSave.length} numbers from Scanned Photo! (₹${_totalAmountNotifier.value.toStringAsFixed(0)})'),
               ],
             ),
           ),
@@ -244,7 +255,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: AppColors.error,
-            content: Text('⚠️ Error saving confirmed tickets: $e'),
+            content: Text('⚠️ Error saving confirmed numbers: $e'),
           ),
         );
       }
@@ -358,11 +369,63 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                         Container(
                           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                           color: AppColors.surfaceContainer,
-                          child: const Row(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                             children: [
-                              Icon(Icons.photo_size_select_actual_outlined, size: 16, color: AppColors.primary),
-                              SizedBox(width: 6),
-                              Text('Original Photo / Slip', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                              Row(
+                                children: [
+                                  const Icon(Icons.photo_size_select_actual_outlined, size: 16, color: AppColors.primary),
+                                  const SizedBox(width: 6),
+                                  Text(
+                                    widget.allImageBytes != null && widget.allImageBytes!.length > 1
+                                        ? 'Photo ${_currentImageIndex + 1} of ${widget.allImageBytes!.length}'
+                                        : 'Original Photo / Slip',
+                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                              if (widget.allImageBytes != null && widget.allImageBytes!.length > 1)
+                                Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    InkWell(
+                                      onTap: _currentImageIndex > 0
+                                          ? () => setState(() => _currentImageIndex--)
+                                          : null,
+                                      borderRadius: BorderRadius.circular(4),
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(3.0),
+                                        child: Icon(
+                                          Icons.arrow_back_ios_rounded,
+                                          size: 13,
+                                          color: _currentImageIndex > 0 ? Colors.white : Colors.white24,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '${_currentImageIndex + 1}/${widget.allImageBytes!.length}',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.cyanAccent),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    InkWell(
+                                      onTap: _currentImageIndex < widget.allImageBytes!.length - 1
+                                          ? () => setState(() => _currentImageIndex++)
+                                          : null,
+                                      borderRadius: BorderRadius.circular(4),
+                                      child: Padding(
+                                        padding: const EdgeInsets.all(3.0),
+                                        child: Icon(
+                                          Icons.arrow_forward_ios_rounded,
+                                          size: 13,
+                                          color: _currentImageIndex < widget.allImageBytes!.length - 1
+                                              ? Colors.white
+                                              : Colors.white24,
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ),
                             ],
                           ),
                         ),
@@ -373,7 +436,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                             maxScale: 4.0,
                             child: Center(
                               child: Image.memory(
-                                widget.imageBytes,
+                                _currentImageBytes,
                                 fit: BoxFit.contain,
                               ),
                             ),
@@ -705,7 +768,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                         border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
                       ),
                       child: Text(
-                        'Total Tickets: ${_items.length}',
+                        'Total Numbers: ${_items.length}',
                         style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 13),
                       ),
                     ),
@@ -763,7 +826,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                           ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
                           : const Icon(Icons.check_circle_outline_rounded, size: 18),
                       label: Text(
-                        _isSaving ? 'Saving...' : 'Confirm & Book All (${_items.length}) Tickets',
+                        _isSaving ? 'Saving...' : 'Confirm & Book All (${_items.length}) Numbers',
                         style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                       ),
                       onPressed: _isSaving ? null : _saveAllConfirmedTickets,
@@ -890,7 +953,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
               maxLength: 5,
               style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold, fontSize: 14),
               decoration: InputDecoration(
-                labelText: 'Ticket No (5-Digit) *',
+                labelText: 'Number (5-Digit) *',
                 hintText: 'e.g. 69476',
                 isDense: true,
                 counterText: '',
@@ -1036,7 +1099,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 letterSpacing: 0.5,
               ),
               decoration: InputDecoration(
-                labelText: 'Ticket',
+                labelText: 'Number',
                 labelStyle: const TextStyle(fontSize: 10),
                 hintText: '69476',
                 isDense: true,

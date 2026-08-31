@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../shared/models/series_price_model.dart';
 import '../../shared/repositories/series_price_repository.dart';

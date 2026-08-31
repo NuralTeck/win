@@ -383,7 +383,7 @@ Output ONLY the ticket lines in exact physical sequence. No commentary, no codeb
  */
 function cleanSeriesNumber(rawSeries, fallback = '') {
   if (!rawSeries) return fallback;
-  const str = String(rawSeries).trim();
+  const str = String(rawSeries).trim().replace(/sirij/i, '').replace(/series/i, '');
   const digits = str.replace(/\D/g, '');
   if (digits.length > 0 && digits.length <= 4) {
     return digits;
@@ -409,7 +409,7 @@ function parseIncomingTicketText(text, defaultSeries = '') {
   let currentSeries = cleanSeriesNumber(defaultSeries, '');
 
   for (const line of lines) {
-    let l = line.trim();
+    let l = line.trim().replace(/[।]/g, ' ').replace(/बुकिंग/gi, ' ');
     if (!l) {
       currentSeries = '';
       continue;
@@ -420,12 +420,56 @@ function parseIncomingTicketText(text, defaultSeries = '') {
       continue;
     }
     // Skip booking header lines like "Rustam g booking", "Ram Kumar booking", "Rajiv booking"
-    if (/^[A-Za-z][A-Za-z\s]{1,30}\s+(?:boakg|booking|bokg|bok|bkg)\s*$/i.test(l)) {
+    if (/^[A-Za-z][A-Za-z\s]{1,30}\s+(?:boakg|booking|bookin|bokg|bok|bkg)\s*$/i.test(l)) {
       continue;
     }
     // Skip forwarded message header lines
     if (/^(?:Forwarded|\u203A\u203A\s*Forwarded|fwd|forward)/i.test(l)) {
       continue;
+    }
+
+    // --- SPECIAL PATTERN 0A: Desi / Bengali 'go' format: e.g. "46480,,89,,,10go,, 12c,", "43370,,79,,10go,, 6c" ---
+    const desiGoMatch = l.match(/(\d{5})\s*[,+\-\s]+\s*(\d{1,5})\s*[,+\-\s]+\s*(\d+)\s*go(?:\s*[,+\-\s]+\s*(\d{1,4})[a-z]?)?/i);
+    if (desiGoMatch) {
+      const startNum = parseInt(desiGoMatch[1], 10);
+      const endPart = desiGoMatch[2];
+      const ser = desiGoMatch[4] ? cleanSeriesNumber(desiGoMatch[4], currentSeries) : currentSeries;
+      const prefix = String(startNum).slice(0, 5 - endPart.length);
+      const endNum = parseInt(prefix + endPart, 10);
+      if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum && endNum - startNum <= 100) {
+        for (let num = startNum; num <= endNum; num++) {
+          items.push({
+            series: ser || '?',
+            isSeriesLocked: Boolean(ser),
+            ticketNo: String(num).padStart(5, '0'),
+            quantity: 1,
+          });
+        }
+        if (ser) currentSeries = ser;
+        continue;
+      }
+    }
+
+    // --- SPECIAL PATTERN 0B: Equal range count e.g. "5 = 72170-71 = 2", "5 = 72170-79 = 10" ---
+    const eqRangeMatch = l.match(/(?:^|[\s,;])(?:[\(\[\{]?\s*([0-9]{1,3}[A-Za-z]{0,4}|[A-Za-z]{1,4}[0-9]{1,3})\s*[\)\]\}:,\/=\s._~|*xX#@+-]+\s*)?(\d{5})\s*[-~to]+\s*(\d{1,5})\s*=\s*(\d+)/i);
+    if (eqRangeMatch) {
+      const ser = eqRangeMatch[1] ? cleanSeriesNumber(eqRangeMatch[1], currentSeries) : currentSeries;
+      const startNum = parseInt(eqRangeMatch[2], 10);
+      const endPart = eqRangeMatch[3];
+      const prefix = String(startNum).slice(0, 5 - endPart.length);
+      const endNum = parseInt(prefix + endPart, 10);
+      if (!isNaN(startNum) && !isNaN(endNum) && endNum >= startNum && endNum - startNum <= 100) {
+        for (let num = startNum; num <= endNum; num++) {
+          items.push({
+            series: ser || '?',
+            isSeriesLocked: Boolean(ser),
+            ticketNo: String(num).padStart(5, '0'),
+            quantity: 1,
+          });
+        }
+        if (ser) currentSeries = ser;
+        continue;
+      }
     }
 
     // --- CASE A: Standalone Series Header e.g. "30", "12=", "12-", "12:", "12....", "12c", "12s", "12se", "12 serial", "(40c)", "40", "SERIES 24", "12" ---
@@ -485,32 +529,20 @@ function parseIncomingTicketText(text, defaultSeries = '') {
             }
           }
         }
-        // Case B: Explicit Count or Range
-        else if (endPart.length >= 1 && endPart.length <= 3) {
-          const countOrEnd = parseInt(endPart, 10);
-          const last2Start = startNum % 100;
-          const tens = Math.floor(last2Start / 10);
-          const lastDigit = startNum % 10;
-
-          // If endPart is a 2-digit number greater than last2Start (e.g. 12345-48 -> range to 48)
-          if (endPart.length === 2 && countOrEnd > last2Start && countOrEnd - last2Start <= 50) {
-            const prefix = Math.floor(startNum / 100);
-            for (let last = last2Start; last <= countOrEnd; last++) {
-              generatedTickets.push(`${prefix}${String(last).padStart(2, '0')}`);
+        // Case B: End Part with 1 to 4 digits (e.g. 40280-289-10, 62759-83-25, 67775-81-7, 63165-69-5)
+        else if (endPart.length >= 1 && endPart.length <= 4) {
+          const prefix = String(startNum).slice(0, 5 - endPart.length);
+          const fullEndNum = parseInt(prefix + endPart, 10);
+          if (!isNaN(fullEndNum) && fullEndNum >= startNum && fullEndNum - startNum <= 200) {
+            for (let num = startNum; num <= fullEndNum; num++) {
+              generatedTickets.push(String(num).padStart(5, '0'));
             }
-          }
-          // If endPart is 1 digit ending digit greater than last digit (e.g. 12345-9 -> 12345..12349)
-          else if (endPart.length === 1 && countOrEnd > lastDigit) {
-            const prefix = Math.floor(startNum / 100);
-            const endLast2 = tens * 10 + countOrEnd;
-            for (let last = last2Start; last <= endLast2; last++) {
-              generatedTickets.push(`${prefix}${String(last).padStart(2, '0')}`);
-            }
-          }
-          // Otherwise, treat as consecutive ticket count (e.g. 12345-5 means 5 tickets starting at 12345)
-          else if (countOrEnd > 0 && countOrEnd <= 100) {
-            for (let c = 0; c < countOrEnd; c++) {
-              generatedTickets.push(String(startNum + c).padStart(5, '0'));
+          } else {
+            const countOrEnd = parseInt(endPart, 10);
+            if (countOrEnd > 0 && countOrEnd <= 100) {
+              for (let c = 0; c < countOrEnd; c++) {
+                generatedTickets.push(String(startNum + c).padStart(5, '0'));
+              }
             }
           }
         }
@@ -663,12 +695,12 @@ function extractExplicitShiftAndDate(text) {
     'all', 'shift', 'shifts', 'qty', 'pcs', 'pic', 'amount', 'total', 'price', 'cash', 'upi', 'gpay', 'paytm'
   ]);
 
-  // 2. Check Shift Tags (STRICTLY 1pm, 6pm, 8pm)
-  if (/(?:=|\b)(?:dear\s*)?1(?::00)?\s*pm\b/i.test(text) || /^\s*(?:=)?\s*(?:dear\s*)?1(?::00)?\s*(?:pm|baje)?\s*$/i.test(cleanTrimmed) || /^\s*morning\s*$/i.test(cleanTrimmed)) {
+  // 2. Check Shift Tags (STRICTLY 1pm, 6pm, 8pm, supports 1:pm, 6:pm, 8:pm, 1qm)
+  if (/(?:^|[^a-z0-9])(?:dear\s*)?(?:1|01)(?::\d{2}|\.\d{2}|:|\.|\s*)?\s*(?:pm|qm|baje)\b/i.test(text) || /^\s*(?:=)?\s*(?:dear\s*)?(?:1|01)(?::\d{2}|\.\d{2}|:|\.|\s*)?\s*(?:pm|qm|baje)?\s*$/i.test(cleanTrimmed) || /^\s*morning\s*$/i.test(cleanTrimmed)) {
     explicitShift = 'Dear 1 PM';
-  } else if (/(?:=|\b)(?:dear\s*)?6(?::00)?\s*pm\b/i.test(text) || /^\s*(?:=)?\s*(?:dear\s*)?6(?::00)?\s*(?:pm|baje)?\s*$/i.test(cleanTrimmed) || /^\s*day\s*$/i.test(cleanTrimmed)) {
+  } else if (/(?:^|[^a-z0-9])(?:dear\s*)?(?:6|06)(?::\d{2}|\.\d{2}|:|\.|\s*)?\s*(?:pm|baje)\b/i.test(text) || /^\s*(?:=)?\s*(?:dear\s*)?(?:6|06)(?::\d{2}|\.\d{2}|:|\.|\s*)?\s*(?:pm|baje)?\s*$/i.test(cleanTrimmed) || /^\s*day\s*$/i.test(cleanTrimmed)) {
     explicitShift = 'Dear 6 PM';
-  } else if (/(?:=|\b)(?:dear\s*)?8(?::00)?\s*pm\b/i.test(text) || /^\s*(?:=)?\s*(?:dear\s*)?8(?::00)?\s*(?:pm|baje)?\s*$/i.test(cleanTrimmed) || /^\s*(?:night|evening)\s*$/i.test(cleanTrimmed)) {
+  } else if (/(?:^|[^a-z0-9])(?:dear\s*)?(?:8|08)(?::\d{2}|\.\d{2}|:|\.|\s*)?\s*(?:pm|baje)\b/i.test(text) || /^\s*(?:=)?\s*(?:dear\s*)?(?:8|08)(?::\d{2}|\.\d{2}|:|\.|\s*)?\s*(?:pm|baje)?\s*$/i.test(cleanTrimmed) || /^\s*(?:night|evening)\s*$/i.test(cleanTrimmed)) {
     explicitShift = 'Dear 8 PM';
   }
 
@@ -694,14 +726,14 @@ function extractExplicitShiftAndDate(text) {
     explicitDrawDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   }
 
-  // 4. Check for Customer / Party Name line by line (e.g. "mithu", "Sanni ji", "Ck booking", "Raman ji booking", "Customer: Sonu")
+  // 4. Check for Customer / Party Name line by line
   const msgLines = cleanTrimmed.split(/\r?\n/);
   for (const rawL of msgLines) {
-    const l = rawL.trim();
+    let l = rawL.trim().replace(/[।]/g, ' ').replace(/बुकिंग/gi, ' ');
     if (!l) continue;
 
     // Pattern A: "Customer: Sonu", "Party: Ramesh", "Name: Sonu"
-    const prefixMatch = l.match(/^\s*(?:customer|cust|client|name|naam|nam|party|party\s*name|start)\s*[:=-]?\s*([A-Za-z0-9\s]{2,25})\b/i);
+    const prefixMatch = l.match(/^\s*(?:customer|cust|client|name|naam|nam|party|party\s*name|start)\s*[:=-]?\s*([A-Za-z0-9\s.]{2,25})\b/i);
     if (prefixMatch) {
       const cand = prefixMatch[1].trim();
       if (!nonCustomerWords.has(cand.toLowerCase()) && !/^\d+$/.test(cand)) {
@@ -710,27 +742,42 @@ function extractExplicitShiftAndDate(text) {
       }
     }
 
-    // Pattern B: "Sonu booking", "Sonu boakg", "Sonu bkg", "Sonu party"
-    const suffixMatch = l.match(/^(?:name:?\s*)?([A-Za-z0-9\s]{2,25})\s+(?:boakg|booking|bokg|bok|bkg|party)\s*$/i);
+    // Pattern B: "Sonu booking", "Sonu boakg", "Rustam g booking", "Ck booking", "Wakil booking"
+    const suffixMatch = l.match(/^\s*([A-Za-z0-9\s.]{2,25}?)\s+(?:g\s+)?(?:boakg|booking|bookin|bokakg|bokg|bok|bkg|party)\b/i);
     if (suffixMatch) {
       const cand = suffixMatch[1].trim();
-      if (!nonCustomerWords.has(cand.toLowerCase()) && !/^\d+$/.test(cand)) {
+      if (!nonCustomerWords.has(cand.toLowerCase()) && !/^\d+$/.test(cand) && cand.toLowerCase() !== 'dear') {
         explicitBuyerName = cand;
         break;
       }
     }
 
-    // Pattern C: Standalone pure name line e.g. "mithu", "Sanni ji", "Ck", "Raman ji", "Rustam g"
-    if (
-      /^[A-Za-z][A-Za-z0-9\s.]{1,25}$/i.test(l) &&
-      !nonCustomerWords.has(l.toLowerCase()) &&
-      !/^(?:date|time|[0-9\/\.=-]+)$/i.test(l) &&
-      !/(?:dear\s*)?[168]\s*(?:pm|am|gm|baje)/i.test(l) &&
-      !/^\d{1,4}[csl]?$/i.test(l) &&
-      !/\b\d{5}\b/.test(l)
-    ) {
-      explicitBuyerName = l;
+    // Pattern C: Name with dots/date: e.g. "Vijay.. 8..6..2026..1pm", "Irfan.8/6/26"
+    const dotsMatch = l.match(/^\s*([A-Za-z]{3,15})\s*[\.\-]{1,3}\s*\d/i);
+    if (dotsMatch) {
+      const cand = dotsMatch[1].trim();
+      if (!nonCustomerWords.has(cand.toLowerCase())) {
+        explicitBuyerName = cand;
+        break;
+      }
+    }
+
+    // Pattern D: Explicit Party before time: e.g. "Party: Sk 1:00 pm" or "Sk booking 1:00 pm"
+    const midMatch = l.match(/(?:party|cust|client|name)\s*[:=-]?\s*([A-Za-z]{2,15})\b\s*[\.:]?\s*\d{1,2}(?::\d{2})?\s*(?:pm|am)/i);
+    if (midMatch && !nonCustomerWords.has(midMatch[1].toLowerCase())) {
+      explicitBuyerName = midMatch[1].trim();
       break;
+    }
+
+    // Pattern E: Clean party name with optional shift/date e.g. "Rajiv", "Rajiv 1pm", "Manoj Mama", "Sanjit"
+    const nameLineMatch = l.match(/^\s*([A-Za-z][A-Za-z\s.]{2,25})\s*(?:(?:dear\s*)?[168](?::\d{2})?\s*(?:pm|am|qm|baje)|\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4})?$/i);
+    if (nameLineMatch) {
+      let cand = nameLineMatch[1].trim();
+      cand = cand.replace(/(?:dear\s*)?[168](?::\d{2})?\s*(?:pm|am|qm|baje)$/i, '').trim();
+      if (cand.length >= 3 && !nonCustomerWords.has(cand.toLowerCase()) && !/^\d+$/.test(cand) && !/\b\d{5}\b/.test(cand)) {
+        explicitBuyerName = cand;
+        break;
+      }
     }
   }
 
@@ -764,36 +811,39 @@ function resolveSellerInfo(senderPhone, rawName) {
       const cleanDigits = String(senderPhone || '').replace(/\D/g, '');
       const last10 = cleanDigits.length >= 10 ? cleanDigits.slice(-10) : cleanDigits;
 
-      // 1. Search by exact name / accessKey in registered database
-      if (cleanName && cleanName.toLowerCase() !== 'walk-in customer') {
+      // 1. If explicit customer name is provided, search DB for that customer name first
+      if (cleanName && cleanName.toLowerCase() !== 'walk-in customer' && !cleanName.startsWith('Party ')) {
         const rowByName = localDb.prepare(`
           SELECT name, accessKey FROM seller_customers 
           WHERE LOWER(name) = LOWER(?) OR LOWER(accessKey) = LOWER(?)
           LIMIT 1
         `).get(cleanName, cleanName);
 
-        if (rowByName) {
+        if (rowByName && rowByName.name) {
           return { cleanName: rowByName.name, agentCode: rowByName.accessKey || 'AG-WA' };
         }
+
+        // Use the explicit name provided by user
+        return { cleanName, agentCode: 'AG-WA' };
       }
 
-      // 2. Search by Phone Number ONLY IF no explicit customer name was provided!
-      if (!cleanName && last10) {
+      // 2. If NO explicit customer name was given, search by Phone Number in registered seller_customers
+      if (last10) {
         const rowByPhone = localDb.prepare(`
           SELECT name, accessKey FROM seller_customers 
-          WHERE phone LIKE ? OR phone = ?
+          WHERE phone LIKE ? OR phone = ? OR REPLACE(REPLACE(phone, ' ', ''), '+', '') LIKE ?
           LIMIT 1
-        `).get(`%${last10}%`, senderPhone);
+        `).get(`%${last10}%`, senderPhone, `%${last10}%`);
 
-        if (rowByPhone) {
+        if (rowByPhone && rowByPhone.name) {
           return { cleanName: rowByPhone.name, agentCode: rowByPhone.accessKey || 'AG-WA' };
         }
       }
     } catch (_) {}
   }
 
-  if (!cleanName || cleanName.toLowerCase() === 'unknown' || cleanName.toLowerCase() === 'user') {
-    cleanName = 'Walk-in Customer';
+  if (!cleanName || cleanName.toLowerCase() === 'unknown' || cleanName.toLowerCase() === 'user' || cleanName.length <= 2) {
+    cleanName = senderPhone ? `Party ${String(senderPhone).slice(-4)}` : 'Walk-in Customer';
   }
 
   return { cleanName, agentCode };
@@ -895,22 +945,18 @@ async function flushBufferToSupabase() {
         let targetShiftName, targetDrawDate, rawBuyerName;
 
         if (raw._sessionBuyerName || raw._sessionDrawShift || raw._sessionDrawDate) {
-          // 🔒 LOCKED SESSION ENTRY: use session values strictly, allow explicit shift timing update
-          targetShiftName = explicit.explicitShift || raw._sessionDrawShift || session.drawShift || autoCycle.drawName;
-          targetDrawDate = raw._sessionDrawDate ? new Date(raw._sessionDrawDate) : (session.drawDate || autoCycle.drawDate);
-          rawBuyerName = raw._sessionBuyerName || session.buyerName || raw.sender_name || '';
+          // 🔒 STRICT LOCKED SESSION ENTRY: NEVER overwrite with message content!
+          targetShiftName = raw._sessionDrawShift || (session && session.drawShift) || autoCycle.drawName;
+          targetDrawDate = raw._sessionDrawDate ? new Date(raw._sessionDrawDate) : ((session && session.drawDate) || autoCycle.drawDate);
+          rawBuyerName = raw._sessionBuyerName || (session && session.buyerName) || raw.sender_name || '';
+        } else if (session && session.buyerName) {
+          targetShiftName = session.drawShift || autoCycle.drawName;
+          targetDrawDate = session.drawDate || autoCycle.drawDate;
+          rawBuyerName = session.buyerName;
         } else {
-          // Normal: Active session Party Name and Date CANNOT be overwritten by message content without 'end'
-          const activeSessionDate  = session.drawDate  || null;
-          const activeSessionShift = session.drawShift || null;
-          const activeSessionBuyer = session.buyerName || null;
-          
-          // Timing/Shift can change dynamically inside session
-          targetShiftName = explicit.explicitShift || activeSessionShift || autoCycle.drawName;
-          // Date is locked to active session date
-          targetDrawDate  = activeSessionDate || explicit.explicitDrawDate || autoCycle.drawDate;
-          // Party Name is locked to active session buyer
-          rawBuyerName    = activeSessionBuyer || explicit.explicitBuyerName || raw.sender_name || '';
+          targetShiftName = autoCycle.drawName;
+          targetDrawDate = autoCycle.drawDate;
+          rawBuyerName = raw.sender_name || '';
         }
 
         const targetDrawCode = targetShiftName.replace(/\s+/g, '-').toUpperCase();
@@ -1061,9 +1107,17 @@ let isIntentionallyStopped = false;
 let consecutiveDisconnects = 0;
 
 async function startWhatsAppSocket() {
-  if (sock && (connectionStatus === 'connected' || connectionStatus === 'connecting')) {
-    appendLog('info', 'WhatsApp socket is already active or connecting.');
-    return;
+  if (sock) {
+    if (connectionStatus === 'connected') {
+      appendLog('info', 'WhatsApp socket is already active and connected.');
+      return;
+    }
+    // Cleanly tear down any prior hanging socket to avoid stream conflict (Status 440)
+    try {
+      sock.ev.removeAllListeners();
+      sock.end(undefined);
+    } catch (_) {}
+    sock = null;
   }
 
   isIntentionallyStopped = false;
@@ -1077,6 +1131,18 @@ async function startWhatsAppSocket() {
     appendLog('info', `Using WhatsApp session storage: ${authDir}`);
 
     const { state, saveCreds } = await useMultiFileAuthState(authDir);
+
+    // CRITICAL: If credentials already have a paired device ID ('me'), force registered to true so Baileys does not demand a new QR!
+    if (state?.creds?.me?.id) {
+      if (!state.creds.registered) {
+        state.creds.registered = true;
+        try {
+          await saveCreds();
+        } catch (_) {}
+      }
+      appendLog('info', `Found paired device credentials for ${state.creds.me.id}. Restoring authenticated session...`);
+    }
+
     let version = [2, 3000, 1043857760];
     try {
       const v = await fetchLatestBaileysVersion();
@@ -1117,6 +1183,10 @@ async function startWhatsAppSocket() {
       const { connection, lastDisconnect, qr } = update;
 
       if (qr) {
+        // If already connected or already paired with a phone, DO NOT generate or show QR!
+        if (connectionStatus === 'connected' || state?.creds?.registered || state?.creds?.me?.id) {
+          return;
+        }
         currentQrRaw = qr;
         currentQrDataUrl = await QRCode.toDataURL(qr);
         connectionStatus = 'qr_ready';
@@ -1135,12 +1205,18 @@ async function startWhatsAppSocket() {
           return;
         }
 
-        consecutiveDisconnects++;
+        const isRestartRequired = statusCode === DisconnectReason.restartRequired || statusCode === 515;
+
+        // Status 515 is NOT an error — it is a standard internal protocol restart during pairing/handshake!
+        if (!isRestartRequired) {
+          consecutiveDisconnects++;
+        }
+
         appendLog('warn', `Connection closed (Status: ${statusCode}, Failures: ${consecutiveDisconnects}). Logged Out: ${isLoggedOut}`);
 
-        // If explicitly logged out, unauthorized, or repeated reconnection failures with invalid creds -> Purge session & show Fresh QR!
-        if (isLoggedOut || statusCode === 401 || statusCode === 403 || statusCode === 411 || consecutiveDisconnects >= 2) {
-          appendLog('warn', '🗑️ Session invalid or unlinked. Purging session storage for instant fresh QR...');
+        // Purge session storage ONLY if explicitly logged out (401 or DisconnectReason.loggedOut)
+        if (isLoggedOut || statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+          appendLog('warn', '🗑️ Device logged out or unauthorized. Purging session storage for fresh QR...');
           try {
             if (fs.existsSync(authDir)) {
               fs.rmSync(authDir, { recursive: true, force: true });
@@ -1149,13 +1225,12 @@ async function startWhatsAppSocket() {
             appendLog('error', `Could not delete session directory: ${delErr.message}`);
           }
           consecutiveDisconnects = 0;
-          // Re-trigger start for fresh QR scan
           setTimeout(() => {
             if (!isIntentionallyStopped) startWhatsAppSocket();
           }, 1500);
         } else {
-          // Temporary drop / restart required -> Auto-reconnect
-          const delay = statusCode === DisconnectReason.restartRequired ? 1000 : 2500;
+          // Status 515 (restart required), 408 (timeout), 428 (connection closed) -> Seamless Auto-reconnect without deleting session!
+          const delay = isRestartRequired ? 800 : 2500;
           appendLog('info', `🔄 Auto-reconnecting in ${delay}ms...`);
           setTimeout(() => {
             if (!isIntentionallyStopped) startWhatsAppSocket();
@@ -1166,6 +1241,12 @@ async function startWhatsAppSocket() {
         connectionStatus = 'connected';
         currentQrRaw = null;
         currentQrDataUrl = null;
+        if (state?.creds) {
+          state.creds.registered = true;
+          try {
+            await saveCreds();
+          } catch (_) {}
+        }
         appendLog('success', '✅ WhatsApp Connected Successfully & Ready for High-Traffic Stream!');
       }
     });
@@ -1220,67 +1301,92 @@ async function startWhatsAppSocket() {
         // 📸 Scan photo via Gemini Vision AI if image detected -> Queue for Operator Approval
         if (isImage) {
           appendLog('info', `📸 [IMAGE DETECTED] Downloading photo from ${sender}...`);
-          try {
-            const buffer = await downloadMediaMessage(
-              msg,
-              'buffer',
-              {},
-              {
-                logger: baileysLogger,
-                reuploadRequest: sock.updateMediaMessage,
-              }
-            );
-
-            if (buffer && buffer.length > 0) {
-              imageBase64Data = buffer.toString('base64');
-              const mime = msg.message?.imageMessage?.mimetype || 'image/jpeg';
-              const aiExtracted = await extractTicketsFromImageViaGemini(buffer, mime);
-              if (aiExtracted && aiExtracted.trim().length > 0) {
-                const rawParsed = parseIncomingTicketText(aiExtracted, '');
-                const parsedTickets = rawParsed.map((t) => ({
-                  series: t.series || '?',
-                  ticketNo: t.ticketNo,
-                  quantity: t.quantity || 1,
-                  amount: calculateSeriesPrice(t.series || '?'),
-                }));
-                const session = senderSessions.get(sender) || {};
-                const autoCycle = getLotteryDrawShiftAndDate(new Date());
-                const targetShift = session.drawShift || autoCycle.drawName || 'Dear 1 PM';
-                const targetDate = session.drawDate ? getLocalYmd(session.drawDate) : getLocalYmd(autoCycle.drawDate);
-                const targetCustomer = session.buyerName || pushName || 'Walk-in Customer';
-                const photoId = `photo_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-
-                if (localDb) {
-                  try {
-                    localDb.prepare(`
-                      INSERT INTO pending_photo_bookings (
-                        id, senderPhone, buyerName, drawShift, drawDate,
-                        imageBase64, extractedText, parsedTicketsJson, status, createdAt
-                      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-                    `).run(
-                      photoId,
-                      sender,
-                      targetCustomer,
-                      targetShift,
-                      targetDate,
-                      imageBase64Data,
-                      aiExtracted,
-                      JSON.stringify(parsedTickets),
-                      new Date().toISOString()
-                    );
-                  } catch (dbErr) {
-                    appendLog('error', `❌ [PENDING PHOTO DB ERROR] ${dbErr.message}`);
-                  }
+          let buffer = null;
+          for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+              buffer = await downloadMediaMessage(
+                msg,
+                'buffer',
+                {},
+                {
+                  logger: baileysLogger,
+                  reuploadRequest: sock.updateMediaMessage,
                 }
-
-                appendLog(
-                  'success',
-                  `📸 [PHOTO HELD FOR OPERATOR APPROVAL] ${parsedTickets.length} ticket(s) extracted for "${targetCustomer}" (${targetShift}). Queued for Operator confirmation on desktop!`
-                );
+              );
+              if (buffer && buffer.length > 0) break;
+            } catch (mediaErr) {
+              if (attempt === 2) {
+                appendLog('error', `❌ [IMAGE DOWNLOAD ERROR] Failed downloading photo from ${sender}: ${mediaErr.message}`);
+              } else {
+                await new Promise((res) => setTimeout(res, 1200));
               }
             }
-          } catch (mediaErr) {
-            appendLog('error', `❌ [IMAGE DOWNLOAD ERROR] ${mediaErr.message}`);
+          }
+
+          if (buffer && buffer.length > 0) {
+            imageBase64Data = buffer.toString('base64');
+            const mime = msg.message?.imageMessage?.mimetype || 'image/jpeg';
+            let aiExtracted = '';
+            try {
+              aiExtracted = await extractTicketsFromImageViaGemini(buffer, mime);
+            } catch (aiErr) {
+              appendLog('warn', `⚠️ [GEMINI OCR WARNING] AI extraction issue: ${aiErr.message}`);
+            }
+
+            let parsedTickets = [];
+            if (aiExtracted && aiExtracted.trim().length > 0) {
+              const rawParsed = parseIncomingTicketText(aiExtracted, '');
+              parsedTickets = rawParsed.map((t) => ({
+                series: t.series || '?',
+                ticketNo: t.ticketNo,
+                quantity: t.quantity || 1,
+                amount: calculateSeriesPrice(t.series || '?'),
+              }));
+            }
+
+            const session = senderSessions.get(sender) || {};
+            const autoCycle = getLotteryDrawShiftAndDate(new Date());
+            const targetShift = session.drawShift || autoCycle.drawName || 'Dear 1 PM';
+            const targetDate = session.drawDate ? getLocalYmd(session.drawDate) : getLocalYmd(autoCycle.drawDate);
+            const targetCustomer = session.buyerName || pushName || 'Walk-in Customer';
+            const photoId = `photo_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+            // 🛡️ ZERO PHOTO LOSS: ALWAYS save photo to pending_photo_bookings
+            // Operator will see every single photo on Desktop GUI, even if handwritten/unclear!
+            if (localDb) {
+              try {
+                localDb.prepare(`
+                  INSERT INTO pending_photo_bookings (
+                    id, senderPhone, buyerName, drawShift, drawDate,
+                    imageBase64, extractedText, parsedTicketsJson, status, createdAt
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                `).run(
+                  photoId,
+                  sender,
+                  targetCustomer,
+                  targetShift,
+                  targetDate,
+                  imageBase64Data,
+                  aiExtracted || '',
+                  JSON.stringify(parsedTickets),
+                  new Date().toISOString()
+                );
+              } catch (dbErr) {
+                appendLog('error', `❌ [PENDING PHOTO DB ERROR] ${dbErr.message}`);
+              }
+            }
+
+            if (parsedTickets.length > 0) {
+              appendLog(
+                'success',
+                `📸 [PHOTO QUEUED] ${parsedTickets.length} ticket(s) extracted for "${targetCustomer}" (${targetShift}). Queued in Desktop Counter for operator approval!`
+              );
+            } else {
+              appendLog(
+                'warn',
+                `📸 [PHOTO SAVED FOR MANUAL REVIEW] Image saved for "${targetCustomer}" (${targetShift}). AI couldn't parse text; ready for manual punching in Desktop Counter!`
+              );
+            }
           }
           // Photos MUST NEVER auto-book directly! Skip further processing.
           continue;
@@ -1294,16 +1400,17 @@ async function startWhatsAppSocket() {
           const session = senderSessions.get(sender) || {};
           const prevName = session.buyerName || 'Active Customer';
           const prevDate = session.drawDate ? getLocalYmd(session.drawDate) : 'Today';
+          const prevShift = session.drawShift || '1 PM';
           senderSessions.delete(sender);
           appendLog(
             'success',
-            `🛑 [SESSION CLOSED] Closed booking session for "${prevName}" (Date: ${prevDate}) (${sender}). Ready for next session!`
+            `🛑 [SESSION CLOSED] Booking session ended for "${prevName}" (${prevShift}, Date: ${prevDate}) (${sender}). Next message will initialize fresh Customer, Shift & Date!`
           );
           continue;
         }
 
         // ─── UNIVERSAL SMART MESSAGE & TICKET PARSER ───────────────────────────
-        const existingSession = senderSessions.get(sender) || {};
+        let existingSession = senderSessions.get(sender);
         const explicit = extractExplicitShiftAndDate(messageText);
 
         // 1. Ignore casual greetings & chatter cleanly
@@ -1315,47 +1422,64 @@ async function startWhatsAppSocket() {
           continue;
         }
 
-        // 2. Active Session Management (Strict Party & Date Locking Rules)
-        let sessionUpdated = false;
+        // 2. Active Session Management (STRICT UNBREAKABLE SESSION LOCK)
+        // RULE: Jab tak 'end' message nahi aata, tab tak jo customer, shift aur date set hai,
+        //       wo 100% LOCKED rahegi! Koi naya name, date ya shift tab tak set nahi ho sakta!
+        let isFirstInitialization = false;
 
-        // Dynamic Shift / Timing CAN CHANGE at any time during session
-        if (explicit.explicitShift) {
-          if (existingSession.drawShift !== explicit.explicitShift) {
-            existingSession.drawShift = explicit.explicitShift;
-            sessionUpdated = true;
-          }
-        }
+        if (!existingSession) {
+          // No active session -> Initialize NEW locked session!
+          const autoCycle = getLotteryDrawShiftAndDate(new Date());
 
-        // Draw Date: Strictly LOCKED once set! Cannot change without 'end' message
-        if (explicit.explicitDrawDate) {
-          if (!existingSession.drawDate) {
-            existingSession.drawDate = explicit.explicitDrawDate;
-            sessionUpdated = true;
-          }
-        }
+          // Look up if sender phone is registered in seller_customers table
+          const registeredSeller = resolveSellerInfo(sender, explicit.explicitBuyerName || pushName);
 
-        // Customer / Party Name: Strictly LOCKED once set! Cannot change without 'end' message
-        if (explicit.explicitBuyerName) {
-          if (!existingSession.buyerName) {
-            existingSession.buyerName = explicit.explicitBuyerName;
-            sessionUpdated = true;
-          }
-        }
+          const initialShift = explicit.explicitShift || autoCycle.drawName || 'Dear 1 PM';
+          const initialDate = explicit.explicitDrawDate || autoCycle.drawDate || new Date();
+          const initialBuyer = registeredSeller.cleanName || explicit.explicitBuyerName || pushName || (`Party ${sender.slice(-4)}`);
 
-        if (sessionUpdated) {
-          existingSession.lastUpdated = Date.now();
+          existingSession = {
+            drawShift: initialShift,
+            drawDate: initialDate,
+            buyerName: initialBuyer,
+            agentCode: registeredSeller.agentCode || 'AG-WA',
+            lastSeries: '12',
+            isLocked: true,
+            createdAt: Date.now(),
+            lastUpdated: Date.now(),
+          };
+
           senderSessions.set(sender, existingSession);
+          isFirstInitialization = true;
+
+          appendLog(
+            'success',
+            `🔒 [SESSION LOCKED] Customer: "${existingSession.buyerName}" | Shift: ${existingSession.drawShift} | Date: ${getLocalYmd(existingSession.drawDate)} (${sender}) (Strictly locked — Send 'end' to switch customer/shift)`
+          );
+        } else {
+          // Session ALREADY EXISTS:
+          // RULE: Customer Name & Date are PERMANENTLY LOCKED until 'end' is sent!
+          // ONLY Shift/Timing can be changed dynamically without 'end'!
+          if (explicit.explicitShift && existingSession.drawShift !== explicit.explicitShift) {
+            const prevShift = existingSession.drawShift;
+            existingSession.drawShift = explicit.explicitShift;
+            existingSession.lastUpdated = Date.now();
+            senderSessions.set(sender, existingSession);
+            appendLog(
+              'success',
+              `⚙️ [SHIFT SWITCHED] Shift changed from "${prevShift}" to "${existingSession.drawShift}" for "${existingSession.buyerName}" (${sender})`
+            );
+          }
         }
 
         // 3. Attempt parsing ticket numbers from message
         const parsedTickets = parseIncomingTicketText(messageText, existingSession.lastSeries || '12');
 
         if (parsedTickets.length > 0) {
-          // Resolve target Shift, Date, and Customer from locked session
-          const autoCycle = getLotteryDrawShiftAndDate(new Date());
-          const targetShift = existingSession.drawShift || autoCycle.drawName || 'Dear 1 PM';
-          const targetDate = existingSession.drawDate || autoCycle.drawDate || new Date();
-          const targetBuyer = existingSession.buyerName || pushName || (`Party ${sender.slice(-4)}`);
+          // Strictly use session values: Shift can update dynamically, Customer & Date are LOCKED!
+          const targetShift = existingSession.drawShift;
+          const targetDate = existingSession.drawDate;
+          const targetBuyer = existingSession.buyerName;
 
           const preview = parsedTickets.slice(0, 3).map((p) => `${p.series} #${p.ticketNo}`).join(', ');
           appendLog(
@@ -1375,6 +1499,7 @@ async function startWhatsAppSocket() {
           };
 
           existingSession.lastSeries = parsedTickets[parsedTickets.length - 1].series;
+          existingSession.lastUpdated = Date.now();
           senderSessions.set(sender, existingSession);
 
           messageBuffer.push(ticketEntry);
@@ -1384,12 +1509,27 @@ async function startWhatsAppSocket() {
           continue;
         }
 
-        // If NO tickets were found:
-        // Case A: Message was configuring Shift, Date, or Customer Name -> confirm and log
-        if (sessionUpdated) {
+        // 4. Handle non-ticket messages:
+        // If this was an initial session setup message:
+        if (isFirstInitialization) {
           appendLog(
-            'success',
-            `⚙️ [SESSION ACTIVE] ${sender} -> Party: "${existingSession.buyerName || 'Auto'}" | Shift: "${existingSession.drawShift || 'Auto'}" | Date: "${existingSession.drawDate ? getLocalYmd(existingSession.drawDate) : 'Today'}"`
+            'info',
+            `⚙️ [READY FOR TICKETS] Session waiting for tickets for "${existingSession.buyerName}" (${existingSession.drawShift}, ${getLocalYmd(existingSession.drawDate)})...`
+          );
+          continue;
+        }
+
+        // If message was purely changing Shift / Timing:
+        if (explicit.explicitShift) {
+          // Shift was already updated above
+          continue;
+        }
+
+        // If message tried to change Customer Name or Date without ending session:
+        if (explicit.explicitBuyerName || explicit.explicitDrawDate) {
+          appendLog(
+            'info',
+            `🔒 [LOCKED] Customer "${existingSession.buyerName}" and Date (${getLocalYmd(existingSession.drawDate)}) are locked! Send 'end' first to switch customer or date.`
           );
           continue;
         }
@@ -1412,67 +1552,11 @@ async function startWhatsAppSocket() {
             `⚠️ [SAVED TO RESOLVER] Unknown ticket format from ${sender} (${pushName || 'User'}): "${messageText.trim()}" -> Added to Resolver Queue`
           );
         } else {
-          // Case 3: Regular chat / text message
+          // Case 3: Regular chat / text message (e.g. "ok", "done", greetings)
           appendLog(
             'info',
             `💬 [CHAT] ${sender} (${pushName || 'User'}): "${messageText.trim().substring(0, 50)}"`
           );
-        }
-
-        // Remember last used series in session for seamless subsequent single tickets
-        if (parsedTickets.length > 0) {
-          session.lastSeries = parsedTickets[parsedTickets.length - 1].series;
-          senderSessions.set(sender, session);
-        }
-
-        // 📸 IF MESSAGE WAS AN IMAGE/PHOTO: Queue into pending_photo_bookings for OPERATOR REVIEW (Human-in-the-Loop)!
-        if (isImage && imageBase64Data && parsedTickets.length > 0) {
-          const photoId = `photo_${Date.now()}_${sender.slice(-6)}`;
-          const buyer = session.buyerName || pushName || 'Walk-in Customer';
-          const shift = session.drawShift || 'Dear 1 PM';
-          const dateStr = session.drawDate ? getLocalYmd(session.drawDate) : getLocalYmd(new Date());
-
-          if (localDb) {
-            try {
-              localDb.prepare(`
-                INSERT INTO pending_photo_bookings (id, senderPhone, buyerName, drawShift, drawDate, imageBase64, extractedText, parsedTicketsJson, status, createdAt)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-              `).run(
-                photoId,
-                sender,
-                buyer,
-                shift,
-                dateStr,
-                imageBase64Data,
-                messageText.trim(),
-                JSON.stringify(parsedTickets),
-                new Date().toISOString()
-              );
-              appendLog(
-                'warn',
-                `📸 [PHOTO HELD FOR OPERATOR APPROVAL] ${parsedTickets.length} ticket(s) scanned from "${buyer}" (${sender}). Queued in Ticket Booking Counter for operator confirmation!`
-              );
-            } catch (pErr) {
-              appendLog('error', `Could not save pending photo: ${pErr.message}`);
-            }
-          }
-          continue; // Skip automatic instant direct entry for photos! Wait for operator review!
-        }
-
-        // Push ONLY valid ticket booking entries into In-Memory Buffer
-        const entry = {
-          sender,
-          sender_name: pushName,
-          message_text: messageText.trim(),
-          message_timestamp: Number(msg.messageTimestamp || Date.now()),
-          status: 'pending',
-        };
-
-        messageBuffer.push(entry);
-
-        // Immediate flush trigger if buffer hits threshold capacity (e.g. 100 msgs)
-        if (messageBuffer.length >= MAX_BUFFER_SIZE) {
-          flushBufferToSupabase();
         }
       }
     });
@@ -1484,21 +1568,20 @@ async function startWhatsAppSocket() {
 
 async function stopWhatsAppSocket() {
   isIntentionallyStopped = true;
+  connectionStatus = 'disconnected';
+  currentQrRaw = null;
+  currentQrDataUrl = null;
   if (!sock) {
-    connectionStatus = 'disconnected';
     return;
   }
   try {
     appendLog('info', 'Stopping WhatsApp socket gracefully...');
-    // Flush remaining buffer before stopping
     if (messageBuffer.length > 0) {
       await flushBufferToSupabase();
     }
+    sock.ev.removeAllListeners();
     sock.end(undefined);
     sock = null;
-    connectionStatus = 'disconnected';
-    currentQrRaw = null;
-    currentQrDataUrl = null;
     appendLog('info', 'WhatsApp socket stopped.');
   } catch (err) {
     appendLog('error', `Error stopping socket: ${err.message}`);
@@ -1512,12 +1595,13 @@ app.use(express.json());
 
 // Endpoint: Health & System Status
 app.get('/status', (req, res) => {
+  const isConn = connectionStatus === 'connected';
   res.json({
     online: true,
     connectionStatus,
-    isConnected: connectionStatus === 'connected',
-    hasQr: Boolean(currentQrDataUrl),
-    qrDataUrl: currentQrDataUrl,
+    isConnected: isConn,
+    hasQr: !isConn && Boolean(currentQrDataUrl),
+    qrDataUrl: isConn ? null : currentQrDataUrl,
     processedTotalCount,
     currentBufferSize: messageBuffer.length,
     lastFlushTimestamp,
@@ -1629,7 +1713,6 @@ app.get('/api/settings/ai', (req, res) => {
 // Endpoint: Update Gemini AI Configuration
 app.post('/api/settings/ai', (req, res) => {
   const { apiKey } = req.body || {};
-  nm
   if (!apiKey || typeof apiKey !== 'string') {
     return res.status(400).json({ error: 'Valid Gemini API key is required' });
   }
@@ -1700,9 +1783,8 @@ app.post('/api/parse-pdf', async (req, res) => {
   }
 });
 
-// Start Express Server & Auto-Start Socket
+// Start Express Server (Standby mode — socket only starts on explicit /start request)
 app.listen(PORT, '127.0.0.1', () => {
-  appendLog('info', `⚡ WhatsApp Engine REST API listening on http://127.0.0.1:${PORT}`);
-  // Immediately initialize WhatsApp socket on startup for instant QR / connection
-  startWhatsAppSocket();
+  appendLog('info', `⚡ WhatsApp Engine REST API listening on http://127.0.0.1:${PORT} (Standby Mode)`);
 });
+

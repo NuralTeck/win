@@ -3,6 +3,7 @@ import '../models/lottery_sambad_result_model.dart';
 import '../models/winning_claim_model.dart';
 import '../models/prize_config_model.dart';
 import '../../shared/models/ticket_sale_model.dart';
+import '../../unsold/models/unsold_model.dart';
 
 class WinnerVerificationEngine {
   static bool _matchesShift(String ticketShift, String resultShift) {
@@ -240,6 +241,160 @@ class WinnerVerificationEngine {
             verifiedAt: now,
           ),
         );
+      }
+    }
+
+    return winners;
+  }
+
+  /// Matches published result against Unsold Returned Tickets (Shop / Self Claims)
+  static List<WinningClaimModel> verifyUnsoldWinners({
+    required LotterySambadResultModel result,
+    required List<UnsoldModel> unsoldList,
+    Map<int, PrizeTierConfigModel>? prizeConfig,
+  }) {
+    final List<WinningClaimModel> winners = [];
+    final now = DateTime.now();
+    final configMap = prizeConfig ?? PrizeTierConfigModel.defaultConfig;
+
+    String format5Digits(String numStr) {
+      final digits = numStr.replaceAll(RegExp(r'[^0-9]'), '');
+      if (digits.length >= 5) {
+        return digits.substring(digits.length - 5);
+      }
+      return digits.padLeft(5, '0');
+    }
+
+    String format4Digits(String numStr) {
+      final digits = numStr.replaceAll(RegExp(r'[^0-9]'), '');
+      if (digits.length >= 4) {
+        return digits.substring(digits.length - 4);
+      }
+      return digits.padLeft(4, '0');
+    }
+
+    final firstPrize5Digits = format5Digits(result.firstPrize);
+    final secondPrize5Digits = result.secondPrizeNumbers.map(format5Digits).toSet();
+    final thirdPrize4Digits = result.thirdPrizeNumbers.map(format4Digits).toSet();
+    final fourthPrize4Digits = result.fourthPrizeNumbers.map(format4Digits).toSet();
+    final fifthPrize4Digits = result.fifthPrizeNumbers.map(format4Digits).toSet();
+
+    for (final unsold in unsoldList) {
+      if (result.drawDateStr.isNotEmpty) {
+        final resultDateFormatted = _formatToDdMmYyyy(result.drawDateStr);
+        final unsoldDateFormatted = _formatToDdMmYyyy(unsold.date);
+        if (resultDateFormatted.isNotEmpty && unsoldDateFormatted.isNotEmpty && resultDateFormatted != unsoldDateFormatted) {
+          continue;
+        }
+      }
+
+      if (result.drawName.isNotEmpty && !_matchesShift(unsold.drawShift, result.drawName)) {
+        continue;
+      }
+
+      final fNum = int.tryParse(unsold.fromTicket.replaceAll(RegExp(r'\D'), '')) ?? 0;
+      final tNum = int.tryParse(unsold.toTicket.replaceAll(RegExp(r'\D'), '')) ?? fNum;
+      final series = unsold.series.isNotEmpty ? unsold.series : '12';
+      final seriesCount = int.tryParse(series.replaceAll(RegExp(r'\D'), '')) ?? 1;
+
+      for (int n = fNum; n <= tNum; n++) {
+        final tkt5 = n.toString().padLeft(5, '0');
+        final tkt4 = tkt5.length >= 4 ? tkt5.substring(tkt5.length - 4) : tkt5;
+
+        // 1st Prize
+        if (tkt5 == firstPrize5Digits) {
+          final cfg = configMap[1] ?? PrizeTierConfigModel.defaultConfig[1]!;
+          winners.add(WinningClaimModel(
+            id: 'unsold_win_${now.millisecondsSinceEpoch}_${unsold.id}_$tkt5',
+            drawId: result.drawId,
+            drawName: result.drawName,
+            prizeTier: '🏆 1st Prize (Unsold)',
+            winningNumber: tkt5,
+            prizeAmount: cfg.calculatePayout(seriesCount),
+            seriesCount: seriesCount,
+            buyerName: 'Self (Unsold Return)',
+            sellerName: unsold.partyName,
+            ticketSeries: series,
+            ticketNumber: tkt5,
+            verifiedAt: now,
+          ));
+        }
+
+        // 2nd Prize
+        if (secondPrize5Digits.contains(tkt5)) {
+          final cfg = configMap[2] ?? PrizeTierConfigModel.defaultConfig[2]!;
+          winners.add(WinningClaimModel(
+            id: 'unsold_win_${now.millisecondsSinceEpoch}_${unsold.id}_$tkt5',
+            drawId: result.drawId,
+            drawName: result.drawName,
+            prizeTier: '🥈 2nd Prize (Unsold)',
+            winningNumber: tkt5,
+            prizeAmount: cfg.calculatePayout(seriesCount),
+            seriesCount: seriesCount,
+            buyerName: 'Self (Unsold Return)',
+            sellerName: unsold.partyName,
+            ticketSeries: series,
+            ticketNumber: tkt5,
+            verifiedAt: now,
+          ));
+        }
+
+        // 3rd Prize
+        if (thirdPrize4Digits.contains(tkt4)) {
+          final cfg = configMap[3] ?? PrizeTierConfigModel.defaultConfig[3]!;
+          winners.add(WinningClaimModel(
+            id: 'unsold_win_${now.millisecondsSinceEpoch}_${unsold.id}_$tkt5',
+            drawId: result.drawId,
+            drawName: result.drawName,
+            prizeTier: '🥉 3rd Prize (Unsold)',
+            winningNumber: tkt5,
+            prizeAmount: cfg.calculatePayout(seriesCount),
+            seriesCount: seriesCount,
+            buyerName: 'Self (Unsold Return)',
+            sellerName: unsold.partyName,
+            ticketSeries: series,
+            ticketNumber: tkt5,
+            verifiedAt: now,
+          ));
+        }
+
+        // 4th Prize
+        if (fourthPrize4Digits.contains(tkt4)) {
+          final cfg = configMap[4] ?? PrizeTierConfigModel.defaultConfig[4]!;
+          winners.add(WinningClaimModel(
+            id: 'unsold_win_${now.millisecondsSinceEpoch}_${unsold.id}_$tkt5',
+            drawId: result.drawId,
+            drawName: result.drawName,
+            prizeTier: '🏅 4th Prize (Unsold)',
+            winningNumber: tkt5,
+            prizeAmount: cfg.calculatePayout(seriesCount),
+            seriesCount: seriesCount,
+            buyerName: 'Self (Unsold Return)',
+            sellerName: unsold.partyName,
+            ticketSeries: series,
+            ticketNumber: tkt5,
+            verifiedAt: now,
+          ));
+        }
+
+        // 5th Prize
+        if (fifthPrize4Digits.contains(tkt4)) {
+          final cfg = configMap[5] ?? PrizeTierConfigModel.defaultConfig[5]!;
+          winners.add(WinningClaimModel(
+            id: 'unsold_win_${now.millisecondsSinceEpoch}_${unsold.id}_$tkt5',
+            drawId: result.drawId,
+            drawName: result.drawName,
+            prizeTier: '🏅 5th Prize (Unsold)',
+            winningNumber: tkt5,
+            prizeAmount: cfg.calculatePayout(seriesCount),
+            seriesCount: seriesCount,
+            buyerName: 'Self (Unsold Return)',
+            sellerName: unsold.partyName,
+            ticketSeries: series,
+            ticketNumber: tkt5,
+            verifiedAt: now,
+          ));
+        }
       }
     }
 

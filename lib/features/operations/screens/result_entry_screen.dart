@@ -24,8 +24,6 @@ class ResultEntryScreen extends ConsumerStatefulWidget {
 
 class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
     with SingleTickerProviderStateMixin {
-  // Navigation & Edit State
-  bool _showHistoryLedger = false;
   bool _isEditingMode = false;
   String _editingDrawId = '';
   bool _showBulkPasteBox = false;
@@ -91,10 +89,10 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
     _firstPrizeFocusNode.dispose();
     _bulkPasteCtrl.dispose();
     _fifthBulkCtrl.dispose();
-    for (var c in _secondPrizeCtrls) c.dispose();
-    for (var c in _thirdPrizeCtrls) c.dispose();
-    for (var c in _fourthPrizeCtrls) c.dispose();
-    for (var c in _fifthPrizeCtrls) c.dispose();
+    for (var c in _secondPrizeCtrls) { c.dispose(); }
+    for (var c in _thirdPrizeCtrls)  { c.dispose(); }
+    for (var c in _fourthPrizeCtrls) { c.dispose(); }
+    for (var c in _fifthPrizeCtrls)  { c.dispose(); }
     super.dispose();
   }
 
@@ -111,10 +109,10 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
       _consolationPrizeCtrl.clear();
       _bulkPasteCtrl.clear();
       _fifthBulkCtrl.clear();
-      for (var c in _secondPrizeCtrls) c.clear();
-      for (var c in _thirdPrizeCtrls) c.clear();
-      for (var c in _fourthPrizeCtrls) c.clear();
-      for (var c in _fifthPrizeCtrls) c.clear();
+      for (var c in _secondPrizeCtrls) { c.clear(); }
+      for (var c in _thirdPrizeCtrls)  { c.clear(); }
+      for (var c in _fourthPrizeCtrls) { c.clear(); }
+      for (var c in _fifthPrizeCtrls)  { c.clear(); }
       _verifiedWinnersCount = 0;
       _totalPayoutAmount = 0.0;
       _verifiedWinnersList = [];
@@ -174,7 +172,6 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
 
       _verifiedWinnersCount = record['verifiedWinnersCount'] ?? 0;
       _totalPayoutAmount = (record['totalPayoutAmount'] ?? 0).toDouble();
-      _showHistoryLedger = false;
     });
   }
 
@@ -1593,7 +1590,7 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
               shrinkWrap: true,
               physics: const NeverScrollableScrollPhysics(),
               itemCount: filtered.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 8),
+              separatorBuilder: (_, _) => const SizedBox(height: 8),
               itemBuilder: (context, index) {
                 final record = filtered[index];
 

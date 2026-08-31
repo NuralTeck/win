@@ -5,13 +5,13 @@ import '../constants/app_constants.dart';
 import '../../features/dashboard/screens/dashboard_screen.dart';
 import '../../features/operations/screens/draws_screen.dart';
 import '../../features/bookings/screens/ticket_sales_screen.dart';
-import '../../features/analytics/screens/analytics_screen.dart';
 import '../../features/settings/screens/settings_screen.dart';
 import '../../features/settings/screens/price_setup_screen.dart';
 import '../../features/settings/screens/draw_time_setup_screen.dart';
 import '../../features/operations/screens/result_entry_screen.dart';
 import '../../features/operations/screens/generated_hisab_screen.dart';
-import '../../features/auth/screens/admin_login_screen.dart';
+import '../../features/unsold/screens/unsold_main_screen.dart';
+import '../../features/operations/screens/party_hisab_reports_screen.dart';
 import '../../features/auth/screens/splash_screen.dart';
 
 final GlobalKey<NavigatorState> _rootNavigatorKey = GlobalKey<NavigatorState>();
@@ -65,6 +65,22 @@ class AppRouter {
               GoRoute(
                 path: AppConstants.routeGeneratedHisab,
                 builder: (context, state) => const GeneratedHisabScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: AppConstants.routeUnsold,
+                builder: (context, state) => const UnsoldMainScreen(),
+              ),
+            ],
+          ),
+          StatefulShellBranch(
+            routes: [
+              GoRoute(
+                path: AppConstants.routeGetFileReports,
+                builder: (context, state) => const PartyHisabReportsScreen(),
               ),
             ],
           ),

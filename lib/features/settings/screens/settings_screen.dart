@@ -9,7 +9,6 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/widgets/app_button.dart';
-import '../../../core/widgets/app_text_field.dart';
 import '../../../core/widgets/app_data_table.dart';
 import '../../../core/database/database_service.dart';
 import '../../../core/services/whatsapp_engine_service.dart';
@@ -241,134 +240,6 @@ class SettingsScreen extends ConsumerWidget {
               const WhatsAppEngineScreen(),
               const _ApiCredentialsTab(),
               const _DatabaseResetTab(),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _GeneralSettingsTab extends StatelessWidget {
-  final SettingsState state;
-  final SettingsViewModel notifier;
-
-  const _GeneralSettingsTab({required this.state, required this.notifier});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        GlassCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Cluster Environment Identifiers',
-                style: AppTypography.titleLg.copyWith(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 16),
-              const Row(
-                children: [
-                  Expanded(
-                    child: AppTextField(
-                      label: 'Cluster Environment Name',
-                      hintText: 'OpsCore Production Grid 1',
-                    ),
-                  ),
-                  SizedBox(width: 16),
-                  Expanded(
-                    child: AppTextField(
-                      label: 'Primary Region',
-                      hintText: 'us-east-1 (Virginia)',
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              const AppTextField(
-                label: 'Telemetry Endpoint URL',
-                hintText: 'https://telemetry.opscore.internal/v2/ingest',
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 20),
-        GlassCard(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'System Preferences',
-                style: AppTypography.titleLg.copyWith(fontWeight: FontWeight.w700),
-              ),
-              const SizedBox(height: 16),
-              _SwitchRowTile(
-                title: 'Real-time Telemetry Streaming',
-                subtitle: 'Streams live node metrics to central analytics hub',
-                value: state.enableTelemetry,
-                onChanged: notifier.toggleTelemetry,
-              ),
-              const Divider(height: 24, color: AppColors.border),
-              _SwitchRowTile(
-                title: 'Automated Snapshot Backups',
-                subtitle: 'Triggers hourly state snapshots to cloud storage buckets',
-                value: state.autoBackup,
-                onChanged: notifier.toggleAutoBackup,
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _SecuritySettingsTab extends StatelessWidget {
-  final SettingsState state;
-  final SettingsViewModel notifier;
-
-  const _SecuritySettingsTab({required this.state, required this.notifier});
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassCard(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Authentication & Access Policies',
-            style: AppTypography.titleLg.copyWith(fontWeight: FontWeight.w700),
-          ),
-          const SizedBox(height: 16),
-          _SwitchRowTile(
-            title: 'Enforce Hardware 2FA / WebAuthn',
-            subtitle: 'Require FIDO2 hardware tokens for admin operations',
-            value: state.enable2FA,
-            onChanged: notifier.toggle2FA,
-          ),
-          const Divider(height: 24, color: AppColors.border),
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Session Timeout Window',
-                      style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.w600),
-                    ),
-                    Text(
-                      'Automatically log out idle desktop sessions after specified duration',
-                      style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary),
-                    ),
-                  ],
-                ),
-              ),
-              AppSecondaryButton(
-                label: '30 Minutes',
-                onPressed: () {},
-              ),
             ],
           ),
         ],
@@ -707,50 +578,6 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
               ),
             ],
           ),
-        ),
-      ],
-    );
-  }
-}
-
-class _SwitchRowTile extends StatelessWidget {
-  final String title;
-  final String subtitle;
-  final bool value;
-  final ValueChanged<bool> onChanged;
-
-  const _SwitchRowTile({
-    required this.title,
-    required this.subtitle,
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 2),
-              Text(
-                subtitle,
-                style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary),
-              ),
-            ],
-          ),
-        ),
-        Switch(
-          value: value,
-          onChanged: onChanged,
-          activeThumbColor: AppColors.primary,
-          activeTrackColor: AppColors.primaryContainer,
         ),
       ],
     );
