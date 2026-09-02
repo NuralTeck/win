@@ -11,6 +11,7 @@ class VoucherModel {
   final double pricePerTicket;
   final double totalAmount;
   final DateTime createdAt;
+  final String? dealerName; // 🏢 Main Parent Dealer if issued to a sub-seller
 
   const VoucherModel({
     required this.id,
@@ -25,7 +26,10 @@ class VoucherModel {
     required this.pricePerTicket,
     required this.totalAmount,
     required this.createdAt,
+    this.dealerName,
   });
+
+  String get effectiveDealer => (dealerName != null && dealerName!.isNotEmpty) ? dealerName! : partyName;
 
   Map<String, dynamic> toMap() {
     return {
@@ -34,6 +38,7 @@ class VoucherModel {
       'date': date,
       'draw_shift': drawShift,
       'party_name': partyName,
+      'dealer_name': dealerName ?? partyName,
       'series': series,
       'from_ticket': fromTicket,
       'to_ticket': toTicket,
@@ -45,12 +50,15 @@ class VoucherModel {
   }
 
   factory VoucherModel.fromMap(Map<String, dynamic> map) {
+    final party = map['party_name']?.toString() ?? '';
+    final dealer = map['dealer_name']?.toString();
     return VoucherModel(
       id: map['id']?.toString() ?? '',
       voucherNo: map['voucher_no']?.toString() ?? '',
       date: map['date']?.toString() ?? '',
       drawShift: map['draw_shift']?.toString() ?? '',
-      partyName: map['party_name']?.toString() ?? '',
+      partyName: party,
+      dealerName: (dealer != null && dealer.isNotEmpty) ? dealer : party,
       series: map['series']?.toString() ?? '',
       fromTicket: map['from_ticket']?.toString() ?? '',
       toTicket: map['to_ticket']?.toString() ?? '',

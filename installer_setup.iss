@@ -60,12 +60,12 @@ Source: "start_whatsapp_server.bat"; DestDir: "{app}"; Flags: ignoreversion
 Source: "start_whatsapp_server_silent.vbs"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"
-Name: "{group}\Start WhatsApp Engine Server"; Filename: "{app}\start_whatsapp_server.bat"; IconFilename: "{app}\app_icon.ico"
+Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\app_icon.ico"
+Name: "{group}\Start WhatsApp Engine Server"; Filename: "{app}\start_whatsapp_server.bat"; WorkingDir: "{app}"; IconFilename: "{app}\app_icon.ico"
 Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon; IconFilename: "{app}\app_icon.ico"
-Name: "{autodesktop}\Start WhatsApp Engine"; Filename: "{app}\start_whatsapp_server.bat"; Tasks: desktopicon; IconFilename: "{app}\app_icon.ico"
-Name: "{userstartup}\OpsCore Pro WhatsApp Server"; Filename: "{app}\start_whatsapp_server_silent.vbs"
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\app_icon.ico"
+Name: "{autodesktop}\Start WhatsApp Engine"; Filename: "{app}\start_whatsapp_server.bat"; WorkingDir: "{app}"; Tasks: desktopicon; IconFilename: "{app}\app_icon.ico"
+Name: "{userstartup}\OpsCore Pro WhatsApp Server"; Filename: "{app}\start_whatsapp_server_silent.vbs"; WorkingDir: "{app}"
 
 [Dirs]
 Name: "{app}"; Permissions: users-full

@@ -16,6 +16,7 @@ class GeminiScannedItem {
   String sellerName;
   String? targetDate;
   String? drawShift;
+  String? aiDoubt; // ⚠️ AI Confusion / Doubt reason (e.g. "Unclear digit", "Series assumed")
 
   GeminiScannedItem({
     required this.series,
@@ -27,6 +28,7 @@ class GeminiScannedItem {
     this.sellerName = 'Walk-in Customer',
     this.targetDate,
     this.drawShift,
+    this.aiDoubt,
   }) : fromTicket =
            fromTicket ??
            (ticketNo.contains('-')
@@ -47,6 +49,7 @@ class LastStockScanSession {
   final String activeShift;
   final DateTime activeDate;
   final String defaultParty;
+  final List<String> aiConfusions; // ⚠️ List of AI doubts and unparsed notes
 
   LastStockScanSession({
     required this.imageBytes,
@@ -56,6 +59,7 @@ class LastStockScanSession {
     required this.activeShift,
     required this.activeDate,
     required this.defaultParty,
+    this.aiConfusions = const [],
   });
 }
 
@@ -68,6 +72,7 @@ class GeminiScannerService {
   LastStockScanSession? lastStockScanSession;
   String? lastDetectedShift;
   String? lastDetectedParty;
+  List<String> lastAiConfusions = []; // ⚠️ Doubts or unparsed notes from latest scan
 
   String? detectShiftFromText(String text) {
     // 1:00 PM / Day / Morning / 1 PM / 1:00 / 1pm
@@ -188,28 +193,55 @@ UNSOLD PARCHA STRUCTURE & RULES:
    - "detectedDate": Look for date written at top (e.g. "28/08" -> "2026-08-28").
    - "partyName": Look for customer / seller / party name at top (e.g. "Madam", "Mason", "Madhav").
 
-2. COLUMNS & 2-DIGIT PREFIX SYSTEM:
-   - The page has multiple vertical columns (1, 2, 3, 4...).
-   - Each column has a Series header written at the top (e.g. (12), (24), (36), (20)...).
-   - The first row in a column gives the base 5-digit number or range (e.g. "49750-753" -> prefix is "49", "50271-274" -> prefix is "50", "51371-" -> prefix is "51", "52770-779" -> prefix is "52").
-   - In subsequent rows under that column, 3-digit ranges (e.g. "276-279", "481-483", "182-189") or single 3-digit numbers with trailing dash (e.g. "554-", "553-", "556-") MUST be prefixed with that column's 2-digit prefix to form complete 5-digit tickets/ranges:
-     * "276-279" under prefix "50" -> fromTicket: "50276", toTicket: "50279", quantity: 4, ticketNo: "50276 - 50279"
-     * "554-" under prefix "50" -> fromTicket: "50554", toTicket: "50554", quantity: 1, ticketNo: "50554"
-     * "182-189" under prefix "50" -> fromTicket: "50182", toTicket: "50189", quantity: 8, ticketNo: "50182 - 50189"
+2. COLUMNS & 2-DIGIT / 3-DIGIT PREFIX SYSTEM:
+   - The page has vertical columns, each under a Series header (e.g. 24, 12, 36...).
+   - A full 5-digit number or range establishes the active 3-digit prefix (and 2-digit prefix):
+     * "42370-71-2" -> fromTicket: "42370", toTicket: "42371", active prefix becomes "423"
+     * "42270-71-2" -> fromTicket: "42270", toTicket: "42271", active prefix becomes "422"
+     * "42990-99-10" -> fromTicket: "42990", toTicket: "42999", active prefix becomes "429"
+     * "42860-61-2" -> fromTicket: "42860", toTicket: "42861", active prefix becomes "428"
+     * "42980-1" -> fromTicket: "42980", toTicket: "42980", active prefix becomes "429"
+     * "42170-1" -> fromTicket: "42170", toTicket: "42170", active prefix becomes "421"
+   - Subsequent lines under that active prefix use the active prefix to build 5-digit tickets:
+     * "74-1" under prefix "423" -> fromTicket: "42374", toTicket: "42374", quantity: 1
+     * "76-79-4" under prefix "423" -> fromTicket: "42376", toTicket: "42379", quantity: 4
+     * "63-1" under prefix "428" -> fromTicket: "42863", toTicket: "42863", quantity: 1
+     * "65-67-3" under prefix "428" -> fromTicket: "42865", toTicket: "42867", quantity: 3
+     * "83-1" under prefix "429" -> fromTicket: "42983", toTicket: "42983", quantity: 1
+     * "85-88-4" under prefix "429" -> fromTicket: "42985", toTicket: "42988", quantity: 4
+     * "73-75-3" under prefix "421" -> fromTicket: "42173", toTicket: "42175", quantity: 3
 
-3. OUTPUT FORMAT:
+3. QUANTITY CALCULATION RULE (CRITICAL):
+   - ALWAYS calculate quantity strictly as: (toTicket - fromTicket) + 1
+   - The trailing number after the last hyphen (e.g. "-1", "-2", "-4", "-10", "-13") is the handwritten quantity — IGNORE IT! It is often written incorrectly on parchas!
+   - Examples:
+     * "42345-55-10" -> fromTicket: "42345", toTicket: "42355", quantity = (42355 - 42345) + 1 = 11 (IGNORE "10")
+     * "42370-71-2" -> fromTicket: "42370", toTicket: "42371", quantity = (42371 - 42370) + 1 = 2 (IGNORE "2")
+     * "76-79-4" -> fromTicket: "42376", toTicket: "42379", quantity = (42379 - 42376) + 1 = 4 (IGNORE "4")
+     * "74-1" -> fromTicket: "42374", toTicket: "42374", quantity = 1 (IGNORE "1")
+
+4. OUTPUT FORMAT & CONFUSION REPORTING:
+If any handwriting is ambiguous, blurry, cut off, or you have doubt on any digit (e.g. '7' vs '1' or '9' vs '2') or series:
+- Report it in "aiConfusions" array as a clear explanation string.
+- In that specific item, include "aiDoubt": "<concise reason, e.g. 'unclear if 58572 or 58512'>".
+- If you have NO doubt on an item, set "aiDoubt": null.
+
 Output ONLY a valid JSON object inside ```json ``` code fence:
 {
   "detectedShift": "<Dear 1 PM / Dear 6 PM / Dear 8 PM or null>",
   "detectedDate": "<YYYY-MM-DD or DD/MM or null>",
   "partyName": "<party_name_or_null>",
+  "aiConfusions": [
+    "<Any unclear line, blurry digit, ambiguous series, or doubt encountered. If none, empty array []>"
+  ],
   "items": [
     {
       "series": "<series_number>",
       "fromTicket": "<5_digit_from>",
       "toTicket": "<5_digit_to>",
-      "quantity": <number_of_tickets>,
-      "ticketNo": "<5_digit_from - 5_digit_to OR single_5_digit>"
+      "quantity": <(toTicket - fromTicket) + 1>,
+      "ticketNo": "<5_digit_from - 5_digit_to OR single_5_digit>",
+      "aiDoubt": "<optional explanation if handwriting was unclear or doubtful, otherwise null>"
     }
   ]
 }
@@ -416,20 +448,28 @@ Output ONLY the data. No explanations.
       r'^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})[-\/]?$',
     ).firstMatch(clean);
     if (ymdMatch != null) {
-      final y = ymdMatch.group(1)!;
+      final yNum = int.tryParse(ymdMatch.group(1)!);
+      // 🛡️ If scanned year is old/outdated (e.g. 2021 from handwritten 21), always use current year now.year!
+      final y = (yNum != null && (yNum < now.year - 1 || yNum > now.year + 1))
+          ? '${now.year}'
+          : ymdMatch.group(1)!;
       final m = ymdMatch.group(2)!.padLeft(2, '0');
       final d = ymdMatch.group(3)!.padLeft(2, '0');
       return '$y-$m-$d';
     }
 
-    // 2. DD-MM-YYYY or DD/MM/YYYY
+    // 2. DD-MM-YYYY or DD/MM/YYYY or DD-MM-YY or DD/MM/YY (e.g. 31/08/21 or 31/08/2026)
     final dmyMatch = RegExp(
-      r'^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$',
+      r'^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$',
     ).firstMatch(clean);
     if (dmyMatch != null) {
       final d = dmyMatch.group(1)!.padLeft(2, '0');
       final m = dmyMatch.group(2)!.padLeft(2, '0');
-      final y = dmyMatch.group(3)!;
+      final rawY = dmyMatch.group(3)!;
+      final yNum = int.tryParse(rawY);
+      final y = (rawY.length == 2 || (yNum != null && (yNum < now.year - 1 || yNum > now.year + 1)))
+          ? '${now.year}'
+          : rawY;
       return '$y-$m-$d';
     }
 
@@ -845,12 +885,22 @@ Output ONLY the data. No explanations.
             }
             rawDate = decoded['detectedDate']?.toString();
             detectedParty = decoded['partyName']?.toString().trim();
+            final rawConfusions = decoded['aiConfusions'];
+            if (rawConfusions is List) {
+              lastAiConfusions = rawConfusions
+                  .map((e) => e.toString().trim())
+                  .where((e) => e.isNotEmpty)
+                  .toList();
+            } else {
+              lastAiConfusions = [];
+            }
             final rawItems = decoded['items'];
             if (rawItems is List) {
               itemsList = rawItems;
             }
           } else if (decoded is List) {
             itemsList = decoded;
+            lastAiConfusions = [];
           }
 
           final effectiveParty =
@@ -869,20 +919,25 @@ Output ONLY the data. No explanations.
                 final tTkt =
                     it['toTicket']?.toString().replaceAll(RegExp(r'\D'), '').padLeft(5, '0') ??
                     fTkt;
-                int q = (it['quantity'] as num?)?.toInt() ?? 0;
-                if (q <= 0 && fTkt.isNotEmpty && tTkt.isNotEmpty) {
+                // ⚡ ALWAYS recalculate quantity from ticket range (fromTicket to toTicket).
+                // NEVER trust handwritten/AI-parsed quantity — it is often wrong on parchas.
+                int q = 1;
+                if (fTkt.isNotEmpty && tTkt.isNotEmpty) {
                   final fNum = int.tryParse(fTkt);
                   final tNum = int.tryParse(tTkt);
                   if (fNum != null && tNum != null && tNum >= fNum) {
                     q = (tNum - fNum) + 1;
-                  } else {
-                    q = 1;
                   }
                 }
                 if (q <= 0) q = 1;
 
                 final tNo = it['ticketNo']?.toString() ??
                     (q > 1 ? '$fTkt - $tTkt' : fTkt);
+
+                final rawDoubt = it['aiDoubt']?.toString().trim();
+                final doubt = (rawDoubt != null && rawDoubt.isNotEmpty && rawDoubt.toLowerCase() != 'null')
+                    ? rawDoubt
+                    : null;
 
                 if (fTkt.isNotEmpty) {
                   jsonItems.add(
@@ -897,6 +952,8 @@ Output ONLY the data. No explanations.
                       targetDate: rawDate != null
                           ? _normalizeScannedDate(rawDate)
                           : null,
+                      drawShift: lastDetectedShift,
+                      aiDoubt: doubt,
                     ),
                   );
                 }
@@ -1173,6 +1230,7 @@ Output ONLY the data. No explanations.
                 sellerName: current.sellerName,
                 targetDate: current.targetDate,
                 drawShift: current.drawShift,
+                aiDoubt: current.aiDoubt,
               ),
             );
           }
@@ -1211,7 +1269,8 @@ Output ONLY the data. No explanations.
             next.targetDate != current.targetDate ||
             next.drawShift != current.drawShift ||
             next.quantity > 1 ||
-            next.sellerName != current.sellerName) {
+            next.sellerName != current.sellerName ||
+            next.aiDoubt != current.aiDoubt) {
           break;
         }
         final int? nextNum = int.tryParse(next.ticketNo);
@@ -1237,6 +1296,7 @@ Output ONLY the data. No explanations.
             sellerName: current.sellerName,
             targetDate: current.targetDate,
             drawShift: current.drawShift,
+            aiDoubt: current.aiDoubt,
           ),
         );
         i = j;

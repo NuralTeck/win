@@ -166,7 +166,7 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
 
           if (tNo.length == 5) {
             items.add(ParsedTicketItem(
-              series: s,
+              series: s.isNotEmpty && s != '?' ? s : _selectedSeriesOverride,
               ticketNo: tNo,
               quantity: qty > 0 ? qty : 1,
             ));
@@ -174,16 +174,50 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
         }
       }
 
+      // Auto Fallback: If regex didn't extract tickets or missed some, extract all 5-digit numbers from raw text!
+      if (items.isEmpty) {
+        final all5s = RegExp(r'\b\d{5}\b').allMatches(text);
+        for (final m in all5s) {
+          items.add(ParsedTicketItem(
+            series: _selectedSeriesOverride,
+            ticketNo: m.group(0)!,
+            quantity: 1,
+          ));
+        }
+      }
+
       setState(() {
         _testPreviewTickets = items;
-        _testError = items.isEmpty ? 'No 5-digit tickets matched with this regex.' : null;
+        _testError = items.isEmpty ? 'No 5-digit tickets found in this message.' : null;
       });
     } catch (e) {
+      // If regex failed, still extract raw 5-digit tickets!
+      final all5s = RegExp(r'\b\d{5}\b').allMatches(text);
+      final items = all5s.map((m) => ParsedTicketItem(
+        series: _selectedSeriesOverride,
+        ticketNo: m.group(0)!,
+        quantity: 1,
+      )).toList();
+
       setState(() {
-        _testPreviewTickets = [];
-        _testError = 'Invalid Regular Expression syntax: $e';
+        _testPreviewTickets = items;
+        _testError = items.isEmpty ? 'Invalid Regex: $e' : null;
       });
     }
+  }
+
+  String _selectedSeriesOverride = '12';
+
+  void _applySeriesToAll(String newSeries) {
+    final clean = PatternMatcherService.instance.cleanSeriesNumber(newSeries, fallback: newSeries.isNotEmpty ? newSeries : '12');
+    setState(() {
+      _selectedSeriesOverride = clean;
+      _testPreviewTickets = _testPreviewTickets.map((t) => ParsedTicketItem(
+        series: clean,
+        ticketNo: t.ticketNo,
+        quantity: t.quantity,
+      )).toList();
+    });
   }
 
   Future<void> _saveAndTrainBot() async {
@@ -511,6 +545,57 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
                                                 }),
                                               ),
                                             ],
+                                          ),
+                                          const SizedBox(height: 16),
+
+                                          // Quick Series Fix / Override Bar
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF1E293B),
+                                              borderRadius: BorderRadius.circular(10),
+                                              border: Border.all(color: Colors.amberAccent.withAlpha(100)),
+                                            ),
+                                            child: Row(
+                                              children: [
+                                                const Icon(Icons.bolt_rounded, color: Colors.amberAccent, size: 18),
+                                                const SizedBox(width: 8),
+                                                const Text(
+                                                  'Fix Series To All:',
+                                                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.amberAccent),
+                                                ),
+                                                const SizedBox(width: 10),
+                                                Expanded(
+                                                  child: Wrap(
+                                                    spacing: 6,
+                                                    runSpacing: 4,
+                                                    children: ['12', '24', '36', '40', '60', '100'].map((s) {
+                                                      final isSel = _selectedSeriesOverride == s;
+                                                      return InkWell(
+                                                        onTap: () => _applySeriesToAll(s),
+                                                        borderRadius: BorderRadius.circular(6),
+                                                        child: Container(
+                                                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                                          decoration: BoxDecoration(
+                                                            color: isSel ? Colors.amberAccent.withAlpha(50) : AppColors.surfaceContainerHigh,
+                                                            borderRadius: BorderRadius.circular(6),
+                                                            border: Border.all(color: isSel ? Colors.amberAccent : Colors.white24, width: isSel ? 1.5 : 1),
+                                                          ),
+                                                          child: Text(
+                                                            'Series $s',
+                                                            style: TextStyle(
+                                                              fontSize: 11,
+                                                              fontWeight: isSel ? FontWeight.w900 : FontWeight.bold,
+                                                              color: isSel ? Colors.amberAccent : Colors.white70,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      );
+                                                    }).toList(),
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
                                           ),
                                           const SizedBox(height: 16),
 

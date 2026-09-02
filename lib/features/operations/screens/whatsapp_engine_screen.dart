@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:intl/intl.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
@@ -21,6 +22,13 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
   bool _autoScrollLogs = true;
   String _activeBotMode = 'auto';
 
+  // 🔒 Strict Active Target Lock State
+  String _botLockedShift = 'Dear 1 PM';
+  DateTime _botLockedDate = DateTime.now();
+  String _botLockedBuyer = '';
+  bool _botStrictLock = true;
+  List<String> _availableCustomerNames = [];
+
   @override
   void initState() {
     super.initState();
@@ -28,6 +36,66 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
     DatabaseService.instance.getBotMode().then((m) {
       if (mounted) setState(() => _activeBotMode = m);
     });
+    _loadTargetLock();
+    _loadCustomers();
+  }
+
+  Future<void> _loadTargetLock() async {
+    final cfg = await _engineService.getTargetLock();
+    if (cfg != null && mounted) {
+      setState(() {
+        if (cfg['lockedShift'] != null && (cfg['lockedShift'] as String).isNotEmpty) {
+          _botLockedShift = cfg['lockedShift'];
+        }
+        if (cfg['lockedDate'] != null && (cfg['lockedDate'] as String).isNotEmpty) {
+          final dt = DateTime.tryParse(cfg['lockedDate']);
+          if (dt != null) _botLockedDate = dt;
+        }
+        if (cfg['lockedBuyerName'] != null) {
+          _botLockedBuyer = cfg['lockedBuyerName'];
+        }
+        if (cfg['strictLockEnabled'] != null) {
+          _botStrictLock = cfg['strictLockEnabled'] == true;
+        }
+      });
+    }
+  }
+
+  Future<void> _loadCustomers() async {
+    try {
+      final sellers = await DatabaseService.instance.getSellerCustomers();
+      if (mounted) {
+        setState(() {
+          _availableCustomerNames = sellers
+              .map((s) => s.name.trim())
+              .where((n) => n.isNotEmpty)
+              .toSet()
+              .toList()
+            ..sort();
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveTargetLock() async {
+    final dateStr = DateFormat('yyyy-MM-dd').format(_botLockedDate);
+    await _engineService.setTargetLock(
+      lockedShift: _botLockedShift,
+      lockedDate: dateStr,
+      lockedBuyerName: _botLockedBuyer,
+      strictLockEnabled: _botStrictLock,
+    );
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            '🔒 Target Lock Activated! Shift: $_botLockedShift | Date: ${DateFormat('dd-MM-yyyy').format(_botLockedDate)} (In-message shift tags will be 100% IGNORED)',
+          ),
+          backgroundColor: const Color(0xFF16A34A),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
   }
 
   void _scrollToBottom() {
@@ -108,6 +176,10 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
           children: [
             // 1. Top Header Banner
             _buildHeaderBar(status),
+            const SizedBox(height: 16),
+
+            // 1.4 Strict Active Target Lock Card (Draw Time, Date, Party)
+            _buildTargetLockSelectorCard(),
             const SizedBox(height: 16),
 
             // 1.5 Bot Operating Mode Selector Card
@@ -761,6 +833,272 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildTargetLockSelectorCard() {
+    final dateFormat = DateFormat('dd MMM yyyy (EEE)');
+    final isAutoBuyer = _botLockedBuyer.isEmpty || _botLockedBuyer.toLowerCase() == 'auto';
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F172A),
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.amberAccent.withAlpha(120), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.amberAccent.withAlpha(25),
+            blurRadius: 16,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Header Row
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.amberAccent.withAlpha(30),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.amberAccent.withAlpha(100)),
+                ),
+                child: const Icon(Icons.lock_clock_rounded, color: Colors.amberAccent, size: 22),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Text(
+                          'ACTIVE DRAW & DATE SESSION LOCK',
+                          style: TextStyle(
+                            color: Colors.amberAccent,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.green.withAlpha(50),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: Colors.greenAccent.withAlpha(150)),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.shield_rounded, size: 12, color: Colors.greenAccent),
+                              SizedBox(width: 4),
+                              Text(
+                                'STRICT IMMUTABLE LOCK ACTIVE',
+                                style: TextStyle(
+                                  color: Colors.greenAccent,
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w900,
+                                  letterSpacing: 0.6,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 3),
+                    const Text(
+                      '🔒 STRICT RULE: Yahan chuna hua Shift aur Date fixed rahega. WhatsApp message ke andar aane wale "1pm", "6pm", "8pm" aur party names 100% IGNORE honge!',
+                      style: TextStyle(
+                        color: AppColors.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+
+          // Controls Selector Wrap
+          Wrap(
+            spacing: 12,
+            runSpacing: 10,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              // 1. Shift Selector Pills
+              Container(
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: const Color(0xFF334155)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _buildShiftPill('Dear 1 PM', '☀️ 1:00 PM (Dear 1 PM)', Colors.amberAccent),
+                    const SizedBox(width: 4),
+                    _buildShiftPill('Dear 6 PM', '🌅 6:00 PM (Dear 6 PM)', Colors.orangeAccent),
+                    const SizedBox(width: 4),
+                    _buildShiftPill('Dear 8 PM', '🌙 8:00 PM (Dear 8 PM)', Colors.purpleAccent),
+                    const SizedBox(width: 4),
+                    _buildShiftPill('auto', '⚡ Auto-Cycle', Colors.cyanAccent),
+                  ],
+                ),
+              ),
+
+              // 2. Draw Date Picker Button
+              InkWell(
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: context,
+                    initialDate: _botLockedDate,
+                    firstDate: DateTime.now().subtract(const Duration(days: 30)),
+                    lastDate: DateTime.now().add(const Duration(days: 30)),
+                    builder: (context, child) {
+                      return Theme(
+                        data: Theme.of(context).copyWith(
+                          colorScheme: const ColorScheme.dark(
+                            primary: Colors.amberAccent,
+                            onPrimary: Colors.black,
+                            surface: Color(0xFF1E293B),
+                            onSurface: Colors.white,
+                          ),
+                        ),
+                        child: child!,
+                      );
+                    },
+                  );
+                  if (picked != null) {
+                    setState(() => _botLockedDate = picked);
+                    await _saveTargetLock();
+                  }
+                },
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E293B),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amberAccent.withAlpha(120)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.calendar_month_rounded, size: 16, color: Colors.amberAccent),
+                      const SizedBox(width: 8),
+                      Text(
+                        'DATE: ${dateFormat.format(_botLockedDate)}',
+                        style: const TextStyle(
+                          color: Colors.amberAccent,
+                          fontWeight: FontWeight.w900,
+                          fontSize: 12,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      const Icon(Icons.arrow_drop_down, size: 18, color: Colors.amberAccent),
+                    ],
+                  ),
+                ),
+              ),
+
+              // 3. Customer / Party Lock Dropdown
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF334155)),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: isAutoBuyer ? '' : (_availableCustomerNames.contains(_botLockedBuyer) ? _botLockedBuyer : ''),
+                    dropdownColor: const Color(0xFF1E293B),
+                    icon: const Icon(Icons.arrow_drop_down, color: Colors.cyanAccent),
+                    style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
+                    hint: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.person_rounded, size: 15, color: Colors.cyanAccent),
+                        SizedBox(width: 6),
+                        Text('PARTY: ⚡ Auto (Phone Book)', style: TextStyle(color: Colors.cyanAccent, fontSize: 12, fontWeight: FontWeight.bold)),
+                      ],
+                    ),
+                    items: [
+                      const DropdownMenuItem<String>(
+                        value: '',
+                        child: Row(
+                          children: [
+                            Icon(Icons.contact_phone_rounded, size: 15, color: Colors.cyanAccent),
+                            SizedBox(width: 6),
+                            Text('⚡ Auto-Resolve from Phone Book', style: TextStyle(color: Colors.cyanAccent)),
+                          ],
+                        ),
+                      ),
+                      ..._availableCustomerNames.map((name) => DropdownMenuItem<String>(
+                        value: name,
+                        child: Row(
+                          children: [
+                            const Icon(Icons.person_outline_rounded, size: 15, color: Colors.white70),
+                            const SizedBox(width: 6),
+                            Text('Party: $name', style: const TextStyle(color: Colors.white)),
+                          ],
+                        ),
+                      )),
+                    ],
+                    onChanged: (val) {
+                      setState(() => _botLockedBuyer = val ?? '');
+                      _saveTargetLock();
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildShiftPill(String shiftCode, String label, Color color) {
+    final isSelected = (_botLockedShift.toLowerCase() == shiftCode.toLowerCase()) ||
+        (shiftCode == 'auto' && (_botLockedShift.isEmpty || _botLockedShift.toLowerCase() == 'auto'));
+
+    return InkWell(
+      onTap: () {
+        setState(() => _botLockedShift = shiftCode == 'auto' ? '' : shiftCode);
+        _saveTargetLock();
+      },
+      borderRadius: BorderRadius.circular(6),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        decoration: BoxDecoration(
+          color: isSelected ? color.withAlpha(45) : Colors.transparent,
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected ? color : Colors.transparent,
+            width: 1.3,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? color : Colors.grey.shade400,
+            fontSize: 11,
+            fontWeight: isSelected ? FontWeight.w900 : FontWeight.bold,
+          ),
+        ),
       ),
     );
   }

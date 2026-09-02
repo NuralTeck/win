@@ -23,6 +23,7 @@ enum MainHisabCategory {
 }
 
 enum HisabSourceFilter { all, vouchersOnly, unsoldOnly }
+enum HisabGroupingView { dealerConsolidated, subSellerDetailed }
 
 class PartyHisabReportsScreen extends ConsumerStatefulWidget {
   const PartyHisabReportsScreen({super.key});
@@ -41,6 +42,7 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
   String _selectedSeries = 'ALL';
   HisabReportMode _reportMode = HisabReportMode.summary;
   HisabSourceFilter _sourceFilter = HisabSourceFilter.all;
+  HisabGroupingView _groupingView = HisabGroupingView.dealerConsolidated;
   String _searchQuery = '';
   final TextEditingController _searchCtrl = TextEditingController();
 
@@ -301,6 +303,7 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
       endDate: endStr,
       selectedShift: _selectedShift,
       selectedSeries: _selectedSeries,
+      groupByDealer: _groupingView == HisabGroupingView.dealerConsolidated,
       allResults: combinedResults,
       lotteryResult: matchingResult,
     );
@@ -606,8 +609,18 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
                   Container(width: 1, height: 20, color: const Color(0xFF334155)),
                   const SizedBox(width: 12),
 
-                  // 2. FORMAT (SECOND!)
+                  // 2. VIEW SWITCH (DEALER-WISE vs SUB-SELLER WISE)
                   if (_activeCategory == MainHisabCategory.partyUnsoldHisab) ...[
+                    const Text('VIEW:', style: TextStyle(color: Colors.grey, fontSize: 10.5, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 6),
+                    _viewSwitchBtn('👑 Dealer Consolidated', HisabGroupingView.dealerConsolidated),
+                    const SizedBox(width: 6),
+                    _viewSwitchBtn('👤 Sub-Seller Detailed', HisabGroupingView.subSellerDetailed),
+                    const SizedBox(width: 12),
+                    Container(width: 1, height: 20, color: const Color(0xFF334155)),
+                    const SizedBox(width: 12),
+
+                    // 3. FORMAT
                     const Text('FORMAT:', style: TextStyle(color: Colors.grey, fontSize: 10.5, fontWeight: FontWeight.bold)),
                     const SizedBox(width: 6),
                     _formatSwitchBtn('📊 Summary', HisabReportMode.summary),
@@ -927,6 +940,33 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
     );
   }
 
+  Widget _viewSwitchBtn(String label, HisabGroupingView view) {
+    final isSelected = _groupingView == view;
+    return InkWell(
+      onTap: () => setState(() => _groupingView = view),
+      borderRadius: BorderRadius.circular(6),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFFF59E0B).withAlpha(50) : const Color(0xFF1E293B),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(
+            color: isSelected ? const Color(0xFFF59E0B) : Colors.transparent,
+            width: 1.2,
+          ),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            color: isSelected ? const Color(0xFFFBBF24) : Colors.grey.shade400,
+            fontWeight: FontWeight.bold,
+            fontSize: 10.5,
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _formatSwitchBtn(String label, HisabReportMode mode) {
     final isSelected = _reportMode == mode;
     return InkWell(
@@ -1153,18 +1193,56 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
           // Card Header
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            decoration: const BoxDecoration(
-              color: Color(0xFF1E293B),
-              borderRadius: BorderRadius.vertical(top: Radius.circular(12)),
+            decoration: BoxDecoration(
+              color: summary.isDealer ? const Color(0xFF1E1B4B) : const Color(0xFF1E293B),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
+              border: Border(bottom: BorderSide(color: summary.isDealer ? const Color(0xFFF59E0B).withAlpha(100) : const Color(0xFF334155))),
             ),
             child: Row(
               children: [
-                const Icon(Icons.storefront_rounded, size: 16, color: Color(0xFF38BDF8)),
+                Icon(
+                  summary.isDealer ? Icons.workspace_premium_rounded : Icons.person_rounded,
+                  size: 16,
+                  color: summary.isDealer ? const Color(0xFFF59E0B) : const Color(0xFF38BDF8),
+                ),
                 const SizedBox(width: 8),
                 Text(
-                  'PARTY: ${summary.partyName}',
-                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 14, color: Colors.white),
+                  summary.isDealer ? '👑 DEALER: ${summary.partyName}' : '👤 PARTY: ${summary.partyName}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 14,
+                    color: summary.isDealer ? const Color(0xFFFDE68A) : Colors.white,
+                  ),
                 ),
+                if (summary.isDealer && summary.subSellerBreakdowns.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF59E0B).withAlpha(40),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: const Color(0xFFF59E0B).withAlpha(120)),
+                    ),
+                    child: Text(
+                      'CONSOLIDATED (${summary.subSellerBreakdowns.length} Sub-Sellers)',
+                      style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 9.5, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ] else if (!summary.isDealer && summary.dealerName != null && summary.dealerName!.isNotEmpty) ...[
+                  const SizedBox(width: 8),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF38BDF8).withAlpha(30),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(color: const Color(0xFF38BDF8).withAlpha(100)),
+                    ),
+                    child: Text(
+                      '🏢 Dealer: ${summary.dealerName}',
+                      style: const TextStyle(color: Color(0xFF7DD3FC), fontSize: 9.5, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                ],
                 const SizedBox(width: 10),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
@@ -1390,6 +1468,73 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
                   ),
                 ),
                 const SizedBox(height: 10),
+
+                // 2.1 Sub-Seller Wise Breakdown Table (For Dealer Consolidated View)
+                if (summary.isDealer && summary.subSellerBreakdowns.isNotEmpty) ...[
+                  Container(
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0B132B),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFF59E0B).withAlpha(120), width: 1.2),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                          decoration: const BoxDecoration(
+                            color: Color(0xFF1E293B),
+                            borderRadius: BorderRadius.vertical(top: Radius.circular(7)),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.people_alt_rounded, size: 14, color: Color(0xFFF59E0B)),
+                              const SizedBox(width: 6),
+                              Text(
+                                '👥 SUB-SELLER BREAKDOWN (${summary.subSellerBreakdowns.length} Sellers under ${summary.partyName})',
+                                style: const TextStyle(color: Color(0xFFF59E0B), fontWeight: FontWeight.bold, fontSize: 11.5),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Table(
+                          columnWidths: const {
+                            0: FlexColumnWidth(1.5),
+                            1: FlexColumnWidth(1.1),
+                            2: FlexColumnWidth(1.1),
+                            3: FlexColumnWidth(1.1),
+                            4: FlexColumnWidth(1.2),
+                            5: FlexColumnWidth(1.4),
+                          },
+                          children: [
+                            TableRow(
+                              decoration: const BoxDecoration(color: Color(0xFF0F172A)),
+                              children: [
+                                _tableHeaderCell('SUB-SELLER'),
+                                _tableHeaderCell('🔵 INWARD'),
+                                _tableHeaderCell('🔴 UNSOLD'),
+                                _tableHeaderCell('🟢 NET SOLD'),
+                                _tableHeaderCell('🏆 INAM (WINS)'),
+                                _tableHeaderCell('💰 NET PAYABLE (₹)'),
+                              ],
+                            ),
+                            ...summary.subSellerBreakdowns.map((sb) => TableRow(
+                              children: [
+                                _tableBodyCell('👤 ${sb.sellerName}', isBold: true, color: const Color(0xFF38BDF8)),
+                                _tableBodyCell('${sb.totalVouchers} Nos (₹${sb.totalVoucherAmount.toStringAsFixed(0)})', color: const Color(0xFF93C5FD)),
+                                _tableBodyCell('${sb.totalUnsold} Nos (-₹${sb.totalUnsoldAmount.toStringAsFixed(0)})', color: const Color(0xFFFCA5A5)),
+                                _tableBodyCell('${sb.totalNetSold} Nos', isBold: true, color: const Color(0xFF4ADE80)),
+                                _tableBodyCell(sb.totalWinAmount > 0 ? '-₹${sb.totalWinAmount.toStringAsFixed(0)}' : '₹0', color: const Color(0xFF86EFAC)),
+                                _tableBodyCell('₹${sb.finalNetPayable.toStringAsFixed(2)}', isBold: true, color: const Color(0xFFFBBF24)),
+                              ],
+                            )),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
 
                 // 3. Winning Tickets Breakdown for this Party (Customer Wins)
                 if (hasCustomerWins) ...[

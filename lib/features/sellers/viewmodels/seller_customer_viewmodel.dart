@@ -72,6 +72,8 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
     required String password,
     required String phone,
     bool isActive = true,
+    String? parentDealer,
+    bool isDealer = false,
   }) async {
     final newSeller = SellerCustomerModel(
       id: 'sc_${DateTime.now().millisecondsSinceEpoch}',
@@ -81,6 +83,8 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
       phone: phone.trim(),
       isActive: isActive,
       createdAt: DateTime.now(),
+      parentDealer: (parentDealer != null && parentDealer.trim().isNotEmpty) ? parentDealer.trim() : null,
+      isDealer: isDealer,
     );
 
     await _dbService.insertSellerCustomer(newSeller);
@@ -96,7 +100,10 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
     required String password,
     required String phone,
     required bool isActive,
+    String? parentDealer,
+    bool isDealer = false,
   }) async {
+    final existing = state.sellers.where((s) => s.id == id).firstOrNull;
     final updated = SellerCustomerModel(
       id: id,
       name: name.trim(),
@@ -104,7 +111,9 @@ class SellerCustomerViewModel extends StateNotifier<SellerCustomerState> {
       password: password.trim(),
       phone: phone.trim(),
       isActive: isActive,
-      createdAt: DateTime.now(),
+      createdAt: existing?.createdAt ?? DateTime.now(),
+      parentDealer: (parentDealer != null && parentDealer.trim().isNotEmpty) ? parentDealer.trim() : null,
+      isDealer: isDealer,
     );
 
     await _dbService.updateSellerCustomer(updated);

@@ -43,12 +43,8 @@ class DatabaseService {
     await db.execute('PRAGMA journal_mode=WAL;');
     await db.execute('PRAGMA busy_timeout=10000;');
     await db.execute('PRAGMA synchronous=NORMAL;');
-    // ⚡ High performance indexes for instant voucher & unsold queries with thousands of entries!
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_date_shift ON vouchers(date, draw_shift);');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_party ON vouchers(party_name);');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_date_shift ON unsold_tickets(date, draw_shift);');
-    await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_party ON unsold_tickets(party_name);');
     await _createTables(db);
+    await _runMigrations(db);
     return db;
   }
 
@@ -86,6 +82,8 @@ class DatabaseService {
         password TEXT NOT NULL,
         phone TEXT NOT NULL,
         isActive INTEGER NOT NULL,
+        parent_dealer TEXT,
+        is_dealer INTEGER DEFAULT 0,
         createdAt TEXT NOT NULL
       )
     ''');
@@ -223,6 +221,7 @@ class DatabaseService {
         date TEXT NOT NULL,
         draw_shift TEXT NOT NULL,
         party_name TEXT NOT NULL,
+        dealer_name TEXT,
         series TEXT NOT NULL,
         from_ticket TEXT NOT NULL,
         to_ticket TEXT NOT NULL,
@@ -241,6 +240,7 @@ class DatabaseService {
         date TEXT NOT NULL,
         draw_shift TEXT NOT NULL,
         party_name TEXT NOT NULL,
+        dealer_name TEXT,
         series TEXT NOT NULL,
         from_ticket TEXT NOT NULL,
         to_ticket TEXT NOT NULL,
@@ -260,6 +260,45 @@ class DatabaseService {
 
   Future<void> _seedInitialData(Database db) async {
     // Clean database startup — No hardcoded dummy data seeded
+  }
+
+  Future<void> _runMigrations(Database db) async {
+    try {
+      // 1. seller_customers table migrations
+      final scCols = await db.rawQuery('PRAGMA table_info(seller_customers);');
+      final scNames = scCols.map((c) => c['name']?.toString().toLowerCase()).toSet();
+      if (!scNames.contains('parent_dealer')) {
+        await db.execute('ALTER TABLE seller_customers ADD COLUMN parent_dealer TEXT;');
+      }
+      if (!scNames.contains('is_dealer')) {
+        await db.execute('ALTER TABLE seller_customers ADD COLUMN is_dealer INTEGER DEFAULT 0;');
+      }
+
+      // 2. vouchers table migrations
+      final vCols = await db.rawQuery('PRAGMA table_info(vouchers);');
+      final vNames = vCols.map((c) => c['name']?.toString().toLowerCase()).toSet();
+      if (!vNames.contains('dealer_name')) {
+        await db.execute('ALTER TABLE vouchers ADD COLUMN dealer_name TEXT;');
+      }
+
+      // 3. unsold_tickets table migrations
+      final uCols = await db.rawQuery('PRAGMA table_info(unsold_tickets);');
+      final uNames = uCols.map((c) => c['name']?.toString().toLowerCase()).toSet();
+      if (!uNames.contains('dealer_name')) {
+        await db.execute('ALTER TABLE unsold_tickets ADD COLUMN dealer_name TEXT;');
+      }
+
+      // ⚡ High performance indexes (safe: executed after columns are guaranteed to exist!)
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_date_shift ON vouchers(date, draw_shift);');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_party ON vouchers(party_name);');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_vouchers_dealer ON vouchers(dealer_name);');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_date_shift ON unsold_tickets(date, draw_shift);');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_party ON unsold_tickets(party_name);');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_unsold_dealer ON unsold_tickets(dealer_name);');
+      await db.execute('CREATE INDEX IF NOT EXISTS idx_seller_dealer ON seller_customers(parent_dealer);');
+    } catch (e) {
+      debugPrint('⚠️ [MIGRATIONS NOTICE] $e');
+    }
   }
 
   /// Utility method to wipe all data from local database tables
@@ -618,6 +657,66 @@ class DatabaseService {
     );
   }
 
+  /// Returns the parent dealer for a party if configured, otherwise partyName itself.
+  Future<String> getParentDealerForParty(String partyName) async {
+    final clean = partyName.trim();
+    if (clean.isEmpty) return partyName;
+    try {
+      final db = await database;
+      final rows = await db.query(
+        'seller_customers',
+        columns: ['parent_dealer', 'is_dealer'],
+        where: 'LOWER(name) = ?',
+        whereArgs: [clean.toLowerCase()],
+        limit: 1,
+      );
+      if (rows.isNotEmpty) {
+        final parent = rows.first['parent_dealer'] as String?;
+        if (parent != null && parent.trim().isNotEmpty) {
+          return parent.trim();
+        }
+      }
+    } catch (e) {
+      debugPrint('Error getting parent dealer: $e');
+    }
+    return clean;
+  }
+
+  /// Returns all sub-sellers under a given dealer.
+  Future<List<String>> getSubSellersForDealer(String dealerName) async {
+    final clean = dealerName.trim();
+    if (clean.isEmpty) return [];
+    try {
+      final db = await database;
+      final rows = await db.query(
+        'seller_customers',
+        columns: ['name'],
+        where: 'LOWER(parent_dealer) = ?',
+        whereArgs: [clean.toLowerCase()],
+      );
+      return rows.map((r) => (r['name'] as String? ?? '').trim()).where((n) => n.isNotEmpty).toList();
+    } catch (e) {
+      debugPrint('Error getting sub-sellers: $e');
+      return [];
+    }
+  }
+
+  /// Returns all registered parties who are marked as Main Dealer or have sub-sellers.
+  Future<List<String>> getDealersList() async {
+    try {
+      final db = await database;
+      final rows = await db.rawQuery('''
+        SELECT DISTINCT name FROM seller_customers WHERE is_dealer = 1
+        UNION
+        SELECT DISTINCT parent_dealer as name FROM seller_customers WHERE parent_dealer IS NOT NULL AND parent_dealer != ''
+      ''');
+      return rows.map((r) => (r['name'] as String? ?? '').trim()).where((n) => n.isNotEmpty).toList();
+    } catch (e) {
+      debugPrint('Error getting dealers list: $e');
+      return [];
+    }
+  }
+
   // ─── SERIES PRICES CRUD ─────────────────────────────────────────────────────
 
   Future<List<UniversalSeriesPriceModel>> getSeriesPrices() async {
@@ -813,6 +912,8 @@ class DatabaseService {
       'password': _cleanUtf16(s.password, '1234'),
       'phone': _cleanUtf16(s.phone),
       'isActive': s.isActive ? 1 : 0,
+      'parent_dealer': s.parentDealer != null ? _cleanUtf16(s.parentDealer!) : null,
+      'is_dealer': s.isDealer ? 1 : 0,
       'createdAt': s.createdAt.toIso8601String(),
     };
   }
@@ -825,6 +926,8 @@ class DatabaseService {
       password: _cleanUtf16(m['password'], '1234'),
       phone: _cleanUtf16(m['phone']),
       isActive: (m['isActive'] as int) == 1,
+      parentDealer: m['parent_dealer'] != null ? _cleanUtf16(m['parent_dealer']) : null,
+      isDealer: (m['is_dealer'] as int? ?? 0) == 1,
       createdAt: DateTime.parse(m['createdAt'] as String),
     );
   }
@@ -1205,8 +1308,10 @@ class DatabaseService {
         whereArgs.add('%$cleanShift%');
       }
       if (partyName != null && partyName.isNotEmpty && partyName != 'All' && partyName != 'All Parties') {
-        conditions.add('party_name = ?');
-        whereArgs.add(partyName);
+        final cleanP = partyName.trim();
+        conditions.add('(LOWER(TRIM(party_name)) = LOWER(?) OR LOWER(TRIM(dealer_name)) = LOWER(?))');
+        whereArgs.add(cleanP);
+        whereArgs.add(cleanP);
       }
 
       if (conditions.isNotEmpty) {
@@ -1362,8 +1467,10 @@ class DatabaseService {
         whereArgs.add('%$cleanShift%');
       }
       if (partyName != null && partyName.isNotEmpty && partyName != 'All' && partyName != 'All Parties') {
-        conditions.add('party_name = ?');
-        whereArgs.add(partyName);
+        final cleanP = partyName.trim();
+        conditions.add('(LOWER(TRIM(party_name)) = LOWER(?) OR LOWER(TRIM(dealer_name)) = LOWER(?))');
+        whereArgs.add(cleanP);
+        whereArgs.add(cleanP);
       }
 
       if (conditions.isNotEmpty) {

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:convert';
+import 'dart:math' as math;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,6 +21,8 @@ import '../../settings/viewmodels/draw_time_viewmodel.dart';
 import '../widgets/booking_history_dialog.dart';
 import '../widgets/ai_photo_review_dialog.dart';
 import '../widgets/raw_text_ticket_parser_dialog.dart';
+import '../widgets/bulk_chat_ticket_importer_dialog.dart';
+import '../widgets/pattern_resolver_dialog.dart';
 import '../widgets/voice_booking_dialog.dart';
 import '../services/gemini_scanner_service.dart';
 
@@ -1767,6 +1770,52 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
     );
   }
 
+  Future<void> _openPatternResolverDialog() async {
+    await showDialog(
+      context: context,
+      builder: (ctx) => PatternResolverDialog(
+        onTicketsResolved: (resolvedTickets, sender, senderName) async {
+          final effectiveCustomer = (senderName != null && senderName.isNotEmpty)
+              ? senderName
+              : (sender.isNotEmpty ? 'Party $sender' : (_sellerName.isNotEmpty ? _sellerName : 'Walk-in Customer'));
+          final drawCode = _selectedLottery.replaceAll(RegExp(r'\s+'), '-').toUpperCase();
+          final List<TicketSaleModel> sales = [];
+          int index = 0;
+          for (final t in resolvedTickets) {
+            index++;
+            final price = _calculatePriceForSeries(t.series);
+            final uniqueSalt = math.Random().toString().substring(2, 8);
+            sales.add(TicketSaleModel(
+              id: 'tkt_wa_res_${DateTime.now().millisecondsSinceEpoch}_${uniqueSalt}_${t.series}_${t.ticketNo}_$index',
+              receiptNumber: 'REC-${t.series}-${t.ticketNo}',
+              buyerName: effectiveCustomer,
+              buyerPhone: sender,
+              agentCode: 'AG-WA',
+              agentName: effectiveCustomer,
+              drawCode: drawCode,
+              drawName: _selectedLottery,
+              ticketSeries: t.series,
+              ticketNumber: '${t.series} ${t.ticketNo}',
+              quantity: t.quantity,
+              pricePerTicket: price,
+              totalAmount: price * t.quantity,
+              commissionAmount: (price * t.quantity) * 0.05,
+              status: TicketStatus.sold,
+              paymentMode: PaymentMode.cash,
+              saleDate: DateTime.now(),
+              drawDate: _selectedDate,
+            ));
+          }
+          await ref.read(ticketSalesViewModelProvider.notifier).addTicketSalesBulk(sales);
+          await _loadExistingSalesIntoTable();
+          await PatternMatcherService.instance.refreshPendingCount();
+          _showSnackbar('✅ Booked ${resolvedTickets.length} ticket(s) from WhatsApp Review!', AppColors.success);
+        },
+      ),
+    );
+    await PatternMatcherService.instance.refreshPendingCount();
+  }
+
   void _showSnackbar(String msg, Color bg) {
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
@@ -2018,9 +2067,34 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                           spacing: 6,
                           crossAxisAlignment: WrapCrossAlignment.center,
                           children: [
+                            ValueListenableBuilder<int>(
+                              valueListenable: PatternMatcherService.instance.pendingUnparsedCountNotifier,
+                              builder: (context, count, _) {
+                                if (count <= 0) return const SizedBox.shrink();
+                                return _compactActionButton(
+                                  '⚠️ $count Undefined Review',
+                                  Colors.amberAccent,
+                                  Colors.black,
+                                  _openPatternResolverDialog,
+                                );
+                              },
+                            ),
                             if (_pendingPhotos.isNotEmpty)
                               _compactActionButton('📸 ${_pendingPhotos.length} Photos', Colors.amberAccent, Colors.black, _openPendingPhotoApprovalQueue),
                             _compactActionButton('📸 AI Scan', Colors.purple.shade700, Colors.white, () => _scanTicketPhotoWithAi(effectiveSelectedLottery)),
+                            _compactActionButton('📁 Bulk Chat', Colors.teal.shade800, Colors.white, () async {
+                              final saved = await showDialog<bool>(
+                                context: context,
+                                builder: (ctx) => BulkChatTicketImporterDialog(
+                                  initialShift: effectiveSelectedLottery,
+                                  initialDate: _selectedDate,
+                                  defaultSeller: _sellerInputCtrl.text.trim(),
+                                ),
+                              );
+                              if (saved == true && mounted) {
+                                await _loadExistingSalesIntoTable();
+                              }
+                            }),
                             _compactActionButton('📋 Paste Text', const Color(0xFF0284C7), Colors.white, () async {
                               await showDialog(
                                 context: context,

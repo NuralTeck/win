@@ -24,9 +24,21 @@ class PartyHisabReportService {
     final nowStr = DateFormat('dd-MMM-yyyy, hh:mm a').format(DateTime.now());
 
     buffer.writeln('==================================================================');
-    buffer.writeln('                    📊 DAILY DRAW HISAB SUMMARY');
+    buffer.writeln(summary.isDealer
+        ? '          👑 MAIN DEALER CONSOLIDATED HISAB SUMMARY'
+        : '                    📊 DAILY DRAW HISAB SUMMARY');
     buffer.writeln('==================================================================');
-    buffer.writeln('Party / Seller : ${summary.partyName}');
+    if (summary.isDealer) {
+      buffer.writeln('Main Dealer    : 👑 ${summary.partyName}');
+      if (summary.subSellerBreakdowns.isNotEmpty) {
+        buffer.writeln('Sub-Sellers    : ${summary.subSellerBreakdowns.length} Sellers (${summary.subSellerBreakdowns.map((s) => s.sellerName).join(", ")})');
+      }
+    } else {
+      buffer.writeln('Party / Seller : 👤 ${summary.partyName}');
+      if (summary.dealerName != null && summary.dealerName!.isNotEmpty) {
+        buffer.writeln('Parent Dealer  : 🏢 ${summary.dealerName}');
+      }
+    }
     buffer.writeln('Draw Date      : ${summary.date}');
     buffer.writeln('Draw Shift     : ${summary.shift}');
     buffer.writeln('Generated At   : $nowStr');
@@ -57,6 +69,20 @@ class PartyHisabReportService {
     buffer.writeln('• Total Voucher Inward  : ${summary.totalVouchers} Tickets  (Rs. ${summary.totalVoucherAmount.toStringAsFixed(2)})');
     buffer.writeln('• Total Unsold Returned : ${summary.totalUnsold} Tickets  (Rs. ${summary.totalUnsoldAmount.toStringAsFixed(2)})');
     buffer.writeln('• Net Sold Tickets      : ${summary.totalNetSold} Tickets  (Rs. ${summary.totalNetAmount.toStringAsFixed(2)})');
+
+    if (summary.subSellerBreakdowns.isNotEmpty) {
+      buffer.writeln('------------------------------------------------------------------');
+      buffer.writeln('👥 SUB-SELLER WISE BREAKDOWN:');
+      for (final sb in summary.subSellerBreakdowns) {
+        final nameP = sb.sellerName.padRight(14);
+        final inP = 'In ${sb.totalVouchers}'.padRight(9);
+        final retP = 'Ret ${sb.totalUnsold}'.padRight(9);
+        final netP = 'Net ${sb.totalNetSold} Nos'.padRight(14);
+        final amtP = 'Rs. ${sb.totalNetAmount.toStringAsFixed(2)}';
+        final winP = sb.totalWinAmount > 0 ? ' (Inam: -Rs.${sb.totalWinAmount.toStringAsFixed(0)})' : '';
+        buffer.writeln('• $nameP: $inP - $retP = $netP -> $amtP$winP -> Net: Rs.${sb.finalNetPayable.toStringAsFixed(2)}');
+      }
+    }
 
     if (summary.dateBreakdowns.isNotEmpty && (summary.dateBreakdowns.length > 1 || summary.shift == 'ALL')) {
       buffer.writeln('------------------------------------------------------------------');

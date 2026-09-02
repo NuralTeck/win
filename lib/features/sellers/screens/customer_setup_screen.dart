@@ -1,11 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
-import '../../../core/theme/app_typography.dart';
-import '../../../core/theme/app_decorations.dart';
 import '../viewmodels/seller_customer_viewmodel.dart';
 import '../models/seller_customer_model.dart';
-import 'seller_profile_ledger_screen.dart';
 
 class CustomerSetupScreen extends ConsumerStatefulWidget {
   const CustomerSetupScreen({super.key});
@@ -16,7 +13,6 @@ class CustomerSetupScreen extends ConsumerStatefulWidget {
 
 class _CustomerSetupScreenState extends ConsumerState<CustomerSetupScreen> {
   final TextEditingController _searchCtrl = TextEditingController();
-  final Set<String> _visiblePasswords = {};
 
   @override
   void initState() {
@@ -32,271 +28,465 @@ class _CustomerSetupScreenState extends ConsumerState<CustomerSetupScreen> {
     super.dispose();
   }
 
-  void _showAddEditDialog([SellerCustomerModel? existingSeller]) {
-    final nameCtrl = TextEditingController(text: existingSeller?.name ?? '');
-    final keyCtrl = TextEditingController(text: existingSeller?.accessKey ?? '');
-    final passCtrl = TextEditingController(text: existingSeller?.password ?? '');
-    final phoneCtrl = TextEditingController(text: existingSeller?.phone ?? '');
-
+  // ─── 👑 QUICK ADD / EDIT DEALER MODAL ──────────────────────────────────────
+  void _showAddEditDealerDialog([SellerCustomerModel? existing]) {
+    final isEdit = existing != null;
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final keyCtrl = TextEditingController(text: existing?.accessKey ?? '');
+    final passCtrl = TextEditingController(text: existing?.password ?? '123456');
+    final phoneCtrl = TextEditingController(text: existing?.phone ?? '');
     final nameFocusNode = FocusNode();
-    final keyFocusNode = FocusNode();
-    final passFocusNode = FocusNode();
-    final phoneFocusNode = FocusNode();
 
-    bool isActive = existingSeller?.isActive ?? true;
-    bool obscurePassword = true;
-
-    void submitForm(BuildContext dialogCtx) {
-      final name = nameCtrl.text.trim();
-      final key = keyCtrl.text.trim();
-      final pass = passCtrl.text.trim();
-      final phone = phoneCtrl.text.trim();
-
-      if (name.isEmpty) {
-        nameFocusNode.requestFocus();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please enter Customer / Seller Name!'),
-            backgroundColor: AppColors.warning,
-          ),
-        );
-        return;
-      }
-
-      if (key.isEmpty) {
-        keyFocusNode.requestFocus();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please enter Access Key / Seller ID!'),
-            backgroundColor: AppColors.warning,
-          ),
-        );
-        return;
-      }
-
-      if (pass.isEmpty) {
-        passFocusNode.requestFocus();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Please enter Password!'),
-            backgroundColor: AppColors.warning,
-          ),
-        );
-        return;
-      }
-
-      if (existingSeller == null) {
-        ref.read(sellerCustomerViewModelProvider.notifier).addSeller(
-              name: name,
-              accessKey: key,
-              password: pass,
-              phone: phone,
-              isActive: isActive,
-            );
-      } else {
-        ref.read(sellerCustomerViewModelProvider.notifier).updateSeller(
-              id: existingSeller.id,
-              name: name,
-              accessKey: key,
-              password: pass,
-              phone: phone,
-              isActive: isActive,
-            );
-      }
-
-      Navigator.pop(dialogCtx);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(existingSeller == null ? 'Added new Seller "$name"' : 'Updated Seller "$name"'),
-          backgroundColor: AppColors.success,
-        ),
-      );
+    if (!isEdit) {
+      nameCtrl.addListener(() {
+        final clean = nameCtrl.text.trim().replaceAll(RegExp(r'\s+'), '').toUpperCase();
+        if (clean.isNotEmpty) {
+          keyCtrl.text = '${clean}_DLR';
+        }
+      });
     }
 
     showDialog(
       context: context,
-      barrierColor: Colors.black.withAlpha(160),
-      builder: (dialogCtx) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: AppColors.surfaceContainerHigh,
-              shape: RoundedRectangleBorder(
-                borderRadius: AppDecorations.radiusLg,
-                side: const BorderSide(color: AppColors.border),
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0F172A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xFFF59E0B), width: 1.5),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF59E0B).withAlpha(40),
+                borderRadius: BorderRadius.circular(8),
               ),
-              title: Row(
+              child: const Icon(Icons.workspace_premium_rounded, color: Color(0xFFF59E0B), size: 22),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              isEdit ? 'Edit Main Dealer' : '👑 Add New Main Dealer',
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Dealer Name *', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: nameCtrl,
+                focusNode: nameFocusNode,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'e.g. MSM or Gupta Ji',
+                  hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                  prefixIcon: const Icon(Icons.business_rounded, size: 16, color: Color(0xFFF59E0B)),
+                  filled: true,
+                  fillColor: const Color(0xFF1E293B),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFFF59E0B), width: 1.5)),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
                 children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppColors.primaryContainer,
-                      borderRadius: AppDecorations.radiusDefault,
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Dealer User ID', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: keyCtrl,
+                          style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                          decoration: InputDecoration(
+                            filled: true,
+                            fillColor: const Color(0xFF1E293B),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          ),
+                        ),
+                      ],
                     ),
-                    child: const Icon(Icons.person_add_outlined, color: AppColors.onPrimaryContainer),
                   ),
-                  const SizedBox(width: 12),
-                  Text(
-                    existingSeller == null ? 'Add Customer / Seller' : 'Edit Customer / Seller',
-                    style: AppTypography.titleLg.copyWith(fontWeight: FontWeight.bold),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Password', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: passCtrl,
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                          decoration: InputDecoration(
+                            filled: true,
+                            fillColor: const Color(0xFF1E293B),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-              content: SizedBox(
-                width: 460,
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      // Name
-                      Text('Customer / Seller Name *', style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      TextField(
-                        controller: nameCtrl,
-                        focusNode: nameFocusNode,
-                        autofocus: true,
-                        textInputAction: TextInputAction.next,
-                        style: const TextStyle(color: AppColors.textPrimary),
-                        decoration: InputDecoration(
-                          hintText: 'e.g. Rajiv Kumar',
-                          filled: true,
-                          fillColor: AppColors.surfaceContainerLow,
-                          border: OutlineInputBorder(borderRadius: AppDecorations.radiusDefault, borderSide: const BorderSide(color: AppColors.border)),
-                        ),
-                        onSubmitted: (_) => keyFocusNode.requestFocus(),
-                      ),
-                      const SizedBox(height: 14),
-
-                      // Access Key
-                      Text('Access Key / Seller ID *', style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      TextField(
-                        controller: keyCtrl,
-                        focusNode: keyFocusNode,
-                        textInputAction: TextInputAction.next,
-                        textCapitalization: TextCapitalization.characters,
-                        style: const TextStyle(color: AppColors.primary, fontWeight: FontWeight.bold),
-                        decoration: InputDecoration(
-                          hintText: 'e.g. SEL-101',
-                          filled: true,
-                          fillColor: AppColors.surfaceContainerLow,
-                          border: OutlineInputBorder(borderRadius: AppDecorations.radiusDefault, borderSide: const BorderSide(color: AppColors.border)),
-                        ),
-                        onSubmitted: (_) => passFocusNode.requestFocus(),
-                      ),
-                      const SizedBox(height: 14),
-
-                      // Password
-                      Text('Password *', style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      TextField(
-                        controller: passCtrl,
-                        focusNode: passFocusNode,
-                        textInputAction: TextInputAction.next,
-                        obscureText: obscurePassword,
-                        style: const TextStyle(color: AppColors.textPrimary),
-                        decoration: InputDecoration(
-                          hintText: 'Enter login password',
-                          filled: true,
-                          fillColor: AppColors.surfaceContainerLow,
-                          border: OutlineInputBorder(borderRadius: AppDecorations.radiusDefault, borderSide: const BorderSide(color: AppColors.border)),
-                          suffixIcon: IconButton(
-                            icon: Icon(
-                              obscurePassword ? Icons.visibility_off : Icons.visibility,
-                              color: AppColors.textSecondary,
-                            ),
-                            onPressed: () => setDialogState(() => obscurePassword = !obscurePassword),
-                          ),
-                        ),
-                        onSubmitted: (_) => phoneFocusNode.requestFocus(),
-                      ),
-                      const SizedBox(height: 14),
-
-                      // Phone Number
-                      Text('Mobile Number', style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary)),
-                      const SizedBox(height: 6),
-                      TextField(
-                        controller: phoneCtrl,
-                        focusNode: phoneFocusNode,
-                        keyboardType: TextInputType.phone,
-                        textInputAction: TextInputAction.done,
-                        style: const TextStyle(color: AppColors.textPrimary),
-                        decoration: InputDecoration(
-                          hintText: 'e.g. 9876543210',
-                          filled: true,
-                          fillColor: AppColors.surfaceContainerLow,
-                          border: OutlineInputBorder(borderRadius: AppDecorations.radiusDefault, borderSide: const BorderSide(color: AppColors.border)),
-                        ),
-                        onSubmitted: (_) => submitForm(dialogCtx),
-                      ),
-                      const SizedBox(height: 16),
-
-                      // Active Switch
-                      Row(
-                        children: [
-                          Switch(
-                            value: isActive,
-                            activeThumbColor: AppColors.success,
-                            onChanged: (val) => setDialogState(() => isActive = val),
-                          ),
-                          const SizedBox(width: 8),
-                          Text('Active Status', style: AppTypography.bodySm.copyWith(fontWeight: FontWeight.w600)),
-                        ],
-                      ),
-                    ],
-                  ),
+              const SizedBox(height: 14),
+              const Text('Phone Number (Optional)', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                decoration: InputDecoration(
+                  hintText: 'e.g. 9876543210',
+                  hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                  prefixIcon: const Icon(Icons.phone_rounded, size: 16, color: Colors.grey),
+                  filled: true,
+                  fillColor: const Color(0xFF1E293B),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
                 ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () {
-                    nameFocusNode.dispose();
-                    keyFocusNode.dispose();
-                    passFocusNode.dispose();
-                    phoneFocusNode.dispose();
-                    if (Navigator.canPop(dialogCtx)) Navigator.pop(dialogCtx);
-                  },
-                  child: const Text('Cancel'),
-                ),
-                ElevatedButton.icon(
-                  onPressed: () => submitForm(dialogCtx),
-                  icon: const Icon(Icons.check, size: 18),
-                  label: const Text('Save Customer / Seller', style: TextStyle(fontWeight: FontWeight.bold)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primaryContainer,
-                    foregroundColor: AppColors.onPrimaryContainer,
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton.icon(
+            onPressed: () {
+              final name = nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              final key = keyCtrl.text.trim().isEmpty ? '${name.toUpperCase()}_DLR' : keyCtrl.text.trim();
+              final pass = passCtrl.text.trim().isEmpty ? '123456' : passCtrl.text.trim();
+
+              if (isEdit) {
+                ref.read(sellerCustomerViewModelProvider.notifier).updateSeller(
+                      id: existing.id,
+                      name: name,
+                      accessKey: key,
+                      password: pass,
+                      phone: phoneCtrl.text.trim(),
+                      isActive: existing.isActive,
+                      parentDealer: null,
+                      isDealer: true,
+                    );
+              } else {
+                ref.read(sellerCustomerViewModelProvider.notifier).addSeller(
+                      name: name,
+                      accessKey: key,
+                      password: pass,
+                      phone: phoneCtrl.text.trim(),
+                      isActive: true,
+                      parentDealer: null,
+                      isDealer: true,
+                    );
+              }
+              Navigator.pop(ctx);
+            },
+            icon: const Icon(Icons.check_circle_rounded, size: 16),
+            label: Text(isEdit ? 'Update Dealer' : 'Save Dealer', style: const TextStyle(fontWeight: FontWeight.bold)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFF59E0B),
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
-  void _confirmDelete(SellerCustomerModel seller) {
+  // ─── 🌿 QUICK ADD / EDIT SUB-SELLER UNDER A DEALER ─────────────────────────
+  void _showAddEditSubSellerDialog(String parentDealerName, [SellerCustomerModel? existing]) {
+    final isEdit = existing != null;
+    final nameCtrl = TextEditingController(text: existing?.name ?? '');
+    final keyCtrl = TextEditingController(text: existing?.accessKey ?? '');
+    final passCtrl = TextEditingController(text: existing?.password ?? '123456');
+    final phoneCtrl = TextEditingController(text: existing?.phone ?? '');
+    final nameFocusNode = FocusNode();
+
+    if (!isEdit) {
+      nameCtrl.addListener(() {
+        final clean = nameCtrl.text.trim().replaceAll(RegExp(r'\s+'), '').toUpperCase();
+        if (clean.isNotEmpty) {
+          keyCtrl.text = '${clean}_${parentDealerName.replaceAll(RegExp(r'\s+'), '').toUpperCase()}';
+        }
+      });
+    }
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surfaceContainerHigh,
-        title: const Text('Confirm Delete'),
-        content: Text('Are you sure you want to delete seller "${seller.name}" (${seller.accessKey})?'),
+        backgroundColor: const Color(0xFF0F172A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: Color(0xFF38BDF8), width: 1.5),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF38BDF8).withAlpha(40),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.person_add_alt_1_rounded, color: Color(0xFF38BDF8), size: 22),
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    isEdit ? 'Edit Sub-Seller' : '🌿 Add Sub-Seller Branch',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Parent Dealer: $parentDealerName',
+                    style: const TextStyle(color: Color(0xFF38BDF8), fontWeight: FontWeight.bold, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Sub-Seller / Agent Name *', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: nameCtrl,
+                focusNode: nameFocusNode,
+                autofocus: true,
+                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: 'e.g. Sonu, Raju, Pappu',
+                  hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                  prefixIcon: const Icon(Icons.person, size: 16, color: Color(0xFF38BDF8)),
+                  filled: true,
+                  fillColor: const Color(0xFF1E293B),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF38BDF8), width: 1.5)),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Seller User ID', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: keyCtrl,
+                          style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                          decoration: InputDecoration(
+                            filled: true,
+                            fillColor: const Color(0xFF1E293B),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Password', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: passCtrl,
+                          style: const TextStyle(color: Colors.white, fontSize: 12),
+                          decoration: InputDecoration(
+                            filled: true,
+                            fillColor: const Color(0xFF1E293B),
+                            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                            contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 14),
+              const Text('Phone Number (Optional)', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 11)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                style: const TextStyle(color: Colors.white, fontSize: 12),
+                decoration: InputDecoration(
+                  hintText: 'e.g. 9876543210',
+                  hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 12),
+                  prefixIcon: const Icon(Icons.phone_rounded, size: 16, color: Colors.grey),
+                  filled: true,
+                  fillColor: const Color(0xFF1E293B),
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                ),
+              ),
+            ],
+          ),
+        ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
-          ElevatedButton(
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+          ),
+          ElevatedButton.icon(
             onPressed: () {
-              ref.read(sellerCustomerViewModelProvider.notifier).deleteSeller(seller.id);
+              final name = nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              final key = keyCtrl.text.trim().isEmpty ? '${name.toUpperCase()}_${parentDealerName.toUpperCase()}' : keyCtrl.text.trim();
+              final pass = passCtrl.text.trim().isEmpty ? '123456' : passCtrl.text.trim();
+
+              if (isEdit) {
+                ref.read(sellerCustomerViewModelProvider.notifier).updateSeller(
+                      id: existing.id,
+                      name: name,
+                      accessKey: key,
+                      password: pass,
+                      phone: phoneCtrl.text.trim(),
+                      isActive: existing.isActive,
+                      parentDealer: parentDealerName,
+                      isDealer: false,
+                    );
+              } else {
+                ref.read(sellerCustomerViewModelProvider.notifier).addSeller(
+                      name: name,
+                      accessKey: key,
+                      password: pass,
+                      phone: phoneCtrl.text.trim(),
+                      isActive: true,
+                      parentDealer: parentDealerName,
+                      isDealer: false,
+                    );
+              }
               Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text('Deleted seller "${seller.name}"'), backgroundColor: AppColors.info),
-              );
             },
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.error),
-            child: const Text('Delete', style: TextStyle(color: Colors.white)),
+            icon: const Icon(Icons.check_circle_rounded, size: 16),
+            label: Text(isEdit ? 'Update Seller' : 'Save Seller', style: const TextStyle(fontWeight: FontWeight.bold)),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFF38BDF8),
+              foregroundColor: Colors.black,
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
           ),
         ],
+      ),
+    );
+  }
+
+  // ─── 🔁 CHANGE / ASSIGN DEALER DIALOG ──────────────────────────────────────
+  void _showMoveDealerDialog(SellerCustomerModel seller, List<String> availableDealers) {
+    String selectedDealer = seller.parentDealer ?? (availableDealers.isNotEmpty ? availableDealers.first : '');
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setModalState) => AlertDialog(
+          backgroundColor: const Color(0xFF0F172A),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: Color(0xFF38BDF8), width: 1.5),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.swap_horiz_rounded, color: Color(0xFF38BDF8), size: 24),
+              const SizedBox(width: 10),
+              Text('Link "${seller.name}" to Dealer', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Select Parent Dealer:', style: TextStyle(color: Colors.grey, fontSize: 12)),
+              const SizedBox(height: 10),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E293B),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFF334155)),
+                ),
+                child: DropdownButtonHideUnderline(
+                  child: DropdownButton<String>(
+                    value: availableDealers.contains(selectedDealer) ? selectedDealer : (availableDealers.isNotEmpty ? availableDealers.first : null),
+                    isExpanded: true,
+                    dropdownColor: const Color(0xFF1E293B),
+                    items: availableDealers.map((d) {
+                      return DropdownMenuItem<String>(
+                        value: d,
+                        child: Row(
+                          children: [
+                            const Icon(Icons.workspace_premium_rounded, size: 14, color: Color(0xFFF59E0B)),
+                            const SizedBox(width: 8),
+                            Text(d, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) setModalState(() => selectedDealer = val);
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                ref.read(sellerCustomerViewModelProvider.notifier).updateSeller(
+                      id: seller.id,
+                      name: seller.name,
+                      accessKey: seller.accessKey,
+                      password: seller.password,
+                      phone: seller.phone,
+                      isActive: seller.isActive,
+                      parentDealer: selectedDealer,
+                      isDealer: false,
+                    );
+                Navigator.pop(ctx);
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF38BDF8),
+                foregroundColor: Colors.black,
+              ),
+              child: const Text('Save Linking', style: TextStyle(fontWeight: FontWeight.bold)),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -304,299 +494,483 @@ class _CustomerSetupScreenState extends ConsumerState<CustomerSetupScreen> {
   @override
   Widget build(BuildContext context) {
     final state = ref.watch(sellerCustomerViewModelProvider);
-    final sellers = state.filteredSellers;
+    final sellers = state.sellers;
 
-    final totalCount = state.sellers.length;
-    final activeCount = state.sellers.where((s) => s.isActive).length;
-    final inactiveCount = totalCount - activeCount;
+    // Filter by search query
+    final query = _searchCtrl.text.trim().toLowerCase();
+    final allDealers = sellers.where((s) => s.isDealer).toList();
+    final dealerNames = allDealers.map((d) => d.name).toList();
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(28),
+    // Map: Dealer Name -> List of Sub-Sellers
+    final dealerTree = <String, List<SellerCustomerModel>>{};
+    final independentSellers = <SellerCustomerModel>[];
+
+    for (final d in allDealers) {
+      dealerTree[d.name] = [];
+    }
+
+    for (final s in sellers) {
+      if (s.isDealer) continue;
+      if (s.parentDealer != null && s.parentDealer!.isNotEmpty && dealerTree.containsKey(s.parentDealer)) {
+        dealerTree[s.parentDealer]!.add(s);
+      } else {
+        independentSellers.add(s);
+      }
+    }
+
+    // Filter by search query
+    final filteredDealers = allDealers.where((d) {
+      if (query.isEmpty) return true;
+      if (d.name.toLowerCase().contains(query)) return true;
+      final subs = dealerTree[d.name] ?? [];
+      return subs.any((sub) => sub.name.toLowerCase().contains(query));
+    }).toList();
+
+    final filteredIndependents = independentSellers.where((s) {
+      if (query.isEmpty) return true;
+      return s.name.toLowerCase().contains(query) || s.accessKey.toLowerCase().contains(query);
+    }).toList();
+
+    return Container(
+      constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.82),
+      decoration: BoxDecoration(
+        color: const Color(0xFF0F172A),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFF334155)),
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
         children: [
-          // 1. Header
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Customer & Seller Master',
-                    style: AppTypography.headlineLg.copyWith(fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    'Manage seller accounts, login credentials, access keys, and passwords',
-                    style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary),
-                  ),
-                ],
-              ),
-              ElevatedButton.icon(
-                onPressed: () => _showAddEditDialog(),
-                icon: const Icon(Icons.add, size: 18),
-                label: const Text('Add Customer / Seller', style: TextStyle(fontWeight: FontWeight.bold)),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.primaryContainer,
-                  foregroundColor: AppColors.onPrimaryContainer,
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: AppDecorations.radiusDefault),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 24),
-
-          // 2. Summary Badges
-          Row(
-            children: [
-              _summaryChip('Total Accounts', '$totalCount', Icons.people_outline, AppColors.primary),
-              const SizedBox(width: 16),
-              _summaryChip('Active Sellers', '$activeCount', Icons.check_circle_outline, AppColors.success),
-              const SizedBox(width: 16),
-              _summaryChip('Inactive Sellers', '$inactiveCount', Icons.block_outlined, AppColors.warning),
-            ],
-          ),
-          const SizedBox(height: 24),
-
-          // 3. Search & Filter Bar
+          // ─── TOP TOOLBAR & STATS ───
           Container(
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              color: AppColors.surfaceContainerLow,
-              borderRadius: AppDecorations.radiusDefault,
-              border: Border.all(color: AppColors.border),
+            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+            decoration: const BoxDecoration(
+              color: Color(0xFF0F172A),
+              borderRadius: BorderRadius.vertical(top: Radius.circular(11)),
+              border: Border(bottom: BorderSide(color: Color(0xFF334155))),
             ),
             child: Row(
               children: [
-                Expanded(
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF59E0B).withAlpha(35),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Icon(Icons.account_tree_rounded, size: 22, color: Color(0xFFF59E0B)),
+                ),
+                const SizedBox(width: 12),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Dealer & Sub-Seller Network Tree',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Interactive Hierarchy Tree • Create Main Dealers & Add Sub-Seller Branches',
+                      style: TextStyle(fontSize: 11, color: Colors.grey.shade400),
+                    ),
+                  ],
+                ),
+                const Spacer(),
+
+                // Search Field
+                SizedBox(
+                  width: 220,
+                  height: 34,
                   child: TextField(
                     controller: _searchCtrl,
-                    style: const TextStyle(color: AppColors.textPrimary),
+                    onChanged: (_) => setState(() {}),
+                    style: const TextStyle(color: Colors.white, fontSize: 12),
                     decoration: InputDecoration(
-                      isDense: true,
-                      hintText: 'Search by Seller Name, Access Key, or Phone...',
-                      hintStyle: TextStyle(color: AppColors.textSecondary.withAlpha(120)),
-                      prefixIcon: const Icon(Icons.search, color: AppColors.textSecondary),
+                      hintText: 'Search Tree...',
+                      hintStyle: TextStyle(color: Colors.grey.shade600, fontSize: 11),
+                      prefixIcon: const Icon(Icons.search, size: 14, color: Colors.grey),
                       filled: true,
-                      fillColor: AppColors.surfaceContainer,
-                      border: OutlineInputBorder(borderRadius: AppDecorations.radiusDefault, borderSide: const BorderSide(color: AppColors.border)),
+                      fillColor: const Color(0xFF1E293B),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8), borderSide: const BorderSide(color: Color(0xFF334155))),
                     ),
-                    onChanged: (val) {
-                      ref.read(sellerCustomerViewModelProvider.notifier).setSearchQuery(val);
-                    },
+                  ),
+                ),
+                const SizedBox(width: 12),
+
+                // 👑 Add Main Dealer Button
+                ElevatedButton.icon(
+                  onPressed: () => _showAddEditDealerDialog(),
+                  icon: const Icon(Icons.add_business_rounded, size: 16),
+                  label: const Text('+ Add Main Dealer', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFFF59E0B),
+                    foregroundColor: Colors.black,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                   ),
                 ),
               ],
             ),
           ),
-          const SizedBox(height: 20),
 
-          // 4. Sellers Data Table
-          Container(
-            decoration: BoxDecoration(
-              color: AppColors.surfaceContainerLow,
-              borderRadius: AppDecorations.radiusLg,
-              border: Border.all(color: AppColors.border),
-            ),
-            child: sellers.isEmpty
-                ? Padding(
-                    padding: const EdgeInsets.all(40.0),
-                    child: Center(
-                      child: Column(
-                        children: [
-                          Icon(Icons.person_search_outlined, size: 48, color: AppColors.textSecondary.withAlpha(100)),
-                          const SizedBox(height: 12),
-                          Text('No Sellers / Customers found', style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary)),
-                        ],
-                      ),
-                    ),
+          // ─── TREE HIERARCHY BODY ───
+          Flexible(
+            child: state.isLoading
+                ? const Padding(
+                    padding: EdgeInsets.all(40),
+                    child: Center(child: CircularProgressIndicator(color: Color(0xFFF59E0B))),
                   )
-                : Table(
-                    columnWidths: const {
-                        0: FlexColumnWidth(0.8),
-                        1: FlexColumnWidth(2.2),
-                        2: FlexColumnWidth(1.8),
-                        3: FlexColumnWidth(2.2),
-                        4: FlexColumnWidth(1.8),
-                        5: FlexColumnWidth(1.4),
-                        6: FlexColumnWidth(1.4),
-                      },
-                      border: const TableBorder(
-                        horizontalInside: BorderSide(color: AppColors.border, width: 0.8),
-                      ),
-                      children: [
-                        TableRow(
-                          decoration: const BoxDecoration(color: AppColors.surfaceContainerHigh),
-                          children: [
-                            _headerCell('Sl'),
-                            _headerCell('Customer / Seller Name'),
-                            _headerCell('Access Key'),
-                            _headerCell('Password'),
-                            _headerCell('Phone'),
-                            _headerCell('Status'),
-                            _headerCell('Actions', alignment: Alignment.center),
-                          ],
-                        ),
-                        ...sellers.asMap().entries.map((entry) {
-                          final idx = entry.key;
-                          final s = entry.value;
-                          final isPassVisible = _visiblePasswords.contains(s.id);
-
-                          return TableRow(
-                            decoration: BoxDecoration(
-                              color: idx % 2 == 0 ? AppColors.surfaceContainerLow : AppColors.surfaceContainer,
-                            ),
+                : (filteredDealers.isEmpty && filteredIndependents.isEmpty)
+                    ? SingleChildScrollView(
+                        padding: const EdgeInsets.all(40),
+                        child: Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
                             children: [
-                              _dataCell('${idx + 1}'),
-                              _dataCell(s.name, isBold: true),
-                              _dataCell(s.accessKey, isMonospace: true, isBold: true, color: AppColors.primary),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                child: Row(
-                                  children: [
-                                    Expanded(
-                                      child: Text(
-                                        isPassVisible ? s.password : '••••••••',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          fontFamily: isPassVisible ? 'normal' : 'monospace',
-                                          color: isPassVisible ? AppColors.tertiary : AppColors.textSecondary,
-                                        ),
-                                      ),
-                                    ),
-                                    IconButton(
-                                      icon: Icon(
-                                        isPassVisible ? Icons.visibility : Icons.visibility_off,
-                                        size: 16,
-                                        color: AppColors.textSecondary,
-                                      ),
-                                      tooltip: isPassVisible ? 'Hide password' : 'Show password',
-                                      onPressed: () {
-                                        setState(() {
-                                          if (isPassVisible) {
-                                            _visiblePasswords.remove(s.id);
-                                          } else {
-                                            _visiblePasswords.add(s.id);
-                                          }
-                                        });
-                                      },
-                                    ),
-                                  ],
-                                ),
-                              ),
-                              _dataCell(s.phone.isNotEmpty ? s.phone : '-'),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                child: Align(
-                                  alignment: Alignment.centerLeft,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    decoration: BoxDecoration(
-                                      color: (s.isActive ? AppColors.success : AppColors.warning).withAlpha(30),
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: s.isActive ? AppColors.success : AppColors.warning),
-                                    ),
-                                    child: Text(
-                                      s.isActive ? 'ACTIVE' : 'INACTIVE',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        color: s.isActive ? AppColors.success : AppColors.warning,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ),
-                              Padding(
-                                padding: const EdgeInsets.symmetric(vertical: 4),
-                                child: Row(
-                                  mainAxisAlignment: MainAxisAlignment.center,
-                                  children: [
-                                    IconButton(
-                                      icon: const Icon(Icons.account_balance_wallet_outlined, size: 18, color: Colors.amber),
-                                      tooltip: 'View Seller Financial Ledger & Profile',
-                                      onPressed: () {
-                                        Navigator.push(
-                                          context,
-                                          MaterialPageRoute(
-                                            builder: (_) => SellerProfileLedgerScreen(sellerName: s.name),
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.edit_outlined, size: 18, color: AppColors.primary),
-                                      tooltip: 'Edit seller',
-                                      onPressed: () => _showAddEditDialog(s),
-                                    ),
-                                    IconButton(
-                                      icon: const Icon(Icons.delete_outline, size: 18, color: AppColors.error),
-                                      tooltip: 'Delete seller',
-                                      onPressed: () => _confirmDelete(s),
-                                    ),
-                                  ],
+                              const Icon(Icons.account_tree_outlined, size: 54, color: Colors.grey),
+                              const SizedBox(height: 12),
+                              const Text('No Dealers or Sellers Yet', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 15)),
+                              const SizedBox(height: 6),
+                              const Text('Click "+ Add Main Dealer" above to build your first tree branch.', style: TextStyle(color: Colors.grey, fontSize: 12)),
+                              const SizedBox(height: 16),
+                              ElevatedButton.icon(
+                                onPressed: () => _showAddEditDealerDialog(),
+                                icon: const Icon(Icons.workspace_premium_rounded, size: 16),
+                                label: const Text('Create First Dealer', style: TextStyle(fontWeight: FontWeight.bold)),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFF59E0B),
+                                  foregroundColor: Colors.black,
+                                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
                                 ),
                               ),
                             ],
-                          );
-                        }),
-                      ],
-                    ),
+                          ),
+                        ),
+                      )
+                    : ListView(
+                        shrinkWrap: true,
+                        padding: const EdgeInsets.all(18),
+                        children: [
+                          // ─── 🏢 MAIN DEALER NETWORKS ───
+                          ...filteredDealers.map((dealer) {
+                            final subs = dealerTree[dealer.name] ?? [];
+
+                            return Container(
+                              margin: const EdgeInsets.only(bottom: 16),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF1E293B),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: const Color(0xFFF59E0B).withAlpha(120), width: 1.2),
+                              ),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  // 👑 Main Dealer Root Header
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                    decoration: const BoxDecoration(
+                                      color: Color(0xFF0F172A),
+                                      borderRadius: BorderRadius.vertical(top: Radius.circular(11)),
+                                      border: Border(bottom: BorderSide(color: Color(0xFF334155))),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(6),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFFF59E0B).withAlpha(40),
+                                            borderRadius: BorderRadius.circular(6),
+                                          ),
+                                          child: const Icon(Icons.workspace_premium_rounded, size: 18, color: Color(0xFFF59E0B)),
+                                        ),
+                                        const SizedBox(width: 10),
+                                        Column(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Row(
+                                              children: [
+                                                Text(
+                                                  dealer.name,
+                                                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15, color: Colors.white),
+                                                ),
+                                                const SizedBox(width: 8),
+                                                Container(
+                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                  decoration: BoxDecoration(
+                                                    color: const Color(0xFFF59E0B).withAlpha(30),
+                                                    borderRadius: BorderRadius.circular(4),
+                                                    border: Border.all(color: const Color(0xFFF59E0B).withAlpha(120)),
+                                                  ),
+                                                  child: const Text('👑 MAIN DEALER', style: TextStyle(color: Color(0xFFF59E0B), fontSize: 9.5, fontWeight: FontWeight.bold)),
+                                                ),
+                                              ],
+                                            ),
+                                            const SizedBox(height: 2),
+                                            Text(
+                                              'ID: ${dealer.accessKey} • Phone: ${dealer.phone.isNotEmpty ? dealer.phone : "No Phone"}',
+                                              style: TextStyle(color: Colors.grey.shade400, fontSize: 10.5),
+                                            ),
+                                          ],
+                                        ),
+                                        const Spacer(),
+
+                                        // Sub-seller count badge
+                                        Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF38BDF8).withAlpha(30),
+                                            borderRadius: BorderRadius.circular(6),
+                                          ),
+                                          child: Text(
+                                            '${subs.length} Sub-Sellers',
+                                            style: const TextStyle(color: Color(0xFF38BDF8), fontWeight: FontWeight.bold, fontSize: 11),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+
+                                        // 🌿 + Add Sub-Seller Button
+                                        ElevatedButton.icon(
+                                          onPressed: () => _showAddEditSubSellerDialog(dealer.name),
+                                          icon: const Icon(Icons.person_add_alt_1_rounded, size: 14),
+                                          label: const Text('+ Add Sub-Seller', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5)),
+                                          style: ElevatedButton.styleFrom(
+                                            backgroundColor: const Color(0xFF0284C7),
+                                            foregroundColor: Colors.white,
+                                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 8),
+
+                                        // Edit Dealer
+                                        IconButton(
+                                          icon: const Icon(Icons.edit_outlined, size: 16, color: Colors.grey),
+                                          tooltip: 'Edit Dealer',
+                                          onPressed: () => _showAddEditDealerDialog(dealer),
+                                        ),
+                                        // Delete Dealer
+                                        IconButton(
+                                          icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                                          tooltip: 'Delete Dealer',
+                                          onPressed: () async {
+                                            final confirm = await showDialog<bool>(
+                                              context: context,
+                                              builder: (c) => AlertDialog(
+                                                backgroundColor: const Color(0xFF1E293B),
+                                                title: const Text('Delete Dealer?', style: TextStyle(color: Colors.white)),
+                                                content: Text('Delete "${dealer.name}" and unlink all sub-sellers?', style: const TextStyle(color: Colors.grey)),
+                                                actions: [
+                                                  TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+                                                  ElevatedButton(
+                                                    style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                                                    onPressed: () => Navigator.pop(c, true),
+                                                    child: const Text('Delete'),
+                                                  ),
+                                                ],
+                                              ),
+                                            );
+                                            if (confirm == true) {
+                                              ref.read(sellerCustomerViewModelProvider.notifier).deleteSeller(dealer.id);
+                                            }
+                                          },
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+
+                                  // 🌿 Sub-Seller Branches
+                                  Padding(
+                                    padding: const EdgeInsets.all(12),
+                                    child: subs.isEmpty
+                                        ? InkWell(
+                                            onTap: () => _showAddEditSubSellerDialog(dealer.name),
+                                            borderRadius: BorderRadius.circular(8),
+                                            child: Container(
+                                              padding: const EdgeInsets.symmetric(vertical: 14),
+                                              decoration: BoxDecoration(
+                                                border: Border.all(color: const Color(0xFF334155), style: BorderStyle.solid),
+                                                borderRadius: BorderRadius.circular(8),
+                                              ),
+                                              child: Center(
+                                                child: Row(
+                                                  mainAxisSize: MainAxisSize.min,
+                                                  children: [
+                                                    const Icon(Icons.add_circle_outline, size: 16, color: Color(0xFF38BDF8)),
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      'Click here to add first Sub-Seller under "${dealer.name}"',
+                                                      style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 12, fontWeight: FontWeight.bold),
+                                                    ),
+                                                  ],
+                                                ),
+                                              ),
+                                            ),
+                                          )
+                                        : Column(
+                                            children: List.generate(subs.length, (idx) {
+                                              final s = subs[idx];
+                                              final isLast = idx == subs.length - 1;
+
+                                              return Container(
+                                                margin: EdgeInsets.only(bottom: isLast ? 0 : 6),
+                                                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFF0F172A).withAlpha(150),
+                                                  borderRadius: BorderRadius.circular(6),
+                                                  border: Border.all(color: const Color(0xFF334155).withAlpha(120)),
+                                                ),
+                                                child: Row(
+                                                  children: [
+                                                    Text(
+                                                      isLast ? '└── ' : '├── ',
+                                                      style: const TextStyle(color: Color(0xFF38BDF8), fontWeight: FontWeight.bold, fontSize: 14, fontFamily: 'monospace'),
+                                                    ),
+                                                    const Icon(Icons.person, size: 16, color: Colors.cyanAccent),
+                                                    const SizedBox(width: 8),
+                                                    Text(
+                                                      s.name,
+                                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                                                    ),
+                                                    const SizedBox(width: 10),
+                                                    Container(
+                                                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+                                                      decoration: BoxDecoration(
+                                                        color: const Color(0xFF0284C7).withAlpha(40),
+                                                        borderRadius: BorderRadius.circular(3),
+                                                      ),
+                                                      child: Text('ID: ${s.accessKey}', style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 10, fontWeight: FontWeight.bold)),
+                                                    ),
+                                                    if (s.phone.isNotEmpty) ...[
+                                                      const SizedBox(width: 8),
+                                                      Text('• ${s.phone}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                                                    ],
+                                                    const Spacer(),
+
+                                                    // Move Dealer
+                                                    IconButton(
+                                                      icon: const Icon(Icons.swap_horiz_rounded, size: 16, color: Color(0xFF38BDF8)),
+                                                      tooltip: 'Move to another Dealer',
+                                                      onPressed: () => _showMoveDealerDialog(s, dealerNames),
+                                                    ),
+                                                    // Edit
+                                                    IconButton(
+                                                      icon: const Icon(Icons.edit_outlined, size: 15, color: Colors.grey),
+                                                      tooltip: 'Edit Sub-Seller',
+                                                      onPressed: () => _showAddEditSubSellerDialog(dealer.name, s),
+                                                    ),
+                                                    // Delete
+                                                    IconButton(
+                                                      icon: const Icon(Icons.delete_outline, size: 15, color: Colors.redAccent),
+                                                      tooltip: 'Delete Sub-Seller',
+                                                      onPressed: () async {
+                                                        final confirm = await showDialog<bool>(
+                                                          context: context,
+                                                          builder: (c) => AlertDialog(
+                                                            backgroundColor: const Color(0xFF1E293B),
+                                                            title: const Text('Delete Sub-Seller?', style: TextStyle(color: Colors.white)),
+                                                            content: Text('Remove "${s.name}" from ${dealer.name}?', style: const TextStyle(color: Colors.grey)),
+                                                            actions: [
+                                                              TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+                                                              ElevatedButton(
+                                                                style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                                                                onPressed: () => Navigator.pop(c, true),
+                                                                child: const Text('Delete'),
+                                                              ),
+                                                            ],
+                                                          ),
+                                                        );
+                                                        if (confirm == true) {
+                                                          ref.read(sellerCustomerViewModelProvider.notifier).deleteSeller(s.id);
+                                                        }
+                                                      },
+                                                    ),
+                                                  ],
+                                                ),
+                                              );
+                                            }),
+                                          ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }),
+
+                          // ─── 👤 INDEPENDENT SELLERS (NOT LINKED TO DEALER) ───
+                          if (filteredIndependents.isNotEmpty) ...[
+                            const SizedBox(height: 10),
+                            const Text(
+                              '👤 Direct / Independent Sellers (No Dealer Assigned)',
+                              style: TextStyle(color: Colors.grey, fontWeight: FontWeight.bold, fontSize: 12),
+                            ),
+                            const SizedBox(height: 8),
+                            Container(
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF1E293B),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(color: const Color(0xFF334155)),
+                              ),
+                              child: Column(
+                                children: filteredIndependents.map((s) {
+                                  return Container(
+                                    margin: const EdgeInsets.only(bottom: 6),
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF0F172A),
+                                      borderRadius: BorderRadius.circular(6),
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        const Icon(Icons.person_outline, size: 16, color: Colors.grey),
+                                        const SizedBox(width: 8),
+                                        Text(s.name, style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 12.5)),
+                                        const SizedBox(width: 8),
+                                        Text('ID: ${s.accessKey}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                                        const Spacer(),
+                                        // Promote to Dealer
+                                        TextButton.icon(
+                                          onPressed: () {
+                                            ref.read(sellerCustomerViewModelProvider.notifier).updateSeller(
+                                                  id: s.id,
+                                                  name: s.name,
+                                                  accessKey: s.accessKey,
+                                                  password: s.password,
+                                                  phone: s.phone,
+                                                  isActive: s.isActive,
+                                                  parentDealer: null,
+                                                  isDealer: true,
+                                                );
+                                          },
+                                          icon: const Icon(Icons.workspace_premium_rounded, size: 14, color: Color(0xFFF59E0B)),
+                                          label: const Text('Make Main Dealer', style: TextStyle(color: Color(0xFFF59E0B), fontSize: 11, fontWeight: FontWeight.bold)),
+                                        ),
+                                        const SizedBox(width: 6),
+                                        // Link to Dealer
+                                        if (dealerNames.isNotEmpty)
+                                          ElevatedButton.icon(
+                                            onPressed: () => _showMoveDealerDialog(s, dealerNames),
+                                            icon: const Icon(Icons.link, size: 14),
+                                            label: const Text('Link to Dealer', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: const Color(0xFF0284C7),
+                                              foregroundColor: Colors.white,
+                                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                            ),
+                                          ),
+                                      ],
+                                    ),
+                                  );
+                                }).toList(),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
           ),
         ],
-      ),
-    );
-  }
-
-  Widget _summaryChip(String label, String value, IconData icon, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
-      decoration: BoxDecoration(
-        color: AppColors.surfaceContainerLow,
-        borderRadius: AppDecorations.radiusDefault,
-        border: Border.all(color: AppColors.border),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 10),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(label, style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary)),
-              Text(value, style: AppTypography.titleMd.copyWith(fontWeight: FontWeight.bold, color: color)),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _headerCell(String title, {Alignment alignment = Alignment.centerLeft}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      child: Align(
-        alignment: alignment,
-        child: Text(
-          title,
-          style: AppTypography.labelSm.copyWith(fontWeight: FontWeight.bold, color: AppColors.textSecondary),
-        ),
-      ),
-    );
-  }
-
-  Widget _dataCell(String text, {bool isBold = false, bool isMonospace = false, Color? color}) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-      child: Text(
-        text,
-        style: TextStyle(
-          fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
-          fontFamily: isMonospace ? 'monospace' : null,
-          color: color ?? AppColors.textPrimary,
-        ),
       ),
     );
   }

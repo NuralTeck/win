@@ -9,6 +9,7 @@ import '../models/voucher_model.dart';
 import '../models/unsold_model.dart';
 import '../viewmodels/voucher_viewmodel.dart';
 import '../viewmodels/unsold_viewmodel.dart';
+import '../../../core/database/database_service.dart';
 import 'ai_stock_scan_review_dialog.dart';
 
 /// Real-time Syntax Highlighting Controller for Stock / Unsold / Voucher Parcha Text Input
@@ -192,6 +193,26 @@ class _StockSyntaxHighlightingController extends TextEditingController {
         continue;
       }
 
+      // 6B. Trailing Series on 5-digit number e.g. 36963 -40, 52725-40, 85638*36, 85638=6
+      final trailingSeriesMatch = RegExp(r'^(\d{5})\s*[-:,\/=\s._~|*xX#@+]+\s*([0-9]{1,3}[A-Za-z]{0,4}|[A-Za-z]{1,4}[0-9]{1,3})$').firstMatch(contentTrimmed);
+      if (trailingSeriesMatch != null) {
+        currentPrefix = trailingSeriesMatch.group(1)!.substring(0, 2);
+        final List<TextSpan> lineSpans = [];
+        if (waHeaderPrefix != null) {
+          lineSpans.add(TextSpan(text: waHeaderPrefix, style: (style ?? const TextStyle()).copyWith(color: const Color(0xFF94A3B8), fontSize: 11)));
+        }
+        lineSpans.add(TextSpan(
+          text: contentToHighlight + lineEnding,
+          style: (style ?? const TextStyle()).copyWith(
+            color: const Color(0xFF4ADE80),
+            backgroundColor: const Color(0xFF14532D).withAlpha(120),
+            fontWeight: FontWeight.bold,
+          ),
+        ));
+        spans.add(TextSpan(children: lineSpans));
+        continue;
+      }
+
       // 7. Direct 5-digit number or range e.g. 50271-50274, 50271
       final direct5s = RegExp(r'(?:([0-9]{1,3})\s*[:=]\s*)?(\d{5})(?:\s*[-~to]+\s*(\d{5}))?').firstMatch(contentTrimmed);
       if (direct5s != null) {
@@ -278,6 +299,12 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
   final Set<GeminiScannedItem> _selectedItems = {};
   int? _lastSelectedIdx;
 
+  // 🏢 Dealer & Sub-Seller Network Hierarchy
+  List<String> _availableDealers = [];
+  Map<String, List<String>> _dealerToSellersMap = {};
+  String? _selectedDealer;
+  String? _selectedSubSeller;
+
   @override
   void initState() {
     super.initState();
@@ -286,6 +313,51 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
     _partyCtrl.text = widget.defaultParty.isNotEmpty ? widget.defaultParty : 'Walk-in Party';
 
     _rawTextCtrl.addListener(_onTextChanged);
+    _loadDealersAndSellers();
+  }
+
+  Future<void> _loadDealersAndSellers() async {
+    final list = await DatabaseService.instance.getSellerCustomers();
+    final dealers = <String>[];
+    final map = <String, List<String>>{};
+
+    for (final s in list) {
+      if (s.isDealer) {
+        if (!dealers.contains(s.name)) dealers.add(s.name);
+        map.putIfAbsent(s.name, () => []);
+      }
+    }
+    for (final s in list) {
+      if (!s.isDealer && s.parentDealer != null && s.parentDealer!.isNotEmpty) {
+        map.putIfAbsent(s.parentDealer!, () => []);
+        if (!map[s.parentDealer!]!.contains(s.name)) {
+          map[s.parentDealer!]!.add(s.name);
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _availableDealers = dealers;
+        _dealerToSellersMap = map;
+
+        if (_partyCtrl.text.isNotEmpty) {
+          final p = _partyCtrl.text.trim();
+          if (dealers.contains(p)) {
+            _selectedDealer = p;
+            _selectedSubSeller = null;
+          } else {
+            for (final d in dealers) {
+              if (map[d]?.contains(p) ?? false) {
+                _selectedDealer = d;
+                _selectedSubSeller = p;
+                break;
+              }
+            }
+          }
+        }
+      });
+    }
   }
 
   @override
@@ -344,6 +416,7 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
     final lines = text.split(RegExp(r'\r?\n'));
     String currentSeries = '12';
     String currentPrefix = '';
+    String currentPrefix3 = '';
     String? activeDate = fallbackDate;
     String? activeShift = _selectedShift;
 
@@ -366,32 +439,17 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
         if (l.isEmpty) continue;
       }
 
-      // 1. Check for shift in text (e.g. 6:00 PM, 6 PM, 1 PM, 8 PM)
+      // 1. In-Message Shift IGNORED: Active shift remains strictly locked to _selectedShift!
       final detectedShift = GeminiScannerService.instance.detectShiftFromText(l);
       if (detectedShift != null) {
-        activeShift = detectedShift;
-        _selectedShift = detectedShift;
-        continue;
+        continue; // Skip noise line
       }
 
-      // 2. Check for Date header (e.g. 28/08, 28-08-2026, 2026-08-28, 28/, 28/:)
+      // 2. In-Message Date IGNORED: Active date remains strictly locked to selected date!
       final dateMatch = RegExp(r'\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b').firstMatch(l);
       final singleDateMatch = RegExp(r'^\s*(\d{1,2})[\/\-]\s*[:]?\s*$').firstMatch(l);
-      if (dateMatch != null && !l.contains('to') && !l.contains('-') && l.length <= 12) {
-        final d = dateMatch.group(1)!.padLeft(2, '0');
-        final m = dateMatch.group(2)!.padLeft(2, '0');
-        final y = dateMatch.group(3) != null
-            ? (dateMatch.group(3)!.length == 2 ? '20${dateMatch.group(3)}' : dateMatch.group(3)!)
-            : '${DateTime.now().year}';
-        activeDate = '$y-$m-$d';
-        continue;
-      } else if (singleDateMatch != null) {
-        final dNum = int.tryParse(singleDateMatch.group(1)!);
-        if (dNum != null && dNum >= 1 && dNum <= 31) {
-          final now = DateTime.now();
-          activeDate = '${now.year}-${now.month.toString().padLeft(2, '0')}-${dNum.toString().padLeft(2, '0')}';
-          continue;
-        }
+      if ((dateMatch != null && !l.contains('to') && !l.contains('-') && l.length <= 12) || singleDateMatch != null) {
+        continue; // Skip noise line
       }
 
       // 3. Check for Series Header e.g. (12), (24), [36], SER 12, SERIES 20
@@ -401,20 +459,42 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
         if (sDigits.isNotEmpty && int.tryParse(sDigits) != null && int.parse(sDigits) <= 1000) {
           currentSeries = sDigits;
           currentPrefix = ''; // Reset prefix on new series
+          currentPrefix3 = '';
           continue;
         }
       }
 
-      // 4. Check for Full 5-Digit Range / Base Range e.g. 50271-274, 49750-753, 50271-50274, 52150 to 950-999
-      final baseMatch = RegExp(r'(?:^|[\s,;=])(?:([0-9]{1,3})\s*[:=]\s*)?(\d{2})(\d{3})\s*[-~to]+\s*(\d{1,5})', caseSensitive: false).firstMatch(l);
+      // 4. Check for Full 5-Digit Range / Base Range e.g. 42370-71-2, 12345-55-10, 42980-1, 50271-274, 52150 to 950-999
+      // Format: [series=]AAAAA-BB[-CC] where CC is written quantity (IGNORED)
+      final baseMatch = RegExp(r'(?:^|[\s,;=])(?:([0-9]{1,3})\s*[:=]\s*)?(\d{2})(\d{3})\s*[-~to]+\s*(\d{1,5})(?:\s*[-~to]+\s*(\d+))?', caseSensitive: false).firstMatch(l);
       if (baseMatch != null) {
         final sOverride = baseMatch.group(1);
         final s = (sOverride != null && sOverride.isNotEmpty) ? sOverride : currentSeries;
         final prefix = baseMatch.group(2)!;
-        currentPrefix = prefix; // Remember prefix for column
-
         final start3 = int.tryParse(baseMatch.group(3)!) ?? 0;
         final endRaw = baseMatch.group(4)!;
+        final trailingQty = baseMatch.group(5);
+
+        currentPrefix = prefix;
+        currentPrefix3 = '$prefix${(start3 ~/ 100)}';
+
+        // Check if single ticket with written qty e.g. 42980-1
+        if (endRaw == '1' && trailingQty == null) {
+          final fStr = '$prefix${start3.toString().padLeft(3, '0')}';
+          items.add(GeminiScannedItem(
+            series: s,
+            ticketNo: fStr,
+            fromTicket: fStr,
+            toTicket: fStr,
+            quantity: 1,
+            amount: 0.0,
+            sellerName: defaultSeller,
+            targetDate: activeDate,
+            drawShift: activeShift,
+          ));
+          continue;
+        }
+
         int end3 = start3;
         if (endRaw.length == 5) {
           end3 = int.tryParse(endRaw.substring(2)) ?? start3;
@@ -431,6 +511,7 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
         if (end3 >= start3 && end3 - start3 <= 1000) {
           final fromStr = '$prefix${start3.toString().padLeft(3, '0')}';
           final toStr = '$prefix${end3.toString().padLeft(3, '0')}';
+          // ALWAYS calculate quantity from range! Trailing written quantity is IGNORED!
           final qty = (end3 - start3) + 1;
 
           items.add(GeminiScannedItem(
@@ -448,7 +529,51 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
         }
       }
 
-      // 5. Subsequent 3-Digit Range in Column with active prefix e.g. 276-279, 481-483, 182-189
+      // 5A. Subsequent 2-Digit Range under active 3-digit prefix e.g. 76-79-4, 73-75-3, 77-78-2, 65-67-3
+      final col2DigitRange = RegExp(r'^\s*(\d{2})\s*[-~to]+\s*(\d{2})(?:\s*[-~to]+\s*(\d+))?\s*$').firstMatch(l);
+      if (col2DigitRange != null && currentPrefix3.isNotEmpty) {
+        final start2 = int.tryParse(col2DigitRange.group(1)!) ?? 0;
+        final end2 = int.tryParse(col2DigitRange.group(2)!) ?? start2;
+        if (end2 >= start2 && end2 - start2 <= 100) {
+          final fromStr = '$currentPrefix3${start2.toString().padLeft(2, '0')}';
+          final toStr = '$currentPrefix3${end2.toString().padLeft(2, '0')}';
+          final qty = (end2 - start2) + 1;
+
+          items.add(GeminiScannedItem(
+            series: currentSeries,
+            ticketNo: qty > 1 ? '$fromStr - $toStr' : fromStr,
+            fromTicket: fromStr,
+            toTicket: toStr,
+            quantity: qty,
+            amount: 0.0,
+            sellerName: defaultSeller,
+            targetDate: activeDate,
+            drawShift: activeShift,
+          ));
+          continue;
+        }
+      }
+
+      // 5B. Subsequent 2-Digit Single Ticket with written qty e.g. 74-1, 63-1, 69-1, 83-1, 99-1
+      final col2DigitSingle = RegExp(r'^\s*(\d{2})\s*[-]\s*(\d{1,2})\s*$').firstMatch(l);
+      if (col2DigitSingle != null && currentPrefix3.isNotEmpty) {
+        final t2 = col2DigitSingle.group(1)!;
+        final full5 = '$currentPrefix3$t2';
+        items.add(GeminiScannedItem(
+          series: currentSeries,
+          ticketNo: full5,
+          fromTicket: full5,
+          toTicket: full5,
+          quantity: 1,
+          amount: 0.0,
+          sellerName: defaultSeller,
+          targetDate: activeDate,
+          drawShift: activeShift,
+        ));
+        continue;
+      }
+
+      // 5C. Subsequent 3-Digit Range in Column with active prefix e.g. 276-279, 481-483, 182-189
       final col3DigitRange = RegExp(r'(?:^|[\s,;])(\d{3})\s*[-~to]+\s*(\d{1,3})(?=[\s,;]|$)').firstMatch(l);
       if (col3DigitRange != null && currentPrefix.isNotEmpty) {
         final start3 = int.tryParse(col3DigitRange.group(1)!) ?? 0;
@@ -500,6 +625,35 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
           targetDate: activeDate,
           drawShift: activeShift,
         ));
+        continue;
+      }
+
+      // 6B. Trailing Series on 5-digit number e.g. 36963 -40, 52725-40, 85638*36, 85638=6
+      final trailingSeriesMatch = RegExp(
+        r'(?:^|[\s,;])(\d{5})\s*[-:,\/=\s._~|*xX#@+]+\s*([0-9]{1,3}[A-Za-z]{0,4}|[A-Za-z]{1,4}[0-9]{1,3})(?=[\s,;]|$)',
+        caseSensitive: false,
+      ).allMatches(l);
+
+      if (trailingSeriesMatch.isNotEmpty) {
+        for (final m in trailingSeriesMatch) {
+          final fTkt = m.group(1)!;
+          final rawS = m.group(2)!.replaceAll(RegExp(r'\D'), '');
+          final s = rawS.isNotEmpty ? rawS : currentSeries;
+          currentSeries = s;
+          currentPrefix = fTkt.substring(0, 2);
+
+          items.add(GeminiScannedItem(
+            series: s,
+            ticketNo: fTkt,
+            fromTicket: fTkt,
+            toTicket: fTkt,
+            quantity: 1,
+            amount: 0.0,
+            sellerName: defaultSeller,
+            targetDate: activeDate,
+            drawShift: activeShift,
+          ));
+        }
         continue;
       }
 
@@ -1432,9 +1586,111 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
 
                   const Spacer(),
 
-                  // Party Name
+                  // 🏢 1. Dealer Selector
                   Container(
-                    width: 210,
+                    height: 36,
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F172A),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFFF59E0B).withAlpha(140)),
+                    ),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _availableDealers.contains(_selectedDealer) ? _selectedDealer : null,
+                        hint: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.workspace_premium_rounded, size: 14, color: Color(0xFFF59E0B)),
+                            SizedBox(width: 4),
+                            Text('Select Dealer', style: TextStyle(color: Color(0xFFF59E0B), fontSize: 11, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                        dropdownColor: const Color(0xFF1E293B),
+                        items: [
+                          const DropdownMenuItem<String>(
+                            value: 'All Dealers',
+                            child: Text('🏢 All Dealers / Direct', style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold)),
+                          ),
+                          ..._availableDealers.map((d) => DropdownMenuItem<String>(
+                                value: d,
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(Icons.workspace_premium_rounded, size: 13, color: Color(0xFFF59E0B)),
+                                    const SizedBox(width: 6),
+                                    Text(d, style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                              )),
+                        ],
+                        onChanged: (val) {
+                          setState(() {
+                            _selectedDealer = (val == 'All Dealers' || val == null) ? null : val;
+                            _selectedSubSeller = null;
+                            if (_selectedDealer != null) {
+                              _partyCtrl.text = _selectedDealer!;
+                            }
+                            _reparseText();
+                          });
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+
+                  // 👤 2. Sub-Seller Selector (Linked to Dealer)
+                  if (_selectedDealer != null && (_dealerToSellersMap[_selectedDealer]?.isNotEmpty ?? false)) ...[
+                    Container(
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0F172A),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF38BDF8).withAlpha(140)),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: (_dealerToSellersMap[_selectedDealer]?.contains(_selectedSubSeller) ?? false) ? _selectedSubSeller : 'MAIN_DEALER',
+                          dropdownColor: const Color(0xFF1E293B),
+                          items: [
+                            DropdownMenuItem<String>(
+                              value: 'MAIN_DEALER',
+                              child: Text('👑 $_selectedDealer (Main Dealer)', style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 11, fontWeight: FontWeight.bold)),
+                            ),
+                            ...(_dealerToSellersMap[_selectedDealer] ?? []).map((s) => DropdownMenuItem<String>(
+                                  value: s,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.person, size: 13, color: Color(0xFF38BDF8)),
+                                      const SizedBox(width: 5),
+                                      Text(s, style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 11, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                )),
+                          ],
+                          onChanged: (val) {
+                            setState(() {
+                              if (val == 'MAIN_DEALER') {
+                                _selectedSubSeller = null;
+                                _partyCtrl.text = _selectedDealer!;
+                              } else {
+                                _selectedSubSeller = val;
+                                _partyCtrl.text = val!;
+                              }
+                              _reparseText();
+                            });
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
+
+                  // 3. Editable Party Name Input
+                  Container(
+                    width: 170,
                     height: 36,
                     decoration: BoxDecoration(
                       color: const Color(0xFF0F172A),
@@ -1443,11 +1699,11 @@ class _RawStockTextParserDialogState extends ConsumerState<RawStockTextParserDia
                     ),
                     child: TextField(
                       controller: _partyCtrl,
-                      style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold, fontSize: 12),
+                      style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold, fontSize: 11.5),
                       decoration: InputDecoration(
                         isDense: true,
                         labelText: 'Party / Seller Name',
-                        labelStyle: TextStyle(color: Colors.grey.shade600, fontSize: 10),
+                        labelStyle: TextStyle(color: Colors.grey.shade600, fontSize: 9.5),
                         prefixIcon: Icon(Icons.person_outline_rounded, size: 14, color: primaryColor),
                         border: InputBorder.none,
                         contentPadding: const EdgeInsets.fromLTRB(0, 8, 8, 8),

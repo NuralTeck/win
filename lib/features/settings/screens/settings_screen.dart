@@ -16,12 +16,14 @@ import '../../bookings/viewmodels/ticket_sales_viewmodel.dart';
 import '../viewmodels/settings_viewmodel.dart';
 import 'price_setup_screen.dart';
 import '../../operations/screens/whatsapp_engine_screen.dart';
+import '../../sellers/screens/customer_setup_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
 
   static const List<String> tabs = [
     'Price & Series Setup',
+    '👑 Dealers & Sellers Setup',
     'WhatsApp Connect & Bot',
     'API Credentials',
     '🧹 Master Data Reset (0)',
@@ -237,6 +239,7 @@ class SettingsScreen extends ConsumerWidget {
             index: state.selectedTabIndex,
             children: [
               const PriceSetupScreen(),
+              const CustomerSetupScreen(),
               const WhatsAppEngineScreen(),
               const _ApiCredentialsTab(),
               const _DatabaseResetTab(),

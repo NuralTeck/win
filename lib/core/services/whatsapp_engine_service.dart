@@ -469,6 +469,44 @@ class WhatsAppEngineService {
     }
   }
 
+  /// Get Active Target Lock configuration from WhatsApp Bot Engine
+  Future<Map<String, dynamic>?> getTargetLock() async {
+    try {
+      final req = await _httpClient.getUrl(Uri.parse('$baseUrl/api/bot/target-lock'));
+      final res = await req.close();
+      if (res.statusCode == 200) {
+        final body = await res.transform(utf8.decoder).join();
+        final data = jsonDecode(body);
+        return data['targetConfig'] as Map<String, dynamic>?;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// Lock Active Shift, Date & Customer on WhatsApp Bot Engine (Strictly ignores in-message shift & party tags)
+  Future<bool> setTargetLock({
+    required String lockedShift,
+    required String lockedDate,
+    required String lockedBuyerName,
+    bool strictLockEnabled = true,
+  }) async {
+    try {
+      final req = await _httpClient.postUrl(Uri.parse('$baseUrl/api/bot/target-lock'));
+      req.headers.contentType = ContentType.json;
+      req.write(jsonEncode({
+        'lockedShift': lockedShift,
+        'lockedDate': lockedDate,
+        'lockedBuyerName': lockedBuyerName,
+        'strictLockEnabled': strictLockEnabled,
+      }));
+      final res = await req.close();
+      return res.statusCode == 200;
+    } catch (e) {
+      debugPrint('⚠️ Set Target Lock Error: $e');
+      return false;
+    }
+  }
+
   void dispose() {
     stopPolling();
     _httpClient.close(force: true);

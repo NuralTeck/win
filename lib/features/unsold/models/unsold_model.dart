@@ -12,6 +12,7 @@ class UnsoldModel {
   final double totalAmount;
   final bool isLocked;
   final DateTime createdAt;
+  final String? dealerName; // 🏢 Main Parent Dealer if unsold is returned by a sub-seller
 
   const UnsoldModel({
     required this.id,
@@ -27,7 +28,10 @@ class UnsoldModel {
     required this.totalAmount,
     this.isLocked = false,
     required this.createdAt,
+    this.dealerName,
   });
+
+  String get effectiveDealer => (dealerName != null && dealerName!.isNotEmpty) ? dealerName! : partyName;
 
   Map<String, dynamic> toMap() {
     return {
@@ -36,6 +40,7 @@ class UnsoldModel {
       'date': date,
       'draw_shift': drawShift,
       'party_name': partyName,
+      'dealer_name': dealerName ?? partyName,
       'series': series,
       'from_ticket': fromTicket,
       'to_ticket': toTicket,
@@ -48,12 +53,15 @@ class UnsoldModel {
   }
 
   factory UnsoldModel.fromMap(Map<String, dynamic> map) {
+    final party = map['party_name']?.toString() ?? '';
+    final dealer = map['dealer_name']?.toString();
     return UnsoldModel(
       id: map['id']?.toString() ?? '',
       returnNo: map['return_no']?.toString() ?? '',
       date: map['date']?.toString() ?? '',
       drawShift: map['draw_shift']?.toString() ?? '',
-      partyName: map['party_name']?.toString() ?? '',
+      partyName: party,
+      dealerName: (dealer != null && dealer.isNotEmpty) ? dealer : party,
       series: map['series']?.toString() ?? '',
       fromTicket: map['from_ticket']?.toString() ?? '',
       toTicket: map['to_ticket']?.toString() ?? '',

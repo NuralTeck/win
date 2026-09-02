@@ -6,6 +6,8 @@ class SellerCustomerModel {
   final String phone;
   final bool isActive;
   final DateTime createdAt;
+  final String? parentDealer; // 🏢 Name of Parent Dealer if this is a sub-seller
+  final bool isDealer; // 👑 True if this party is a main dealer
 
   SellerCustomerModel({
     required this.id,
@@ -15,6 +17,8 @@ class SellerCustomerModel {
     required this.phone,
     this.isActive = true,
     required this.createdAt,
+    this.parentDealer,
+    this.isDealer = false,
   });
 
   SellerCustomerModel copyWith({
@@ -25,6 +29,8 @@ class SellerCustomerModel {
     String? phone,
     bool? isActive,
     DateTime? createdAt,
+    String? parentDealer,
+    bool? isDealer,
   }) {
     return SellerCustomerModel(
       id: id ?? this.id,
@@ -34,6 +40,8 @@ class SellerCustomerModel {
       phone: phone ?? this.phone,
       isActive: isActive ?? this.isActive,
       createdAt: createdAt ?? this.createdAt,
+      parentDealer: parentDealer ?? this.parentDealer,
+      isDealer: isDealer ?? this.isDealer,
     );
   }
 }

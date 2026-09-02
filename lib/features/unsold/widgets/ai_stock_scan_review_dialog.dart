@@ -14,6 +14,7 @@ import '../viewmodels/unsold_viewmodel.dart';
 
 class _FastVoucher {
   final String partyLower;
+  final String dealerLower;
   final String dateClean;
   final String shiftLower;
   final String seriesUpper;
@@ -24,6 +25,7 @@ class _FastVoucher {
 
   _FastVoucher({
     required this.partyLower,
+    required this.dealerLower,
     required this.dateClean,
     required this.shiftLower,
     required this.seriesUpper,
@@ -106,6 +108,13 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
   int _cachedNotInVoucherCount = 0;
   int _cachedAlreadyIssuedCount = 0;
   int _cachedValidCount = 0;
+  int _cachedAiDoubtsCount = 0;
+
+  // 🏢 Dealer & Sub-Seller Network Hierarchy
+  List<String> _availableDealers = [];
+  Map<String, List<String>> _dealerToSellersMap = {};
+  String? _selectedDealer;
+  String? _selectedSubSeller;
 
   // Manual fast entry controllers
   final TextEditingController _manualSeriesCtrl = TextEditingController(text: '12');
@@ -121,11 +130,28 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     _partyCtrl = TextEditingController(text: initialParty);
     _items = GeminiScannerService.instance.condenseIntoRanges(widget.initialItems);
     
-    // Auto-adopt detected date from parsed items if available
+    // Auto-adopt detected date from parsed items if available, always aligning year to active session year!
     final firstItemDate = _items.where((it) => it.targetDate != null && it.targetDate!.isNotEmpty).firstOrNull?.targetDate;
     if (firstItemDate != null) {
       final parsed = DateTime.tryParse(firstItemDate);
-      if (parsed != null) _activeDate = parsed;
+      if (parsed != null) {
+        _activeDate = DateTime(widget.activeDate.year, parsed.month, parsed.day);
+      }
+    }
+
+    // Normalize all items to the active session year (prevents 2021 vs 2026 mismatch)
+    final alignedDateStr = DateFormat('yyyy-MM-dd').format(_activeDate);
+    for (final it in _items) {
+      if (it.targetDate != null && it.targetDate!.isNotEmpty) {
+        final p = DateTime.tryParse(it.targetDate!);
+        if (p != null) {
+          it.targetDate = DateFormat('yyyy-MM-dd').format(DateTime(widget.activeDate.year, p.month, p.day));
+        } else {
+          it.targetDate = alignedDateStr;
+        }
+      } else {
+        it.targetDate = alignedDateStr;
+      }
     }
     
     _buildFastVouchers();
@@ -133,6 +159,51 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     _loadAllVouchers();
     _loadAllUnsold();
     _recalculateAllPrices();
+    _loadDealersAndSellers();
+  }
+
+  Future<void> _loadDealersAndSellers() async {
+    final list = await DatabaseService.instance.getSellerCustomers();
+    final dealers = <String>[];
+    final map = <String, List<String>>{};
+
+    for (final s in list) {
+      if (s.isDealer) {
+        if (!dealers.contains(s.name)) dealers.add(s.name);
+        map.putIfAbsent(s.name, () => []);
+      }
+    }
+    for (final s in list) {
+      if (!s.isDealer && s.parentDealer != null && s.parentDealer!.isNotEmpty) {
+        map.putIfAbsent(s.parentDealer!, () => []);
+        if (!map[s.parentDealer!]!.contains(s.name)) {
+          map[s.parentDealer!]!.add(s.name);
+        }
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _availableDealers = dealers;
+        _dealerToSellersMap = map;
+
+        if (_partyCtrl.text.isNotEmpty) {
+          final p = _partyCtrl.text.trim();
+          if (dealers.contains(p)) {
+            _selectedDealer = p;
+            _selectedSubSeller = null;
+          } else {
+            for (final d in dealers) {
+              if (map[d]?.contains(p) ?? false) {
+                _selectedDealer = d;
+                _selectedSubSeller = p;
+                break;
+              }
+            }
+          }
+        }
+      });
+    }
   }
 
   void _buildFastVouchers() {
@@ -145,6 +216,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
       final ser = v.series.trim().toUpperCase();
       list.add(_FastVoucher(
         partyLower: v.partyName.trim().toLowerCase(),
+        dealerLower: v.effectiveDealer.trim().toLowerCase(),
         dateClean: v.date.replaceAll('/', '-').trim(),
         shiftLower: v.drawShift.trim().toLowerCase(),
         seriesUpper: ser,
@@ -163,8 +235,12 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     int notInVouch = 0;
     int already = 0;
     int valid = 0;
+    int doubts = 0;
 
     for (final item in _items) {
+      if (item.aiDoubt != null && item.aiDoubt!.isNotEmpty) {
+        doubts++;
+      }
       final status = _computeItemValidationStatus(item);
       _validationCache[item] = status;
       if (status != null) {
@@ -180,6 +256,193 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     _cachedNotInVoucherCount = notInVouch;
     _cachedAlreadyIssuedCount = already;
     _cachedValidCount = valid;
+    _cachedAiDoubtsCount = doubts;
+  }
+
+  void _showAiDoubtsModal() {
+    final doubtfulItems = _items.where((it) => it.aiDoubt != null && it.aiDoubt!.isNotEmpty).toList();
+    final generalConfusions = GeminiScannerService.instance.lastAiConfusions;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF0F172A),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: const Color(0xFFF59E0B).withAlpha(120)),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(6),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF59E0B).withAlpha(30),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.help_outline_rounded, color: Color(0xFFF59E0B), size: 22),
+            ),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'AI Parcha Scanner Doubts & Notes',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                  Text(
+                    'AI ko in jagahon par confusion ya doubt tha — please cross-check:',
+                    style: TextStyle(fontSize: 11, color: Colors.white70),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        content: SizedBox(
+          width: 500,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (generalConfusions.isNotEmpty) ...[
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E293B),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber.withAlpha(80)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        '📝 General Parcha Notes from AI:',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.amberAccent),
+                      ),
+                      const SizedBox(height: 4),
+                      ...generalConfusions.map((c) => Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text('• ', style: TextStyle(color: Colors.amberAccent)),
+                            Expanded(
+                              child: Text(c, style: const TextStyle(color: Colors.white, fontSize: 11.5)),
+                            ),
+                          ],
+                        ),
+                      )),
+                    ],
+                  ),
+                ),
+              ],
+              if (doubtfulItems.isEmpty && generalConfusions.isEmpty)
+                const Padding(
+                  padding: EdgeInsets.all(20),
+                  child: Center(
+                    child: Text(
+                      '✅ AI had 0 doubts on this parcha! Everything was parsed clearly.',
+                      style: TextStyle(color: Colors.greenAccent, fontSize: 13, fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                )
+              else if (doubtfulItems.isNotEmpty) ...[
+                Text(
+                  '${doubtfulItems.length} Items with Ambiguous / Unclear Handwriting:',
+                  style: const TextStyle(color: Colors.cyanAccent, fontWeight: FontWeight.bold, fontSize: 12),
+                ),
+                const SizedBox(height: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 280),
+                  child: ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: doubtfulItems.length,
+                    separatorBuilder: (_, _) => const SizedBox(height: 6),
+                    itemBuilder: (c, i) {
+                      final item = doubtfulItems[i];
+                      final rowNum = _items.indexOf(item) + 1;
+                      return Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1E293B),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: const Color(0xFFF59E0B).withAlpha(100)),
+                        ),
+                        child: Row(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF0F172A),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text('#$rowNum', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.grey)),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text('Ser ${item.series} • ${item.ticketNo}',
+                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white)),
+                                  const SizedBox(height: 2),
+                                  Text('⚠️ ${item.aiDoubt}',
+                                      style: const TextStyle(fontSize: 11, color: Color(0xFFFBBF24))),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            ElevatedButton(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFFD97706),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              onPressed: () {
+                                Navigator.pop(ctx);
+                                setState(() {
+                                  _selectedStatusFilter = 'AI_DOUBTS';
+                                });
+                              },
+                              child: const Text('Edit', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Close', style: TextStyle(color: Colors.grey)),
+          ),
+          if (doubtfulItems.isNotEmpty)
+            ElevatedButton.icon(
+              onPressed: () {
+                Navigator.pop(ctx);
+                setState(() {
+                  _selectedStatusFilter = 'AI_DOUBTS';
+                });
+              },
+              icon: const Icon(Icons.filter_list_rounded, size: 14),
+              label: const Text('Filter Doubts in Table'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFFF59E0B),
+                foregroundColor: Colors.black,
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   void _refreshSingleItemValidation(GeminiScannedItem item) {
@@ -420,6 +683,11 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
       filtered = filtered.where((it) {
         if (it == _activeEditingItem) return true;
         return _validationCache[it] == null;
+      }).toList();
+    } else if (_selectedStatusFilter == 'AI_DOUBTS') {
+      filtered = filtered.where((it) {
+        if (it == _activeEditingItem) return true;
+        return it.aiDoubt != null && it.aiDoubt!.isNotEmpty;
       }).toList();
     }
 
@@ -1221,10 +1489,24 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
     final partyName = _partyCtrl.text.trim();
     final partyLower = partyName.toLowerCase();
+    final cleanP2 = partyLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
+
     final dateStr = DateFormat('yyyy-MM-dd').format(_activeDate);
     final itemDate = (item.targetDate != null && item.targetDate!.isNotEmpty ? item.targetDate! : dateStr).replaceAll('/', '-').trim();
     final itemShift = (item.drawShift != null && item.drawShift!.isNotEmpty) ? item.drawShift! : _selectedShift;
     final shiftClean = itemShift.toLowerCase().trim();
+    final cleanS2 = shiftClean.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
+
+    // Helper to extract MM-DD to prevent year mismatch (e.g. 2021-08-31 vs 2026-08-31)
+    String toMd(String d) {
+      final parts = d.replaceAll('/', '-').split('-');
+      if (parts.length >= 3) {
+        if (parts[0].length == 4) return '${parts[1].padLeft(2, '0')}-${parts[2].padLeft(2, '0')}';
+        return '${parts[1].padLeft(2, '0')}-${parts[0].padLeft(2, '0')}';
+      }
+      return d;
+    }
+    final itemMd = toMd(itemDate);
 
     final startI = int.tryParse(from);
     final endI = int.tryParse(to);
@@ -1234,11 +1516,22 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
     if (widget.mode == StockScanMode.voucher) {
       for (final v in _fastVouchers) {
-        if (v.dateClean == itemDate && (v.seriesUpper == cleanSer || (serNumItem.isNotEmpty && v.seriesNum == serNumItem))) {
+        final matchesDate = v.dateClean == itemDate || toMd(v.dateClean) == itemMd;
+        if (matchesDate && (v.seriesUpper == cleanSer || (serNumItem.isNotEmpty && v.seriesNum == serNumItem))) {
+          final cleanS1 = v.shiftLower.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
           final matchesShift = itemShift == 'ALL' ||
               v.shiftLower == shiftClean ||
+              cleanS1 == cleanS2 ||
               v.shiftLower.contains(shiftClean.replaceAll('dear ', ''));
-          if (matchesShift && startI <= v.end && endI >= v.start) {
+          // 🔒 Only flag as duplicate if issued to the SAME party! Different parties CAN have the same series & ticket numbers!
+          final cleanP1 = v.partyLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
+          final isSameParty = partyName.isNotEmpty &&
+              partyName != 'Walk-in Party' &&
+              (cleanP1 == cleanP2 ||
+               v.partyLower == partyLower ||
+               v.partyLower.contains(partyLower) ||
+               partyLower.contains(v.partyLower));
+          if (matchesShift && isSameParty && startI <= v.end && endI >= v.start) {
             return 'Already in Voucher (${v.partyName})';
           }
         }
@@ -1249,22 +1542,40 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
       String? issuedToOtherParty;
 
       for (final v in _fastVouchers) {
-        if (v.dateClean != itemDate) continue;
+        // 1. Date matching: exact date OR Month-Day match (e.g. 31/08)
+        final matchesDate = v.dateClean == itemDate || toMd(v.dateClean) == itemMd;
+        if (!matchesDate) continue;
 
+        // 2. Shift matching: exact or cleaned (e.g. "dear 1 pm" vs "1 pm")
+        final cleanS1 = v.shiftLower.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
         final matchesShift = itemShift == 'ALL' ||
             v.shiftLower == shiftClean ||
-            v.shiftLower.contains(shiftClean.replaceAll('dear ', ''));
+            cleanS1 == cleanS2 ||
+            v.shiftLower.contains(shiftClean.replaceAll('dear ', '')) ||
+            shiftClean.contains(v.shiftLower.replaceAll('dear ', ''));
         if (!matchesShift) continue;
 
+        // 3. Series matching:
         final matchesSeries = v.seriesUpper == cleanSer || (serNumItem.isNotEmpty && v.seriesNum == serNumItem);
         if (!matchesSeries) continue;
 
+        // 4. Ticket Range matching:
         if (startI >= v.start && endI <= v.end) {
+          final cleanP1 = v.partyLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
+          final cleanD1 = v.dealerLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
           final isThisParty = partyName.isNotEmpty &&
               partyName != 'Walk-in Party' &&
-              (v.partyLower == partyLower ||
+              (cleanP1 == cleanP2 ||
+               cleanP1.contains(cleanP2) ||
+               cleanP2.contains(cleanP1) ||
+               v.partyLower == partyLower ||
                v.partyLower.contains(partyLower) ||
-               partyLower.contains(v.partyLower));
+               partyLower.contains(v.partyLower) ||
+               // 🏢 DEALER HIERARCHY MATCH: If Unsold is submitted under the Dealer's name!
+               cleanD1 == cleanP2 ||
+               cleanD1.contains(cleanP2) ||
+               cleanP2.contains(cleanD1) ||
+               v.dealerLower == partyLower);
 
           if (isThisParty) {
             wasIssuedToThisParty = true;
@@ -1288,17 +1599,24 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
         }
       }
 
-      // Check if already returned in Unsold across the database
+      // Check if already returned in Unsold across the database for the SAME party
       final unsoldSource = _allUnsold.isNotEmpty
           ? _allUnsold
           : ref.read(unsoldViewModelProvider).unsoldList;
       for (final u in unsoldSource) {
         final uDateClean = u.date.replaceAll('/', '-').trim();
+        final matchesDate = uDateClean == itemDate || toMd(uDateClean) == itemMd;
         final uShiftClean = u.drawShift.toLowerCase().trim();
+        final cleanUS = uShiftClean.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
         final matchesShift = itemShift == 'ALL' ||
             uShiftClean == shiftClean ||
+            cleanUS == cleanS2 ||
             uShiftClean.contains(shiftClean.replaceAll('dear ', ''));
-        if (matchesShift && uDateClean == itemDate && u.series.trim().toUpperCase() == cleanSer) {
+        
+        final uPartyClean = u.partyName.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+        final isSameParty = cleanP2.isNotEmpty && (uPartyClean == cleanP2 || uPartyClean.contains(cleanP2) || cleanP2.contains(uPartyClean));
+
+        if (matchesShift && matchesDate && isSameParty && u.series.trim().toUpperCase() == cleanSer) {
           final startU = int.tryParse(u.fromTicket);
           final endU = int.tryParse(u.toTicket);
           if (startU != null && endU != null) {
@@ -1315,10 +1633,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
   void _addManualTicket() {
     final tkt = _manualTicketCtrl.text.trim();
-    if (tkt.isEmpty || tkt.length != 5) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('⚠️ Please enter an exact 5-digit ticket number!'), backgroundColor: Colors.orangeAccent),
-      );
+    if (tkt.isEmpty) {
       _manualTicketFocusNode.requestFocus();
       return;
     }
@@ -1326,14 +1641,67 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     final ser = _manualSeriesCtrl.text.trim().isNotEmpty
         ? _manualSeriesCtrl.text.trim().toUpperCase()
         : '12';
-    final amt = _getPriceForSeries(ser);
+
+    // ⚡ SMART PARCHA PARSER — supports all entry formats:
+    // 1. "52385"         → single ticket
+    // 2. "52150-52199"   → full 5-digit range
+    // 3. "52150-99"      → abbreviated TO (first 3 of FROM + '99' = 52199)
+    // 4. "52150-99-50"   → parcha format (IGNORE written qty '50', calc from range)
+    // Quantity is ALWAYS calculated from (toTicket - fromTicket + 1).
+
+    String fromTicket = '';
+    String toTicket = '';
+
+    // Format 4 & 3: AAAAA-BB-CC or AAAAA-BB (2-digit abbreviated TO)
+    final parchaMatch = RegExp(r'^(\d{5})-(\d{2})(?:-\d+)?$').firstMatch(tkt);
+    if (parchaMatch != null) {
+      fromTicket = parchaMatch.group(1)!;
+      final prefix3 = fromTicket.substring(0, 3);
+      final last2 = parchaMatch.group(2)!;
+      toTicket = '$prefix3$last2';
+    }
+
+    // Format 2: AAAAA-BBBBB (two full 5-digit numbers)
+    if (fromTicket.isEmpty) {
+      final range5Match = RegExp(r'^(\d{5})[-~](\d{5})$').firstMatch(tkt);
+      if (range5Match != null) {
+        fromTicket = range5Match.group(1)!;
+        toTicket = range5Match.group(2)!;
+      }
+    }
+
+    // Format 1: single 5-digit number
+    if (fromTicket.isEmpty && RegExp(r'^\d{5}$').hasMatch(tkt)) {
+      fromTicket = tkt;
+      toTicket = tkt;
+    }
+
+    if (fromTicket.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⚠️ Format: 52385  या  52150-99  या  52150-99-10  या  52150-52199'),
+          backgroundColor: Colors.orangeAccent,
+        ),
+      );
+      _manualTicketFocusNode.requestFocus();
+      return;
+    }
+
+    // ALWAYS calculate qty from ticket range (IGNORE any written quantity)
+    final fNum = int.tryParse(fromTicket) ?? 0;
+    final tNum = int.tryParse(toTicket) ?? fNum;
+    final qty = (tNum >= fNum) ? (tNum - fNum) + 1 : 1;
+    final rate = _getPriceForSeries(ser);
+    final amt = rate * qty;
 
     setState(() {
       final newItem = GeminiScannedItem(
         series: ser,
-        ticketNo: tkt,
+        ticketNo: qty > 1 ? '$fromTicket - $toTicket' : fromTicket,
+        fromTicket: fromTicket,
+        toTicket: toTicket,
         amount: amt,
-        quantity: 1,
+        quantity: qty,
         sellerName: _partyCtrl.text.trim(),
       );
       _items.add(newItem);
@@ -1419,6 +1787,8 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
     try {
       if (widget.mode == StockScanMode.voucher) {
+        final effectiveDealer = _selectedDealer ?? partyName;
+        final effectiveParty = _selectedSubSeller ?? effectiveDealer;
         final List<VoucherModel> vouchersToSave = [];
         for (int i = 0; i < validItems.length; i++) {
           final it = validItems[i];
@@ -1434,7 +1804,8 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
               voucherNo: voucherNo,
               date: entryDate,
               drawShift: itemShift,
-              partyName: partyName,
+              partyName: effectiveParty,
+              dealerName: effectiveDealer,
               series: it.series.isNotEmpty ? it.series : '12',
               fromTicket: fTkt,
               toTicket: tTkt,
@@ -1447,6 +1818,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
         }
         await ref.read(voucherViewModelProvider.notifier).addVouchersBatch(vouchersToSave);
       } else {
+        final effectiveDealer = _selectedDealer ?? partyName;
         final List<UnsoldModel> unsoldToSave = [];
         for (int i = 0; i < validItems.length; i++) {
           final it = validItems[i];
@@ -1456,13 +1828,32 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
           final tTkt = it.toTicket.isNotEmpty ? it.toTicket : (it.ticketNo.contains('-') ? it.ticketNo.split('-').last.trim() : it.ticketNo);
           final entryDate = _sanitizeTargetDate(it.targetDate, dateStr);
           final itemShift = (it.drawShift != null && it.drawShift!.isNotEmpty) ? it.drawShift! : _selectedShift;
+
+          // 🌳 SMART BRANCH RESOLUTION FOR UNSOLD:
+          // Match ticket range to the specific Sub-Seller originally issued these tickets
+          String itemParty = effectiveDealer;
+          final fNum = int.tryParse(fTkt);
+          final tNum = int.tryParse(tTkt) ?? fNum;
+          if (fNum != null && tNum != null) {
+            for (final v in _fastVouchers) {
+              if (v.seriesUpper == it.series.trim().toUpperCase() &&
+                  (v.dealerLower == effectiveDealer.toLowerCase() || v.partyLower == effectiveDealer.toLowerCase())) {
+                if (fNum >= v.start && tNum <= v.end) {
+                  itemParty = v.partyName;
+                  break;
+                }
+              }
+            }
+          }
+
           unsoldToSave.add(
             UnsoldModel(
               id: 'unsold_${now.microsecondsSinceEpoch}_$i',
               returnNo: returnNo,
               date: entryDate,
               drawShift: itemShift,
-              partyName: partyName,
+              partyName: itemParty,
+              dealerName: effectiveDealer,
               series: it.series.isNotEmpty ? it.series : '12',
               fromTicket: fTkt,
               toTicket: tTkt,
@@ -1771,34 +2162,106 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
                   const Spacer(),
 
-                  // Party Name
+                  // 🏢 1. Main Dealer Selector
                   Container(
-                    width: 210,
                     height: 36,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
                     decoration: BoxDecoration(
                       color: const Color(0xFF0F172A),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: primaryColor.withAlpha(80)),
+                      border: Border.all(
+                        color: _selectedDealer != null ? const Color(0xFFF59E0B) : Colors.redAccent.withAlpha(180),
+                        width: 1.2,
+                      ),
                     ),
-                    child: TextField(
-                      controller: _partyCtrl,
-                      onChanged: (val) {
-                        setState(() {
-                          _refreshValidationCache();
-                        });
-                      },
-                      style: TextStyle(color: primaryColor, fontWeight: FontWeight.bold, fontSize: 12),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        labelText: 'Party / Seller Name',
-                        labelStyle: TextStyle(color: Colors.grey.shade600, fontSize: 10),
-                        prefixIcon: Icon(Icons.person_outline_rounded, size: 14, color: primaryColor),
-                        border: InputBorder.none,
-                        contentPadding: const EdgeInsets.fromLTRB(0, 8, 8, 8),
+                    child: DropdownButtonHideUnderline(
+                      child: DropdownButton<String>(
+                        value: _availableDealers.contains(_selectedDealer) ? _selectedDealer : null,
+                        hint: const Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(Icons.workspace_premium_rounded, size: 14, color: Color(0xFFF59E0B)),
+                            SizedBox(width: 5),
+                            Text('Main Dealer *', style: TextStyle(color: Color(0xFFF59E0B), fontSize: 11, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                        dropdownColor: const Color(0xFF1E293B),
+                        items: _availableDealers.map((d) => DropdownMenuItem<String>(
+                              value: d,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(Icons.workspace_premium_rounded, size: 13, color: Color(0xFFF59E0B)),
+                                  const SizedBox(width: 6),
+                                  Text(d, style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 11.5, fontWeight: FontWeight.bold)),
+                                ],
+                              ),
+                            )).toList(),
+                        onChanged: (val) {
+                          setState(() {
+                            _selectedDealer = val;
+                            _selectedSubSeller = null;
+                            if (_selectedDealer != null) {
+                              _partyCtrl.text = _selectedDealer!;
+                            }
+                            _refreshValidationCache();
+                          });
+                        },
                       ),
                     ),
                   ),
                   const SizedBox(width: 8),
+
+                  // 👤 2. Sub-Seller Selector (ONLY IN VOUCHER MODE)
+                  if (widget.mode == StockScanMode.voucher && _selectedDealer != null) ...[
+                    Container(
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF0F172A),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: const Color(0xFF38BDF8), width: 1.2),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: (_dealerToSellersMap[_selectedDealer]?.contains(_selectedSubSeller) ?? false)
+                              ? _selectedSubSeller
+                              : 'MAIN_DEALER',
+                          dropdownColor: const Color(0xFF1E293B),
+                          items: [
+                            DropdownMenuItem<String>(
+                              value: 'MAIN_DEALER',
+                              child: Text('👑 $_selectedDealer (Main Dealer)', style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 11, fontWeight: FontWeight.bold)),
+                            ),
+                            ...(_dealerToSellersMap[_selectedDealer] ?? []).map((s) => DropdownMenuItem<String>(
+                                  value: s,
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.person, size: 13, color: Color(0xFF38BDF8)),
+                                      const SizedBox(width: 5),
+                                      Text(s, style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 11, fontWeight: FontWeight.bold)),
+                                    ],
+                                  ),
+                                )),
+                          ],
+                          onChanged: (val) {
+                            setState(() {
+                              if (val == 'MAIN_DEALER') {
+                                _selectedSubSeller = null;
+                                _partyCtrl.text = _selectedDealer!;
+                              } else {
+                                _selectedSubSeller = val;
+                                _partyCtrl.text = val!;
+                              }
+                              _refreshValidationCache();
+                            });
+                          },
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
 
                   // Minimize to dock button (allows background interaction)
                   InkWell(
@@ -2133,6 +2596,46 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
                                         onTap: () => setState(() => _selectedStatusFilter = 'UNMATCHED'),
                                       ),
                                     ],
+                                     if (_cachedAiDoubtsCount > 0) ...[
+                                       const SizedBox(width: 5),
+                                       _compactChip(
+                                         label: '❓ AI Doubts  $_cachedAiDoubtsCount',
+                                         selected: _selectedStatusFilter == 'AI_DOUBTS',
+                                         color: const Color(0xFF451A03),
+                                         activeColor: const Color(0xFFD97706),
+                                         onTap: () => setState(() => _selectedStatusFilter = 'AI_DOUBTS'),
+                                       ),
+                                     ],
+                                     if (_cachedAiDoubtsCount > 0 || GeminiScannerService.instance.lastAiConfusions.isNotEmpty) ...[
+                                       const SizedBox(width: 8),
+                                       InkWell(
+                                         onTap: _showAiDoubtsModal,
+                                         borderRadius: BorderRadius.circular(6),
+                                         child: Container(
+                                           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                           decoration: BoxDecoration(
+                                             color: const Color(0xFFF59E0B).withAlpha(30),
+                                             borderRadius: BorderRadius.circular(6),
+                                             border: Border.all(color: const Color(0xFFF59E0B).withAlpha(150)),
+                                           ),
+                                           child: Row(
+                                             mainAxisSize: MainAxisSize.min,
+                                             children: [
+                                               const Icon(Icons.warning_amber_rounded, size: 12, color: Color(0xFFF59E0B)),
+                                               const SizedBox(width: 4),
+                                               Text(
+                                                 'AI Notes ($_cachedAiDoubtsCount)',
+                                                 style: const TextStyle(
+                                                   color: Color(0xFFF59E0B),
+                                                   fontWeight: FontWeight.bold,
+                                                   fontSize: 10.5,
+                                                 ),
+                                               ),
+                                             ],
+                                           ),
+                                         ),
+                                       ),
+                                     ],
                                     const Spacer(),
                                     if (_alreadyIssuedCount > 0)
                                       TextButton.icon(
@@ -2349,7 +2852,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
                                               decoration: InputDecoration(
                                                 isDense: true,
                                                 counterText: '',
-                                                hintText: '52150-52199  or  52385',
+                                                hintText: '52385  या  52150-99  या  52150-99-10',
                                                 hintStyle: TextStyle(color: Colors.grey.shade700, fontSize: 10),
                                                 border: InputBorder.none,
                                                 contentPadding: EdgeInsets.zero,
@@ -3155,8 +3658,12 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
                             borderSide: BorderSide(
                               color: widget.isMultiCursorActive
                                   ? const Color(0xFF38BDF8)
-                                  : (hasIssue ? const Color(0xFFEF4444) : const Color(0xFF14532D)),
-                              width: widget.isMultiCursorActive ? 1.8 : (hasIssue ? 1.5 : 1.0),
+                                  : (hasIssue
+                                      ? const Color(0xFFEF4444)
+                                      : ((item.aiDoubt != null && item.aiDoubt!.isNotEmpty)
+                                          ? const Color(0xFFF59E0B)
+                                          : const Color(0xFF14532D))),
+                              width: widget.isMultiCursorActive ? 1.8 : (hasIssue || (item.aiDoubt != null && item.aiDoubt!.isNotEmpty) ? 1.5 : 1.0),
                             ),
                           ),
                           focusedBorder: OutlineInputBorder(
@@ -3164,7 +3671,11 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
                             borderSide: BorderSide(
                               color: widget.isMultiCursorActive
                                   ? const Color(0xFF38BDF8)
-                                  : (hasIssue ? const Color(0xFFF87171) : const Color(0xFF4ADE80)),
+                                  : (hasIssue
+                                      ? const Color(0xFFF87171)
+                                      : ((item.aiDoubt != null && item.aiDoubt!.isNotEmpty)
+                                          ? const Color(0xFFFBBF24)
+                                          : const Color(0xFF4ADE80))),
                               width: widget.isMultiCursorActive ? 2.0 : 1.5,
                             ),
                           ),
@@ -3173,7 +3684,12 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
                                   message: '⚡ VS Code Multi-Cursor Active (Typing syncs across selected)',
                                   child: Icon(Icons.bolt_rounded, size: 14, color: Color(0xFF38BDF8)),
                                 )
-                              : null,
+                              : ((item.aiDoubt != null && item.aiDoubt!.isNotEmpty)
+                                  ? Tooltip(
+                                      message: '⚠️ AI Doubt: ${item.aiDoubt}',
+                                      child: const Icon(Icons.help_outline_rounded, size: 13, color: Color(0xFFF59E0B)),
+                                    )
+                                  : null),
                           suffixIconConstraints: const BoxConstraints(maxWidth: 22, maxHeight: 22),
                           contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                         ),
@@ -3334,12 +3850,41 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
               ),
               const SizedBox(width: 4),
 
-              // 5. ACTION BUTTONS (Overflow-proof width: 96)
+              // 5. ACTION BUTTONS (Width adapts for Doubt badge)
               SizedBox(
-                width: 96,
+                width: (item.aiDoubt != null && item.aiDoubt!.isNotEmpty) ? 140 : 96,
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.end,
                   children: [
+                    if (item.aiDoubt != null && item.aiDoubt!.isNotEmpty) ...[
+                      Tooltip(
+                        message: 'AI Doubt: ${item.aiDoubt}',
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2.5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF59E0B).withAlpha(35),
+                            borderRadius: BorderRadius.circular(4),
+                            border: Border.all(color: const Color(0xFFF59E0B).withAlpha(180)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: const [
+                              Icon(Icons.help_outline_rounded, size: 9, color: Color(0xFFF59E0B)),
+                              SizedBox(width: 2),
+                              Text(
+                                'Doubt',
+                                style: TextStyle(
+                                  color: Color(0xFFF59E0B),
+                                  fontSize: 8.5,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 3),
+                    ],
                     if (hasIssue)
                       Flexible(
                         child: Tooltip(

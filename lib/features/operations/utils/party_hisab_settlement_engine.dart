@@ -88,8 +88,35 @@ class DateHisabBreakdown {
   });
 }
 
+class SubSellerHisabItem {
+  final String sellerName;
+  final int totalVouchers;
+  final int totalUnsold;
+  final int totalNetSold;
+  final double totalVoucherAmount;
+  final double totalUnsoldAmount;
+  final double totalNetAmount;
+  final double totalWinAmount;
+  final double finalNetPayable;
+
+  SubSellerHisabItem({
+    required this.sellerName,
+    required this.totalVouchers,
+    required this.totalUnsold,
+    required this.totalNetSold,
+    required this.totalVoucherAmount,
+    required this.totalUnsoldAmount,
+    required this.totalNetAmount,
+    required this.totalWinAmount,
+    required this.finalNetPayable,
+  });
+}
+
 class PartyHisabSummary {
   final String partyName;
+  final String? dealerName;
+  final bool isDealer;
+  final List<SubSellerHisabItem> subSellerBreakdowns;
   final String date;
   final String shift;
   final List<PartySeriesHisab> seriesHisabList;
@@ -108,6 +135,9 @@ class PartyHisabSummary {
 
   PartyHisabSummary({
     required this.partyName,
+    this.dealerName,
+    this.isDealer = false,
+    this.subSellerBreakdowns = const [],
     required this.date,
     required this.shift,
     required this.seriesHisabList,
@@ -173,7 +203,7 @@ class PartyHisabSettlementEngine {
     return lower;
   }
 
-  /// Calculates complete hisab settlement per party
+  /// Calculates complete hisab settlement per party or dealer
   static List<PartyHisabSummary> calculatePartySettlements({
     required List<VoucherModel> vouchers,
     required List<UnsoldModel> unsoldList,
@@ -182,13 +212,14 @@ class PartyHisabSettlementEngine {
     String? endDate,
     required String selectedShift,
     String? selectedSeries,
+    bool groupByDealer = false,
     LotterySambadResultModel? lotteryResult,
     List<LotterySambadResultModel>? allResults,
     Map<int, PrizeTierConfigModel>? prizeConfig,
   }) {
     final hasRange = startDate != null && startDate.isNotEmpty && endDate != null && endDate.isNotEmpty;
 
-    // 1. Group Vouchers and Unsold by Party Name
+    // 1. Group Vouchers and Unsold by Party Name OR Dealer Name
     final Map<String, String> partyDisplayNames = {};
     final Map<String, List<VoucherModel>> partyVouchers = {};
     final Map<String, List<UnsoldModel>> partyUnsold = {};
@@ -206,7 +237,8 @@ class PartyHisabSettlementEngine {
           : _matchesFilter(v.date, selectedDate);
 
       if (dateMatches && _matchesShift(v.drawShift, selectedShift)) {
-        final rawP = v.partyName.trim().isEmpty ? 'Walk-in Party' : v.partyName.trim();
+        final keyRaw = groupByDealer ? v.effectiveDealer : v.partyName;
+        final rawP = keyRaw.trim().isEmpty ? (groupByDealer ? 'Direct Dealer' : 'Walk-in Party') : keyRaw.trim();
         final pKey = rawP.toUpperCase();
         partyDisplayNames.putIfAbsent(pKey, () => rawP);
         partyVouchers.putIfAbsent(pKey, () => []).add(v);
@@ -226,7 +258,8 @@ class PartyHisabSettlementEngine {
           : _matchesFilter(u.date, selectedDate);
 
       if (dateMatches && _matchesShift(u.drawShift, selectedShift)) {
-        final rawP = u.partyName.trim().isEmpty ? 'Walk-in Party' : u.partyName.trim();
+        final keyRaw = groupByDealer ? u.effectiveDealer : u.partyName;
+        final rawP = keyRaw.trim().isEmpty ? (groupByDealer ? 'Direct Dealer' : 'Walk-in Party') : keyRaw.trim();
         final pKey = rawP.toUpperCase();
         partyDisplayNames.putIfAbsent(pKey, () => rawP);
         partyUnsold.putIfAbsent(pKey, () => []).add(u);
@@ -474,8 +507,68 @@ class PartyHisabSettlementEngine {
         ));
       }
 
+      // Compute Sub-Seller breakdowns if grouped by Dealer
+      final List<SubSellerHisabItem> subSellerBreakdowns = [];
+      String? resolvedDealer;
+
+      if (groupByDealer) {
+        resolvedDealer = partyDisplayName;
+        final Map<String, List<VoucherModel>> subVouchers = {};
+        final Map<String, List<UnsoldModel>> subUnsold = {};
+        for (final v in pVouchers) {
+          final sName = v.partyName.trim().isEmpty ? partyDisplayName : v.partyName.trim();
+          subVouchers.putIfAbsent(sName, () => []).add(v);
+        }
+        for (final u in pUnsold) {
+          final sName = u.partyName.trim().isEmpty ? partyDisplayName : u.partyName.trim();
+          subUnsold.putIfAbsent(sName, () => []).add(u);
+        }
+        final allSubNames = {...subVouchers.keys, ...subUnsold.keys}.toList()..sort();
+        for (final sName in allSubNames) {
+          final sv = subVouchers[sName] ?? [];
+          final su = subUnsold[sName] ?? [];
+          final totV = sv.fold<int>(0, (sum, x) => sum + x.totalQty);
+          final totU = su.fold<int>(0, (sum, x) => sum + x.totalQty);
+          final totVAmt = sv.fold<double>(0.0, (sum, x) => sum + x.totalAmount);
+          final totUAmt = su.fold<double>(0.0, (sum, x) => sum + x.totalAmount);
+          final netQty = (totV >= totU) ? totV - totU : 0;
+          final netAmt = (totVAmt >= totUAmt) ? totVAmt - totUAmt : 0.0;
+          final sWins = customerWins.where((w) => w.sellerName.trim().toLowerCase() == sName.toLowerCase()).toList();
+          final winAmt = sWins.fold<double>(0.0, (sum, w) => sum + w.prizeAmount);
+          subSellerBreakdowns.add(SubSellerHisabItem(
+            sellerName: sName,
+            totalVouchers: totV,
+            totalUnsold: totU,
+            totalNetSold: netQty,
+            totalVoucherAmount: totVAmt,
+            totalUnsoldAmount: totUAmt,
+            totalNetAmount: netAmt,
+            totalWinAmount: winAmt,
+            finalNetPayable: netAmt - winAmt,
+          ));
+        }
+      } else {
+        for (final v in pVouchers) {
+          if (v.dealerName != null && v.dealerName!.trim().isNotEmpty) {
+            resolvedDealer = v.dealerName!.trim();
+            break;
+          }
+        }
+        if (resolvedDealer == null) {
+          for (final u in pUnsold) {
+            if (u.dealerName != null && u.dealerName!.trim().isNotEmpty) {
+              resolvedDealer = u.dealerName!.trim();
+              break;
+            }
+          }
+        }
+      }
+
       summaries.add(PartyHisabSummary(
         partyName: partyDisplayName,
+        dealerName: resolvedDealer,
+        isDealer: groupByDealer || (resolvedDealer != null && resolvedDealer.toLowerCase() == partyDisplayName.toLowerCase()),
+        subSellerBreakdowns: subSellerBreakdowns,
         date: (hasRange && startDate != endDate) ? '$startDate to $endDate' : selectedDate,
         shift: selectedShift,
         seriesHisabList: seriesList,
