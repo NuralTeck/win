@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpsCore Cloud — Remote Party Hisab</title>
+  
+  <!-- Modern Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
+  
+  <!-- Supabase CDN Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Luxury Glassmorphism Stylesheet -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Ambient Glassmorphism Radiant Glowing Orbs -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+
+  <div class="app-layout">
+    <!-- Top Global Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-logo">
+          <div class="logo-icon">🛡️</div>
+          <div class="brand-meta">
+            <h1>OPSCORE COMMAND CENTER</h1>
+            <span class="brand-sub">CLOUD ANTI-PIRACY & MASTER ADMIN CONSOLE</span>
+          </div>
+        </div>
+        <div class="live-pill" id="cloudStatusPill">
+          <div class="pulsing-dot"></div>
+          <span id="cloudStatusText">Connecting to Cloud...</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="system-clock" id="systemClock">--:--:-- --</div>
+        <button class="btn-refresh" id="btnManualRefresh" title="Click to refresh live data now">
+          <span class="icon">🔄</span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Glassmorphic Multi-Page Navigation Bar -->
+    <nav class="nav-tabs-bar">
+      <a href="index.html" class="tab-btn">
+        <span class="tab-icon">🖥️</span>
+        <span>Live Software Logins</span>
+        <span class="tab-counter" id="activeBadgeCount">0</span>
+      </a>
+      <a href="users.html" class="tab-btn">
+        <span class="tab-icon">👥</span>
+        <span>Users & Remote Licenses</span>
+        <span class="tab-counter" id="licensesBadgeCount">0</span>
+      </a>
+      <a href="hisab.html" class="tab-btn active">
+        <span class="tab-icon">📊</span>
+        <span>Remote Party Hisab</span>
+        <span class="tab-counter" id="partyBadgeCount">0</span>
+      </a>
+      <a href="logs.html" class="tab-btn">
+        <span class="tab-icon">📜</span>
+        <span>Login Audit Trail</span>
+      </a>
+      <a href="settings.html" class="tab-btn">
+        <span class="tab-icon">⚙️</span>
+        <span>Cloud Setup & SQL</span>
+      </a>
+    </nav>
+
+    <!-- Main Content: Remote Party Hisab Cloud View -->
+    <main class="views-container">
+      <section class="tab-view active">
+        <div class="section-toolbar">
+          <div class="toolbar-title-group">
+            <h2>📊 Remote Party Hisab (Cloud View)</h2>
+            <p>Live summary of client party balances and net hisab. Raw tickets and vouchers remain 100% private on client PC SQLite database.</p>
+          </div>
+          <div class="toolbar-actions">
+            <div class="search-box">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="partySearchInput" placeholder="Search party name or dealer...">
+            </div>
+          </div>
+        </div>
+
+        <div class="card table-card">
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Party Name</th>
+                  <th>Dealer</th>
+                  <th>Total Tickets</th>
+                  <th>Total Sales</th>
+                  <th>Total Prize</th>
+                  <th>Net Hisab Balance</th>
+                  <th>Last Active Date</th>
+                  <th>Synced By</th>
+                </tr>
+              </thead>
+              <tbody id="partyHisabTableBody">
+                <tr>
+                  <td colspan="8" class="text-center py-5" style="color: #64748B;">
+                    Connecting to cloud database...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Footer -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span>🔒 OpsCore Cloud Command Center • Remote License Management & Anti-Piracy Protection</span>
+      </div>
+      <div class="footer-right">
+        <span>Supabase Project: <code id="lblProjectRef">wagslwsfhbrcyakazibv</code></span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Notification Toast -->
+  <div class="toast" id="toast">Message notification</div>
+
+  <!-- Master Controller Script -->
+  <script src="app.js"></script>
+</body>
+</html>

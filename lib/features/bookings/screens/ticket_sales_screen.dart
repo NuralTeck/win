@@ -111,6 +111,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
     });
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (mounted) {
+        ref.read(ticketSalesViewModelProvider.notifier).setDateFilter(_selectedDate);
         final sellerState = ref.read(sellerCustomerViewModelProvider);
         if (sellerState.sellers.isNotEmpty) {
           setState(() {
@@ -172,11 +173,19 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
       final rawIso = s.drawDate.toIso8601String();
       final rawYmd = rawIso.length >= 10 ? rawIso.substring(0, 10) : '';
 
-      // Strictly match by Draw Date only (so tickets for 13/8 or 14/8 only appear on their respective draw dates)
+      final saleDateLocal = s.saleDate.toLocal();
+      final saleRawIso = s.saleDate.toIso8601String();
+      final saleRawYmd = saleRawIso.length >= 10 ? saleRawIso.substring(0, 10) : '';
+
+      // Match by Draw Date or Sale Date
       final isSameDate = (sDate.year == _selectedDate.year &&
               sDate.month == _selectedDate.month &&
               sDate.day == _selectedDate.day) ||
-          (rawYmd == targetYmd);
+          (rawYmd == targetYmd) ||
+          (saleDateLocal.year == _selectedDate.year &&
+              saleDateLocal.month == _selectedDate.month &&
+              saleDateLocal.day == _selectedDate.day) ||
+          (saleRawYmd == targetYmd);
 
       if (!isSameDate) continue;
       if (!_matchesShift(s.drawName, _selectedShift)) continue;
@@ -237,10 +246,14 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
 
   Future<void> _loadExistingSalesIntoTable() async {
     if (!mounted) return;
-    await ref.read(ticketSalesViewModelProvider.notifier).loadSales();
-    if (!mounted) return;
-    final sales = ref.read(ticketSalesViewModelProvider).sales;
-    _syncSalesListToTableRows(sales);
+    try {
+      final dateSales = await DatabaseService.instance.getTicketSalesByDate(_selectedDate);
+      if (mounted) {
+        _syncSalesListToTableRows(dateSales);
+      }
+    } catch (e) {
+      debugPrint('Error loading sales into table: $e');
+    }
   }
 
   Future<void> _openVoiceBookingDialog() async {
@@ -583,8 +596,10 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
       _toTicketNoCtrl.clear();
     });
 
-    for (final sale in salesToAdd) {
-      ref.read(ticketSalesViewModelProvider.notifier).addTicketSale(sale);
+    if (salesToAdd.length == 1) {
+      ref.read(ticketSalesViewModelProvider.notifier).addTicketSale(salesToAdd.first);
+    } else if (salesToAdd.isNotEmpty) {
+      ref.read(ticketSalesViewModelProvider.notifier).addTicketSalesBulk(salesToAdd);
     }
 
     _ticketNoFocusNode.requestFocus();
@@ -1867,7 +1882,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
     // ⚡ Reactive Live Real-Time Listener (Instant Table Sync on WebSocket Event)
     ref.listen<TicketSalesState>(ticketSalesViewModelProvider, (prev, next) {
       if (mounted) {
-        _syncSalesListToTableRows(next.sales);
+        _loadExistingSalesIntoTable();
       }
     });
 
@@ -2039,6 +2054,7 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
                                 );
                                 if (picked != null) {
                                   setState(() => _selectedDate = picked);
+                                  ref.read(ticketSalesViewModelProvider.notifier).setDateFilter(picked);
                                   _loadExistingSalesIntoTable();
                                 }
                               },
@@ -3042,51 +3058,115 @@ class _TicketSalesScreenState extends ConsumerState<TicketSalesScreen> {
         borderRadius: AppDecorations.radiusDefault,
         border: Border.all(color: AppColors.border),
       ),
-      child: Table(
-        columnWidths: const {
-          0: FlexColumnWidth(1.5),
-          1: FlexColumnWidth(2.0),
-          2: FlexColumnWidth(1.5),
-          3: FlexColumnWidth(1.0),
-          4: FlexColumnWidth(1.2),
-          5: FlexColumnWidth(1.2),
-        },
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          TableRow(
-            decoration: const BoxDecoration(
-              color: AppColors.surfaceContainerHigh,
-            ),
+          Table(
+            columnWidths: const {
+              0: FlexColumnWidth(1.5),
+              1: FlexColumnWidth(2.0),
+              2: FlexColumnWidth(1.5),
+              3: FlexColumnWidth(1.0),
+              4: FlexColumnWidth(1.2),
+              5: FlexColumnWidth(1.2),
+            },
             children: [
-              _tableHeaderCell('Receipt #'),
-              _tableHeaderCell('Draw Name'),
-              _tableHeaderCell('Ticket #'),
-              _tableHeaderCell('Qty'),
-              _tableHeaderCell('Total'),
-              _tableHeaderCell('Date'),
+              TableRow(
+                decoration: const BoxDecoration(
+                  color: AppColors.surfaceContainerHigh,
+                ),
+                children: [
+                  _tableHeaderCell('Receipt #'),
+                  _tableHeaderCell('Draw Name'),
+                  _tableHeaderCell('Ticket #'),
+                  _tableHeaderCell('Qty'),
+                  _tableHeaderCell('Total'),
+                  _tableHeaderCell('Date'),
+                ],
+              ),
+              ...state.sales.map(
+                (s) => TableRow(
+                  children: [
+                    _tableDataCell(
+                      s.receiptNumber,
+                      isBold: true,
+                      color: AppColors.primary,
+                    ),
+                    _tableDataCell(s.drawName),
+                    _tableDataCell(s.ticketNumber, isMonospace: true),
+                    _tableDataCell(s.quantity.toString()),
+                    _tableDataCell(
+                      '₹${s.totalAmount.toStringAsFixed(0)}',
+                      isBold: true,
+                      color: AppColors.success,
+                    ),
+                    _tableDataCell(
+                      DateFormat('dd-MM HH:mm').format(s.saleDate),
+                      color: AppColors.textSecondary,
+                    ),
+                  ],
+                ),
+              ),
             ],
           ),
-          ...state.sales.map(
-            (s) => TableRow(
-              children: [
-                _tableDataCell(
-                  s.receiptNumber,
-                  isBold: true,
-                  color: AppColors.primary,
-                ),
-                _tableDataCell(s.drawName),
-                _tableDataCell(s.ticketNumber, isMonospace: true),
-                _tableDataCell(s.quantity.toString()),
-                _tableDataCell(
-                  '₹${s.totalAmount.toStringAsFixed(0)}',
-                  isBold: true,
-                  color: AppColors.success,
-                ),
-                _tableDataCell(
-                  DateFormat('dd-MM HH:mm').format(s.saleDate),
-                  color: AppColors.textSecondary,
-                ),
-              ],
+          if (state.sales.isEmpty)
+            Container(
+              padding: const EdgeInsets.all(24),
+              alignment: Alignment.center,
+              child: state.isLoading
+                  ? const CircularProgressIndicator()
+                  : const Text('No ticket sales found.', style: TextStyle(color: AppColors.textSecondary)),
             ),
+          const Divider(height: 1, color: AppColors.border),
+          _buildPaginationBar(state),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPaginationBar(TicketSalesState state) {
+    final startRecord = state.totalCount == 0 ? 0 : state.currentPage * state.pageSize + 1;
+    final endRecord = ((state.currentPage + 1) * state.pageSize).clamp(0, state.totalCount);
+    final totalPages = state.totalPages == 0 ? 1 : state.totalPages;
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      decoration: const BoxDecoration(
+        color: AppColors.surfaceContainerHigh,
+        borderRadius: BorderRadius.vertical(bottom: Radius.circular(8)),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(
+            state.totalCount > 0
+                ? 'Showing $startRecord - $endRecord of ${state.totalCount} records'
+                : '0 records',
+            style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+          ),
+          Row(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.chevron_left, size: 20),
+                onPressed: state.currentPage > 0
+                    ? () => ref.read(ticketSalesViewModelProvider.notifier).previousPage()
+                    : null,
+                tooltip: 'Previous Page',
+              ),
+              const SizedBox(width: 4),
+              Text(
+                'Page ${state.currentPage + 1} of $totalPages',
+                style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                icon: const Icon(Icons.chevron_right, size: 20),
+                onPressed: state.hasMorePages
+                    ? () => ref.read(ticketSalesViewModelProvider.notifier).nextPage()
+                    : null,
+                tooltip: 'Next Page',
+              ),
+            ],
           ),
         ],
       ),

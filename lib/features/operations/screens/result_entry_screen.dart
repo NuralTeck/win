@@ -1,5 +1,5 @@
+import 'dart:async';
 import 'dart:io';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -12,7 +12,12 @@ import '../../../core/theme/app_decorations.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/database/database_service.dart';
 import '../models/lottery_sambad_result_model.dart';
+import '../services/pdf_result_parser_service.dart';
+
+import '../models/winning_claim_model.dart';
 import '../utils/winner_verification_engine.dart';
+import '../../../core/process/services/process_manager.dart';
+import '../../../core/process/models/process_model.dart';
 import '../../bookings/viewmodels/ticket_sales_viewmodel.dart';
 
 class ResultEntryScreen extends ConsumerStatefulWidget {
@@ -60,6 +65,14 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
   List<Map<String, dynamic>> _historyRecords = [];
   String _historySearch = '';
   String _historyShiftFilter = 'All';
+  bool _isLoadingHistory = false;
+  bool _isReverifyingHistory = false;
+  Timer? _prizeChangeDebounce;
+  List<WinningClaimModel> _latestClaims = [];
+  final Map<String, (int count, double payout)> _historyWinnerCache = {};
+  final Map<String, List<Map<String, dynamic>>> _historyPartySummaryCache = {};
+  final Set<String> _expandedDrawIds = {};
+  final Set<String> _loadingPartySummaryDrawIds = {};
 
   // Prize amounts (Sambad standard)
   static const Map<String, double> _prizeAmounts = {
@@ -75,6 +88,13 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _tabController.addListener(() {
+      if (_tabController.index == 1 && !_tabController.indexIsChanging) {
+        if (_historyRecords.isEmpty) {
+          _fetchHistoryRecords();
+        }
+      }
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(ticketSalesViewModelProvider.notifier).loadSales();
       _fetchHistoryRecords();
@@ -84,6 +104,7 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
   @override
   void dispose() {
     _tabController.dispose();
+    _prizeChangeDebounce?.cancel();
     _firstPrizeCtrl.dispose();
     _consolationPrizeCtrl.dispose();
     _firstPrizeFocusNode.dispose();
@@ -97,8 +118,111 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
   }
 
   Future<void> _fetchHistoryRecords() async {
-    final list = await DatabaseService.instance.getLotteryResults();
-    if (mounted) setState(() => _historyRecords = list);
+    setState(() => _isLoadingHistory = true);
+    try {
+      final list = await DatabaseService.instance.getLotteryResults();
+      if (mounted) {
+        for (final r in list) {
+          final id = r['id']?.toString() ?? '';
+          if (id.isNotEmpty) {
+            final wCount = int.tryParse(r['verifiedWinnersCount']?.toString() ?? '') ?? 0;
+            final payout = double.tryParse(r['totalPayoutAmount']?.toString() ?? '') ?? 0.0;
+            _historyWinnerCache[id] = (wCount, payout);
+          }
+        }
+        setState(() {
+          _historyRecords = list;
+          _isLoadingHistory = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching history records: $e');
+      if (mounted) {
+        setState(() => _isLoadingHistory = false);
+      }
+    }
+  }
+
+  Future<void> _reverifyAllHistoryRecords() async {
+    if (_isReverifyingHistory) return;
+    setState(() => _isReverifyingHistory = true);
+
+    await ProcessManager.instance.runExclusive(
+      idempotencyKey: 'reverify_history_draws',
+      title: 'Audit & Re-verify Result Draws (${_historyRecords.length} draws)',
+      category: 'Lottery Audit',
+      priority: ProcessPriority.high,
+      onDuplicateRejected: (msg) => _showSnackbar(msg, AppColors.warning),
+      action: (ctx) async {
+        try {
+
+          final total = _historyRecords.length;
+
+          for (int i = 0; i < total; i++) {
+            ctx.throwIfCancelled();
+            await ctx.checkPause();
+
+            final record = _historyRecords[i];
+            final dName = record['drawName']?.toString() ?? record['drawTimeStr']?.toString() ?? 'Draw ${i + 1}';
+            ctx.updateProgress(
+              (i + 1) / (total > 0 ? total : 1),
+              message: 'Auditing $dName (${i + 1}/$total)...',
+              completedSteps: i + 1,
+              totalSteps: total,
+            );
+
+            final sec = (record['secondPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+            final th = (record['thirdPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+            final fo = (record['fourthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+            final fi = (record['fifthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+
+            final model = LotterySambadResultModel(
+              drawId: record['id']?.toString() ?? '',
+              drawName: dName,
+              drawDateStr: record['drawDateStr']?.toString() ?? '',
+              drawTimeStr: record['drawTimeStr']?.toString() ?? '',
+              firstPrize: record['firstPrize']?.toString() ?? '',
+              consolationPrize: record['consolationPrize']?.toString() ?? '',
+              secondPrizeNumbers: sec,
+              thirdPrizeNumbers: th,
+              fourthPrizeNumbers: fo,
+              fifthPrizeNumbers: fi,
+              publishedAt: DateTime.tryParse(record['publishedAt']?.toString() ?? '') ?? DateTime.now(),
+            );
+
+            final liveClaims = await WinnerVerificationEngine.verifyDrawFromDatabase(
+              result: model,
+
+            );
+            final liveCount = liveClaims.length;
+            final livePayout = liveClaims.fold<double>(0.0, (acc, c) => acc + c.prizeAmount);
+            if (liveClaims.isNotEmpty) {
+              await DatabaseService.instance.saveWinningClaimsBatch(liveClaims);
+            }
+            _historyWinnerCache[model.drawId] = (liveCount, livePayout);
+            if (liveClaims.isNotEmpty) {
+              final partySummary = await DatabaseService.instance.getWinningClaimsGroupedByParty(model.drawId);
+              _historyPartySummaryCache[model.drawId] = partySummary;
+            }
+
+            if (i % 2 == 0) {
+              await Future.delayed(Duration.zero);
+            }
+          }
+
+          if (mounted) {
+            setState(() => _isReverifyingHistory = false);
+            _showSnackbar('🔄 Re-verified all results with latest bookings!', AppColors.success);
+          }
+        } catch (e) {
+          debugPrint('Error re-verifying history: $e');
+          if (mounted) {
+            setState(() => _isReverifyingHistory = false);
+          }
+          rethrow;
+        }
+      },
+    );
   }
 
   void _clearForm() {
@@ -275,10 +399,12 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
     );
   }
 
-  void _recalculateWinners(LotterySambadResultModel resultModel) {
-    final soldTickets = ref.read(ticketSalesViewModelProvider).sales;
-    final claims = WinnerVerificationEngine.verifyWinners(
-        soldTickets: soldTickets, result: resultModel);
+  Future<void> _recalculateWinners(LotterySambadResultModel resultModel) async {
+    final claims = await WinnerVerificationEngine.verifyDrawFromDatabase(result: resultModel);
+    _latestClaims = claims;
+    if (!mounted) return;
+
+
     setState(() {
       _verifiedWinnersCount = claims.length;
       _totalPayoutAmount = claims.fold(0.0, (sum, c) => sum + c.prizeAmount);
@@ -291,6 +417,91 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
               })
           .toList();
     });
+  }
+
+  Future<void> _fetchPartyDetailsForDraw(Map<String, dynamic> record) async {
+    final drawId = record['id']?.toString() ?? '';
+    if (drawId.isEmpty) return;
+
+    if (_expandedDrawIds.contains(drawId)) {
+      setState(() => _expandedDrawIds.remove(drawId));
+      return;
+    }
+
+    if (_historyPartySummaryCache.containsKey(drawId)) {
+      setState(() => _expandedDrawIds.add(drawId));
+      return;
+    }
+
+    setState(() => _loadingPartySummaryDrawIds.add(drawId));
+    try {
+      var partySummary = await DatabaseService.instance.getWinningClaimsGroupedByParty(drawId);
+      if (partySummary.isEmpty) {
+        final dName = record['drawName']?.toString() ?? record['drawTimeStr']?.toString() ?? '';
+        final sec = (record['secondPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+        final th = (record['thirdPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+        final fo = (record['fourthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+        final fi = (record['fifthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+
+        final model = LotterySambadResultModel(
+          drawId: drawId,
+          drawName: dName,
+          drawDateStr: record['drawDateStr']?.toString() ?? '',
+          drawTimeStr: record['drawTimeStr']?.toString() ?? '',
+          firstPrize: record['firstPrize']?.toString() ?? '',
+          consolationPrize: record['consolationPrize']?.toString() ?? '',
+          secondPrizeNumbers: sec,
+          thirdPrizeNumbers: th,
+          fourthPrizeNumbers: fo,
+          fifthPrizeNumbers: fi,
+          publishedAt: DateTime.tryParse(record['publishedAt']?.toString() ?? '') ?? DateTime.now(),
+        );
+
+        final liveClaims = await WinnerVerificationEngine.verifyDrawFromDatabase(result: model);
+        if (liveClaims.isNotEmpty) {
+          await DatabaseService.instance.saveWinningClaimsBatch(liveClaims);
+          partySummary = await DatabaseService.instance.getWinningClaimsGroupedByParty(drawId);
+        }
+      }
+
+      if (mounted) {
+        setState(() {
+          _historyPartySummaryCache[drawId] = partySummary;
+          _expandedDrawIds.add(drawId);
+          _loadingPartySummaryDrawIds.remove(drawId);
+        });
+      }
+    } catch (e) {
+      debugPrint('Error fetching party details: $e');
+      if (mounted) {
+        setState(() => _loadingPartySummaryDrawIds.remove(drawId));
+      }
+    }
+  }
+
+  void _copyPartyHisab(String drawName, String drawDate, Map<String, dynamic> party) {
+    final buyer = party['buyerName'] ?? 'Party';
+    final wins = party['totalWins'] ?? 0;
+    final payout = party['totalPayout'] ?? 0.0;
+    final details = party['details'] ?? '';
+
+    final text = '''
+🏆 LOTTERY WINNING INAM SUMMARY 🏆
+━━━━━━━━━━━━━━━━━━━━
+📅 Date: $drawDate
+⏰ Draw: $drawName
+👤 Party: $buyer
+🎟️ Total Winning Tickets: $wins
+💰 Total Winning Payout: ₹${NumberFormat('#,##,##0', 'en_IN').format(payout)}
+━━━━━━━━━━━━━━━━━━━━
+Winning Breakdown:
+$details
+━━━━━━━━━━━━━━━━━━━━
+Generated by OpsCore Pro
+'''.trim();
+
+    Clipboard.setData(ClipboardData(text: text));
+    _showSnackbar('📋 Party Hisab copied for $buyer!', AppColors.success);
   }
 
   // ── 5th Prize Bulk Paste Parser ──────────────────────────────────────────────
@@ -384,168 +595,183 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
       final result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
         allowedExtensions: ['pdf', 'txt', 'csv', 'png', 'jpg'],
+        allowMultiple: true,
         withData: true,
       );
 
-      if (result != null && result.files.isNotEmpty) {
+      if (result == null || result.files.isEmpty) return;
+
+      // Case 1: Single File Picked
+      if (result.files.length == 1) {
         final file = result.files.first;
-        String? extractedText;
-
-        if (file.path != null && (file.name.toLowerCase().endsWith('.txt') || file.name.toLowerCase().endsWith('.csv'))) {
-          try {
-            extractedText = await File(file.path!).readAsString();
-          } catch (_) {}
-        } else if (file.bytes != null && (file.name.toLowerCase().endsWith('.txt') || file.name.toLowerCase().endsWith('.csv'))) {
-          extractedText = utf8.decode(file.bytes!, allowMalformed: true);
-        }
-
-        // If file text extracted, parse directly using Dart Regex engine
-        if (extractedText != null && extractedText.trim().isNotEmpty) {
-          _bulkPasteCtrl.text = extractedText;
-          _parseBulkTextPaste();
+        if (file.path == null && file.bytes == null) {
+          _showSnackbar('File could not be accessed', AppColors.error);
           return;
         }
 
-        // 1. Try bundled Node Standalone PDF Parser (Zero Python Needed)
-        LotterySambadResultModel? parsed;
-        if (file.path != null && file.name.toLowerCase().endsWith('.pdf')) {
-          try {
-            // First try via local WhatsApp Engine REST API if online
-            final uri = Uri.parse('http://127.0.0.1:4000/api/parse-pdf');
-            final httpReq = await HttpClient().postUrl(uri);
-            httpReq.headers.contentType = ContentType.json;
-            httpReq.write(jsonEncode({'filePath': file.path!}));
-            final httpRes = await httpReq.close();
-            if (httpRes.statusCode == 200) {
-              final respBody = await httpRes.transform(utf8.decoder).join();
-              final decoded = jsonDecode(respBody);
-              if (decoded['success'] == true) {
-                parsed = LotterySambadResultModel(
-                  drawId: DateTime.now().millisecondsSinceEpoch.toString(),
-                  drawName: _selectedShift,
-                  drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
-                  drawTimeStr: _selectedShift,
-                  firstPrize: decoded['firstPrize'] ?? '',
-                  consolationPrize: decoded['consolationPrize'] ?? '',
-                  secondPrizeNumbers: List<String>.from(decoded['secondPrizeNumbers'] ?? []),
-                  thirdPrizeNumbers: List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
-                  fourthPrizeNumbers: List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
-                  fifthPrizeNumbers: List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
-                  publishedAt: DateTime.now(),
-                );
-              }
-            }
-          } catch (_) {}
+        _showSnackbar('📄 Scanning "${file.name}"...', AppColors.primary);
 
-          // Fallback to executing bundled node.exe parse_pdf.js
-          if (parsed == null) {
-            try {
-              final exeDir = File(Platform.resolvedExecutable).parent.path;
-              final nodeCandidates = [
-                '$exeDir\\whatsapp_engine\\node.exe',
-                'whatsapp_engine\\node.exe',
-                'node.exe',
-                'node',
-              ];
-              final scriptCandidates = [
-                '$exeDir\\whatsapp_engine\\parse_pdf.js',
-                'whatsapp_engine\\parse_pdf.js',
-                'parse_pdf.js',
-              ];
-              String? nodeBin;
-              for (final n in nodeCandidates) {
-                if (File(n).existsSync() || n == 'node') {
-                  nodeBin = n;
-                  break;
-                }
-              }
-              String? scriptPath;
-              for (final s in scriptCandidates) {
-                if (File(s).existsSync()) {
-                  scriptPath = s;
-                  break;
-                }
-              }
+        final parsed = await PdfResultParserService.instance.parseSingleFile(
+          filePath: file.path ?? file.name,
+          fileBytes: file.bytes,
+          defaultShift: _selectedShift,
+          defaultDate: _selectedDate,
+        );
 
-              if (nodeBin != null && scriptPath != null) {
-                final runRes = await Process.run(nodeBin, [scriptPath, file.path!]);
-                if (runRes.exitCode == 0 && runRes.stdout.toString().trim().isNotEmpty) {
-                  final decoded = jsonDecode(runRes.stdout.toString().trim());
-                  parsed = LotterySambadResultModel(
-                    drawId: DateTime.now().millisecondsSinceEpoch.toString(),
-                    drawName: _selectedShift,
-                    drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
-                    drawTimeStr: _selectedShift,
-                    firstPrize: decoded['firstPrize'] ?? '',
-                    consolationPrize: decoded['consolationPrize'] ?? '',
-                    secondPrizeNumbers: List<String>.from(decoded['secondPrizeNumbers'] ?? []),
-                    thirdPrizeNumbers: List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
-                    fourthPrizeNumbers: List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
-                    fifthPrizeNumbers: List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
-                    publishedAt: DateTime.now(),
-                  );
-                }
-              }
-            } catch (e) {
-              debugPrint('Node PDF parse error: $e');
-            }
-          }
-
-          // Fallback to Python (if available on system)
-          if (parsed == null || (parsed.firstPrize.isEmpty && parsed.secondPrizeNumbers.isEmpty)) {
-            try {
-              final exeDir = File(Platform.resolvedExecutable).parent.path;
-              final pyScriptCandidates = [
-                '$exeDir\\scripts\\pdf_sambad_parser.py',
-                'scripts\\pdf_sambad_parser.py',
-                '${Directory.current.path}\\scripts\\pdf_sambad_parser.py',
-              ];
-              String? pyScript;
-              for (final p in pyScriptCandidates) {
-                if (File(p).existsSync()) {
-                  pyScript = p;
-                  break;
-                }
-              }
-
-              if (pyScript != null) {
-                ProcessResult pyResult;
-                try {
-                  pyResult = await Process.run('python', [pyScript, file.path!]);
-                } catch (_) {
-                  pyResult = await Process.run('python3', [pyScript, file.path!]);
-                }
-
-                if (pyResult.exitCode == 0 && pyResult.stdout.toString().trim().isNotEmpty) {
-                  final decoded = jsonDecode(pyResult.stdout.toString().trim());
-                  final p = LotterySambadResultModel(
-                    drawId: DateTime.now().millisecondsSinceEpoch.toString(),
-                    drawName: _selectedShift,
-                    drawDateStr: DateFormat('dd/MM/yyyy').format(_selectedDate),
-                    drawTimeStr: _selectedShift,
-                    firstPrize: decoded['firstPrize'] ?? '',
-                    consolationPrize: decoded['consolationPrize'] ?? '',
-                    secondPrizeNumbers: List<String>.from(decoded['secondPrizeNumbers'] ?? []),
-                    thirdPrizeNumbers: List<String>.from(decoded['thirdPrizeNumbers'] ?? []),
-                    fourthPrizeNumbers: List<String>.from(decoded['fourthPrizeNumbers'] ?? []),
-                    fifthPrizeNumbers: List<String>.from(decoded['fifthPrizeNumbers'] ?? []),
-                    publishedAt: DateTime.now(),
-                  );
-                  if (p.firstPrize.isNotEmpty || p.secondPrizeNumbers.isNotEmpty) {
-                    parsed = p;
-                  }
-                }
-              }
-            } catch (_) {}
-          }
-        }
-
-        if (parsed != null && (parsed.firstPrize.isNotEmpty || parsed.secondPrizeNumbers.isNotEmpty || parsed.fifthPrizeNumbers.isNotEmpty) && mounted) {
+        if (parsed != null &&
+            (parsed.firstPrize.isNotEmpty ||
+                parsed.secondPrizeNumbers.isNotEmpty ||
+                parsed.fifthPrizeNumbers.isNotEmpty) &&
+            mounted) {
           _populateFromModel(parsed);
+          await _recalculateWinners(parsed);
           await _saveResult(silent: true);
-          _showSnackbar('⚡ PDF Extracted & Auto-Filled (${parsed.fifthPrizeNumbers.length} numbers)!', AppColors.success);
+          await _fetchHistoryRecords();
+          _showSnackbar(
+              '⚡ PDF Scanned & Auto-Saved (${parsed.fifthPrizeNumbers.length} numbers) for ${parsed.drawName}!',
+              AppColors.success);
         } else {
-          _showSnackbar('⚠️ PDF text could not be extracted. Please use "Bulk Paste" to copy-paste result text!', AppColors.warning);
+          _showSnackbar(
+              '⚠️ PDF text could not be extracted from "${file.name}". Please ensure the PDF is valid or use Bulk Paste.',
+              AppColors.warning);
+        }
+        return;
+      }
+
+      // Case 2: MULTIPLE Files Picked (Batch Scan & Auto-Verify)
+      final validPaths = result.files
+          .where((f) => f.path != null && f.path!.isNotEmpty)
+          .map((f) => f.path!)
+          .toList();
+
+      if (validPaths.isEmpty) {
+        _showSnackbar('No accessible file paths found in selected files.', AppColors.error);
+        return;
+      }
+
+      int currentProgress = 0;
+      final totalFiles = validPaths.length;
+      String currentFileName = result.files.first.name;
+      void Function(void Function())? updateDialogState;
+      BuildContext? progressDialogCtx;
+
+      if (!mounted) return;
+
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        useRootNavigator: true,
+        builder: (dlgCtx) {
+          progressDialogCtx = dlgCtx;
+          return StatefulBuilder(
+            builder: (context, setDlgState) {
+              updateDialogState = setDlgState;
+              final progressPercent = totalFiles > 0 ? (currentProgress / totalFiles) : 0.0;
+              return AlertDialog(
+                backgroundColor: AppColors.surfaceContainerHigh,
+                shape: RoundedRectangleBorder(
+                  borderRadius: AppDecorations.radiusLg,
+                  side: const BorderSide(color: AppColors.border),
+                ),
+                title: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.withAlpha(40),
+                        borderRadius: AppDecorations.radiusDefault,
+                      ),
+                      child: const Icon(Icons.picture_as_pdf, color: Colors.amber),
+                    ),
+                    const SizedBox(width: 12),
+                    const Text(
+                      'Scanning Multiple PDFs...',
+                      style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 16),
+                    ),
+                  ],
+                ),
+                content: SizedBox(
+                  width: 400,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      LinearProgressIndicator(
+                        value: progressPercent,
+                        backgroundColor: Colors.white12,
+                        valueColor: const AlwaysStoppedAnimation<Color>(Colors.amber),
+                        minHeight: 6,
+                      ),
+                      const SizedBox(height: 16),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Text(
+                            'Processing $currentProgress of $totalFiles files',
+                            style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white),
+                          ),
+                          Text(
+                            '${(progressPercent * 100).toInt()}%',
+                            style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.amber),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        currentFileName,
+                        style: const TextStyle(color: Colors.white54, fontSize: 12),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+
+      final report = await PdfResultParserService.instance.parseAndSaveMultipleFiles(
+        files: result.files,
+        defaultShift: _selectedShift,
+        defaultDate: _selectedDate,
+        onProgress: (current, total, filename) {
+          currentProgress = current;
+          currentFileName = filename;
+          if (updateDialogState != null) {
+            updateDialogState!(() {});
+          }
+        },
+      );
+
+      // Close progress dialog immediately so no popup remains on screen
+      if (progressDialogCtx != null && progressDialogCtx!.mounted) {
+        Navigator.of(progressDialogCtx!).pop();
+      } else if (mounted && Navigator.of(context, rootNavigator: true).canPop()) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+
+      // Refresh records & display last scanned result in editor
+      if (report.parsedResults.isNotEmpty && mounted) {
+        final last = report.parsedResults.last;
+        _populateFromModel(last);
+        await _recalculateWinners(last);
+        await _fetchHistoryRecords();
+      }
+
+      // Show clean snackbar notification without any blocking popup
+      if (mounted) {
+        if (report.failureCount == 0) {
+          _showSnackbar(
+            '✅ Batch Scan Complete: ${report.successCount} PDFs scanned & saved! Found ${report.totalWinnersFound} winners (₹${NumberFormat('#,##,##0', 'en_IN').format(report.totalPayoutAmount)})',
+            AppColors.success,
+          );
+        } else {
+          _showSnackbar(
+            '⚠️ Saved ${report.successCount} of ${report.totalFiles} PDFs (${report.failureCount} failed). Found ${report.totalWinnersFound} winners.',
+            AppColors.warning,
+          );
         }
       }
     } catch (e) {
@@ -597,7 +823,10 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
     }
 
     final resultModel = _buildCurrentModel();
-    _recalculateWinners(resultModel);
+    await _recalculateWinners(resultModel);
+    if (_latestClaims.isNotEmpty) {
+      await DatabaseService.instance.saveWinningClaimsBatch(_latestClaims);
+    }
     await DatabaseService.instance.insertLotteryResult(resultModel,
         verifiedWinnersCount: _verifiedWinnersCount,
         totalPayoutAmount: _totalPayoutAmount);
@@ -625,7 +854,12 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
   void _onPrizeChanged() {
     final firstP = _firstPrizeCtrl.text.trim();
     if (firstP.isEmpty) return;
-    _recalculateWinners(_buildCurrentModel(overrideId: 'temp'));
+    _prizeChangeDebounce?.cancel();
+    _prizeChangeDebounce = Timer(const Duration(milliseconds: 250), () {
+      if (mounted) {
+        _recalculateWinners(_buildCurrentModel(overrideId: 'temp'));
+      }
+    });
   }
 
   @override
@@ -1381,6 +1615,85 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
             ],
           ),
           const SizedBox(height: 8),
+          // 👥 Party-wise Winning Summary Header
+          Builder(
+            builder: (context) {
+              final partyMap = <String, (int count, double total)>{};
+              for (final w in _verifiedWinnersList) {
+                final b = (w['buyerName']?.toString().trim().isNotEmpty ?? false)
+                    ? w['buyerName'].toString().trim()
+                    : 'Counter / Direct';
+                final amt = (w['prizeAmount'] as num?)?.toDouble() ?? 0.0;
+                final cur = partyMap[b] ?? (0, 0.0);
+                partyMap[b] = (cur.$1 + 1, cur.$2 + amt);
+              }
+              if (partyMap.isEmpty) return const SizedBox.shrink();
+
+              return Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.black.withAlpha(90),
+                  borderRadius: AppDecorations.radiusDefault,
+                  border: Border.all(color: Colors.greenAccent.withAlpha(70)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.groups_rounded, size: 15, color: Colors.amberAccent),
+                        const SizedBox(width: 6),
+                        const Text(
+                          'PARTY-WISE WINNING SUMMARY',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.amberAccent),
+                        ),
+                        const Spacer(),
+                        Text(
+                          '${partyMap.length} Party(s) Won',
+                          style: const TextStyle(fontSize: 11, color: Colors.white54),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: partyMap.entries.map((e) {
+                        return Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: AppColors.primaryContainer.withAlpha(80),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(color: AppColors.primary.withAlpha(120)),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.person, size: 13, color: Colors.white70),
+                              const SizedBox(width: 4),
+                              Text(e.key, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.white)),
+                              const SizedBox(width: 6),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                                decoration: BoxDecoration(color: Colors.green.withAlpha(60), borderRadius: BorderRadius.circular(10)),
+                                child: Text('${e.value.$1} wins', style: const TextStyle(fontSize: 10, color: Colors.greenAccent, fontWeight: FontWeight.bold)),
+                              ),
+                              const SizedBox(width: 6),
+                              Text(
+                                '₹${NumberFormat('#,##,##0', 'en_IN').format(e.value.$2)}',
+                                style: const TextStyle(fontWeight: FontWeight.w900, color: Colors.amberAccent, fontSize: 12),
+                              ),
+                            ],
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
           // Table Header
           Container(
             padding:
@@ -1502,7 +1815,29 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
 
   // ── History Tab ─────────────────────────────────────────────────────────────
   Widget _buildHistoryView() {
-    final allSales = ref.watch(ticketSalesViewModelProvider).sales;
+    if (_isLoadingHistory) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(80),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              CircularProgressIndicator(color: AppColors.primary),
+              SizedBox(height: 18),
+              Text(
+                'Loading Result History & Audit Records...',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+              ),
+              SizedBox(height: 6),
+              Text(
+                'Please wait, loading historical draws from database...',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
 
     // Filtered records
     final filtered = _historyRecords.where((r) {
@@ -1558,17 +1893,44 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
               ),
               const SizedBox(width: 12),
               OutlinedButton.icon(
-                onPressed: () {
-                  ref.read(ticketSalesViewModelProvider.notifier).loadSales();
-                  _fetchHistoryRecords();
-                  _showSnackbar('🔄 Re-verified results with all latest bookings!', AppColors.success);
-                },
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('Refresh & Re-verify', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                onPressed: _isReverifyingHistory ? null : _reverifyAllHistoryRecords,
+                icon: _isReverifyingHistory
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.refresh, size: 16),
+                label: Text(
+                  _isReverifyingHistory ? 'Re-verifying...' : 'Refresh & Re-verify',
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                ),
               ),
             ],
           ),
           const SizedBox(height: 16),
+          if (_isReverifyingHistory)
+            Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              decoration: BoxDecoration(
+                color: AppColors.primaryContainer.withAlpha(90),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.primary),
+              ),
+              child: const Row(
+                children: [
+                  SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                  ),
+                  SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Auditing & re-verifying historical results against live bookings...',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                    ),
+                  ),
+                ],
+              ),
+            ),
 
           if (filtered.isEmpty)
             const Center(
@@ -1594,34 +1956,18 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
               itemBuilder: (context, index) {
                 final record = filtered[index];
 
-                // Dynamically re-verify winners against latest live ticket bookings!
-                final sec = (record['secondPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
-                final th = (record['thirdPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
-                final fo = (record['fourthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
-                final fi = (record['fifthPrizeNumbers']?.toString() ?? '').split(',').where((e) => e.isNotEmpty).toList();
+                // O(1) Instant Lookup from verified historical cache
 
-                final model = LotterySambadResultModel(
-                  drawId: record['id']?.toString() ?? '',
-                  drawName: record['drawName']?.toString() ?? record['drawTimeStr']?.toString() ?? '1 PM',
-                  drawDateStr: record['drawDateStr']?.toString() ?? '',
-                  drawTimeStr: record['drawTimeStr']?.toString() ?? '',
-                  firstPrize: record['firstPrize']?.toString() ?? '',
-                  consolationPrize: record['consolationPrize']?.toString() ?? '',
-                  secondPrizeNumbers: sec,
-                  thirdPrizeNumbers: th,
-                  fourthPrizeNumbers: fo,
-                  fifthPrizeNumbers: fi,
-                  publishedAt: DateTime.tryParse(record['publishedAt']?.toString() ?? '') ?? DateTime.now(),
-                );
-
-                final liveClaims = WinnerVerificationEngine.verifyWinners(
-                  result: model,
-                  soldTickets: allSales,
-                );
-
-                final liveWinnerCount = liveClaims.length;
-                final liveTotalPayout = liveClaims.fold<double>(0.0, (acc, c) => acc + c.prizeAmount);
+                final recId = record['id']?.toString() ?? '';
+                final cached = _historyWinnerCache[recId];
+                final savedCount = int.tryParse(record['verifiedWinnersCount']?.toString() ?? '') ?? 0;
+                final savedPayout = double.tryParse(record['totalPayoutAmount']?.toString() ?? '') ?? 0.0;
+                final liveWinnerCount = cached?.$1 ?? savedCount;
+                final liveTotalPayout = cached?.$2 ?? savedPayout;
                 final hasWinners = liveWinnerCount > 0;
+                final partySummary = _historyPartySummaryCache[recId];
+                final isExpanded = _expandedDrawIds.contains(recId);
+                final isLoadingParty = _loadingPartySummaryDrawIds.contains(recId);
 
                 return GlassCard(
                   child: Column(
@@ -1793,6 +2139,148 @@ class _ResultEntryScreenState extends ConsumerState<ResultEntryScreen>
                           ),
                         ],
                       ),
+                      if (hasWinners) ...[
+                        const SizedBox(height: 10),
+                        const Divider(height: 1, color: Colors.white12),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: isLoadingParty ? null : () => _fetchPartyDetailsForDraw(record),
+                              icon: isLoadingParty
+                                  ? const SizedBox(
+                                      width: 12,
+                                      height: 12,
+                                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                                    )
+                                  : Icon(
+                                      isExpanded ? Icons.keyboard_arrow_up : Icons.people_alt_outlined,
+                                      size: 14,
+                                      color: Colors.greenAccent,
+                                    ),
+                              label: Text(
+                                isLoadingParty
+                                    ? 'Loading Party Data...'
+                                    : (isExpanded ? 'Hide Party Details' : 'View Party Winning Details'),
+                                style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.greenAccent),
+                              ),
+                              style: OutlinedButton.styleFrom(
+                                side: BorderSide(color: Colors.greenAccent.withAlpha(120)),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                                visualDensity: VisualDensity.compact,
+                              ),
+                            ),
+                            if (partySummary != null && partySummary.isNotEmpty) ...[
+                              const SizedBox(width: 10),
+                              Text(
+                                '${partySummary.length} Party(s) Won',
+                                style: const TextStyle(fontSize: 11, color: Colors.white70, fontWeight: FontWeight.bold),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (isExpanded) ...[
+                          const SizedBox(height: 10),
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withAlpha(120),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.greenAccent.withAlpha(70)),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  children: [
+                                    const Icon(Icons.groups_rounded, size: 16, color: Colors.greenAccent),
+                                    const SizedBox(width: 6),
+                                    const Text(
+                                      'PARTY-WISE WINNING INAM BREAKDOWN',
+                                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.greenAccent),
+                                    ),
+                                    const Spacer(),
+                                    Text(
+                                      'Total Payout: ₹${NumberFormat('#,##,##0', 'en_IN').format(liveTotalPayout)}',
+                                      style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.amberAccent),
+                                    ),
+                                  ],
+                                ),
+                                const SizedBox(height: 10),
+                                if (partySummary == null || partySummary.isEmpty)
+                                  const Text('No party claims found for this draw.', style: TextStyle(color: Colors.white54, fontSize: 11))
+                                else
+                                  ...partySummary.map((p) {
+                                    final pName = p['buyerName']?.toString() ?? 'Party';
+                                    final pWins = p['totalWins'] ?? 0;
+                                    final pPayout = (p['totalPayout'] as num?)?.toDouble() ?? 0.0;
+                                    final pDetails = p['details']?.toString() ?? '';
+                                    return Container(
+                                      margin: const EdgeInsets.only(bottom: 8),
+                                      padding: const EdgeInsets.all(10),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withAlpha(8),
+                                        borderRadius: BorderRadius.circular(6),
+                                        border: Border.all(color: Colors.white12),
+                                      ),
+                                      child: Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: [
+                                          Row(
+                                            children: [
+                                              const Icon(Icons.person, size: 14, color: Colors.amberAccent),
+                                              const SizedBox(width: 6),
+                                              Text(
+                                                pName,
+                                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                                              ),
+                                              const Spacer(),
+                                              Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.green.withAlpha(50),
+                                                  borderRadius: BorderRadius.circular(10),
+                                                ),
+                                                child: Text(
+                                                  '$pWins ticket(s) won',
+                                                  style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: Colors.greenAccent),
+                                                ),
+                                              ),
+                                              const SizedBox(width: 10),
+                                              Text(
+                                                '₹${NumberFormat('#,##,##0', 'en_IN').format(pPayout)}',
+                                                style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 13, color: Colors.amberAccent),
+                                              ),
+                                              const SizedBox(width: 8),
+                                              IconButton(
+                                                icon: const Icon(Icons.copy_rounded, size: 15, color: Colors.cyanAccent),
+                                                tooltip: 'Copy Party Hisab',
+                                                constraints: const BoxConstraints(),
+                                                padding: const EdgeInsets.all(4),
+                                                onPressed: () => _copyPartyHisab(
+                                                  record['drawTimeStr']?.toString() ?? record['drawName']?.toString() ?? '',
+                                                  record['drawDateStr']?.toString() ?? '',
+                                                  p,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                          if (pDetails.isNotEmpty) ...[
+                                            const SizedBox(height: 6),
+                                            Text(
+                                              pDetails,
+                                              style: const TextStyle(fontSize: 11, color: Colors.white70, fontFamily: 'monospace'),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    );
+                                  }),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ],
                     ],
                   ),
                 );

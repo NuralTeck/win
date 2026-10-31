@@ -1,7 +1,12 @@
+import 'dart:io';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
 import '../../../core/database/database_service.dart';
 import '../models/lottery_sambad_result_model.dart';
 import '../utils/party_hisab_settlement_engine.dart';
@@ -114,11 +119,13 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
   }
 
   Future<void> _pickSingleDate() async {
+    final first = _selectedDate.isBefore(DateTime(2020)) ? _selectedDate : DateTime(2020);
+    final last = _selectedDate.isAfter(DateTime(2035)) ? _selectedDate : DateTime(2035);
     final picked = await showDatePicker(
       context: context,
       initialDate: _selectedDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2035),
+      firstDate: first,
+      lastDate: last,
       builder: (context, child) {
         return Theme(
           data: ThemeData.dark().copyWith(
@@ -174,6 +181,299 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
         _rangeEnd = picked.end;
       });
       _loadData();
+    }
+  }
+
+  bool get _isTodayActive => !_isCustomRange && DateUtils.isSameDay(_selectedDate, DateTime.now());
+
+  bool get _is7DaysActive {
+    if (!_isCustomRange || _rangeStart == null || _rangeEnd == null) return false;
+    final now = DateTime.now();
+    final sevenDaysAgo = now.subtract(const Duration(days: 6));
+    return DateUtils.isSameDay(_rangeStart!, sevenDaysAgo) && DateUtils.isSameDay(_rangeEnd!, now);
+  }
+
+  bool get _isMonthActive {
+    if (!_isCustomRange || _rangeStart == null || _rangeEnd == null) return false;
+    final now = DateTime.now();
+    final monthStart = DateTime(now.year, now.month, 1);
+    return DateUtils.isSameDay(_rangeStart!, monthStart) && DateUtils.isSameDay(_rangeEnd!, now);
+  }
+
+  void _setPeriodToday() {
+    setState(() {
+      _isCustomRange = false;
+      _selectedDate = DateTime.now();
+    });
+    _loadData();
+  }
+
+  void _setPeriodLast7Days() {
+    final now = DateTime.now();
+    setState(() {
+      _isCustomRange = true;
+      _rangeStart = now.subtract(const Duration(days: 6));
+      _rangeEnd = now;
+    });
+    _loadData();
+  }
+
+  void _setPeriodThisMonth() {
+    final now = DateTime.now();
+    setState(() {
+      _isCustomRange = true;
+      _rangeStart = DateTime(now.year, now.month, 1);
+      _rangeEnd = now;
+    });
+    _loadData();
+  }
+
+  Future<void> _exportPeriodHisabCsv(String periodType) async {
+    final now = DateTime.now();
+    DateTime sDate;
+    DateTime eDate = now;
+    String periodTitle;
+
+    if (periodType == '7days') {
+      sDate = now.subtract(const Duration(days: 6));
+      periodTitle = 'Last_7_Days_${DateFormat('ddMMM').format(sDate)}_to_${DateFormat('ddMMM').format(eDate)}';
+    } else if (periodType == 'monthly') {
+      sDate = DateTime(now.year, now.month, 1);
+      periodTitle = 'Monthly_${DateFormat('MMMM_yyyy').format(now)}';
+    } else if (periodType == 'custom') {
+      final picked = await showDateRangePicker(
+        context: context,
+        initialDateRange: DateTimeRange(
+          start: _rangeStart ?? now.subtract(const Duration(days: 6)),
+          end: _rangeEnd ?? now,
+        ),
+        firstDate: DateTime(2020),
+        lastDate: DateTime(2035),
+      );
+      if (picked == null) return;
+      sDate = picked.start;
+      eDate = picked.end;
+      periodTitle = 'Custom_${DateFormat('ddMMM').format(sDate)}_to_${DateFormat('ddMMM').format(eDate)}';
+    } else {
+      // current active view
+      if (_isCustomRange && _rangeStart != null && _rangeEnd != null) {
+        sDate = _rangeStart!;
+        eDate = _rangeEnd!;
+        periodTitle = 'Range_${DateFormat('ddMMM').format(sDate)}_to_${DateFormat('ddMMM').format(eDate)}';
+      } else {
+        sDate = _selectedDate;
+        eDate = _selectedDate;
+        periodTitle = 'Daily_${DateFormat('dd_MM_yyyy').format(_selectedDate)}';
+      }
+    }
+
+    setState(() {
+      _isCustomRange = true;
+      _rangeStart = sDate;
+      _rangeEnd = eDate;
+    });
+    _loadData();
+
+    await Future.delayed(const Duration(milliseconds: 250));
+    if (!mounted) return;
+
+    final voucherState = ref.read(voucherViewModelProvider);
+    final unsoldState = ref.read(unsoldViewModelProvider);
+    final sStr = DateFormat('yyyy-MM-dd').format(sDate);
+    final eStr = DateFormat('yyyy-MM-dd').format(eDate);
+
+    final summaries = PartyHisabSettlementEngine.calculatePartySettlements(
+      vouchers: voucherState.vouchers,
+      unsoldList: unsoldState.unsoldList,
+      selectedDate: sStr,
+      startDate: sStr,
+      endDate: eStr,
+      selectedShift: _selectedShift,
+      allResults: _allLotteryResults,
+    );
+
+    final filtered = _selectedParty == 'ALL'
+        ? summaries
+        : summaries.where((s) => s.partyName.trim().toLowerCase() == _selectedParty.trim().toLowerCase()).toList();
+
+    await _exportHisabToCsv(
+      summaries: filtered,
+      periodTitle: periodTitle,
+    );
+  }
+
+  Future<void> _exportHisabToCsv({
+    required List<PartyHisabSummary> summaries,
+    required String periodTitle,
+  }) async {
+    if (summaries.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('⚠️ Is period ka koi Hisab data nahi mila export karne ke liye!'), backgroundColor: Colors.amber),
+        );
+      }
+      return;
+    }
+
+    final csvBuffer = StringBuffer();
+    // Excel UTF-8 BOM
+    csvBuffer.write('\uFEFF');
+
+    csvBuffer.writeln('========================================================================================');
+    csvBuffer.writeln('LOTTERY SAMBAD PARTY HISAB REPORT • $periodTitle');
+    csvBuffer.writeln('Shift: $_selectedShift | Party Filter: $_selectedParty');
+    csvBuffer.writeln('Generated: ${DateFormat('dd-MM-yyyy HH:mm').format(DateTime.now())}');
+    csvBuffer.writeln('========================================================================================');
+    csvBuffer.writeln('');
+
+    // Summary Section
+    csvBuffer.writeln('Party Name,Dealer,Total Vouchers (In),Voucher Amount (Rs),Unsold Ret Qty,Unsold Amount (Rs),Net Sold Qty,Net Sale Amount (Rs),Inam Prize Claims (Rs),Net Payable Amount (Rs)');
+
+    for (final s in summaries) {
+      csvBuffer.writeln(
+        '"${s.partyName}",'
+        '"${s.dealerName ?? '-'}",'
+        '${s.totalVouchers},'
+        '${s.totalVoucherAmount.toStringAsFixed(2)},'
+        '${s.totalUnsold},'
+        '${s.totalUnsoldAmount.toStringAsFixed(2)},'
+        '${s.totalNetSold},'
+        '${s.totalNetAmount.toStringAsFixed(2)},'
+        '${s.totalCustomerWinAmount.toStringAsFixed(2)},'
+        '${s.finalNetPayable.toStringAsFixed(2)}',
+      );
+    }
+
+    // Totals
+    final totVou = summaries.fold(0, (sum, s) => sum + s.totalVouchers);
+    final totVouAmt = summaries.fold(0.0, (sum, s) => sum + s.totalVoucherAmount);
+    final totUns = summaries.fold(0, (sum, s) => sum + s.totalUnsold);
+    final totUnsAmt = summaries.fold(0.0, (sum, s) => sum + s.totalUnsoldAmount);
+    final totNet = summaries.fold(0, (sum, s) => sum + s.totalNetSold);
+    final totNetAmt = summaries.fold(0.0, (sum, s) => sum + s.totalNetAmount);
+    final totWin = summaries.fold(0.0, (sum, s) => sum + s.totalCustomerWinAmount);
+    final totPay = summaries.fold(0.0, (sum, s) => sum + s.finalNetPayable);
+
+    csvBuffer.writeln('');
+    csvBuffer.writeln('TOTAL GRAND SUMMARY,,$totVou,${totVouAmt.toStringAsFixed(2)},$totUns,${totUnsAmt.toStringAsFixed(2)},$totNet,${totNetAmt.toStringAsFixed(2)},${totWin.toStringAsFixed(2)},${totPay.toStringAsFixed(2)}');
+    csvBuffer.writeln('');
+
+    // Detailed Series Breakdown Section
+    csvBuffer.writeln('----------------------------------------------------------------------------------------');
+    csvBuffer.writeln('DETAILED SERIES BREAKDOWN BY PARTY');
+    csvBuffer.writeln('Party Name,Series,Voucher In Qty,Unsold Ret Qty,Net Sold Qty,Rate (Rs),Net Amount (Rs)');
+
+    for (final s in summaries) {
+      for (final ser in s.seriesHisabList) {
+        csvBuffer.writeln(
+          '"${s.partyName}",'
+          '"Ser ${ser.series}",'
+          '${ser.voucherQty},'
+          '${ser.unsoldQty},'
+          '${ser.netSoldQty},'
+          '${ser.rate.toStringAsFixed(2)},'
+          '${ser.netAmount.toStringAsFixed(2)}',
+        );
+      }
+    }
+
+    // Detailed Date Breakdowns if multi-day
+    final hasMultiDates = summaries.any((s) => s.dateBreakdowns.length > 1);
+    if (hasMultiDates) {
+      csvBuffer.writeln('');
+      csvBuffer.writeln('----------------------------------------------------------------------------------------');
+      csvBuffer.writeln('DATE & DRAW SHIFT TIMINGS BREAKDOWN');
+      csvBuffer.writeln('Party Name,Date,Draw Shift,Voucher In Qty,Unsold Ret Qty,Net Sold Qty,Net Amount (Rs),Inam Wins (Rs)');
+      for (final s in summaries) {
+        for (final db in s.dateBreakdowns) {
+          for (final sb in db.shifts) {
+            if (sb.hasEntry || sb.customerWins.isNotEmpty) {
+              csvBuffer.writeln(
+                '"${s.partyName}",'
+                '"${db.formattedDate}",'
+                '"${sb.shift}",'
+                '${sb.totalVouchers},'
+                '${sb.totalUnsold},'
+                '${sb.totalNetSold},'
+                '${sb.totalNetAmount.toStringAsFixed(2)},'
+                '${sb.totalCustomerWinAmount.toStringAsFixed(2)}',
+              );
+            }
+          }
+        }
+      }
+    }
+
+    // Winning Claims Section
+    final allWins = summaries.expand((s) => s.customerWins.map((w) => MapEntry(s.partyName, w))).toList();
+    if (allWins.isNotEmpty) {
+      csvBuffer.writeln('');
+      csvBuffer.writeln('----------------------------------------------------------------------------------------');
+      csvBuffer.writeln('WINNING INAM CLAIMS');
+      csvBuffer.writeln('Party Name,Prize Tier,Ticket Number,Series,Sem,Base Inam (Rs),Super Bonus (Rs),Incentive (Rs),Total Inam (Rs)');
+      for (final entry in allWins) {
+        final pName = entry.key;
+        final w = entry.value;
+        final base = w.baseAmount * w.seriesCount;
+        final bonus = w.superBonus * w.seriesCount;
+        final inc = w.specialIncentive * w.seriesCount;
+        csvBuffer.writeln(
+          '"$pName",'
+          '"${w.prizeTier}",'
+          '"${w.ticketNumber}",'
+          '"${w.ticketSeries}",'
+          '${w.seriesCount},'
+          '${base.toStringAsFixed(0)},'
+          '${bonus.toStringAsFixed(0)},'
+          '${inc.toStringAsFixed(0)},'
+          '${w.prizeAmount.toStringAsFixed(0)}',
+        );
+      }
+    }
+
+    // Save File
+    final cleanTitle = periodTitle.replaceAll(RegExp(r'[^\w\d]'), '_');
+    final filename = 'Party_Hisab_${cleanTitle}_${DateFormat('yyyyMMdd_HHmm').format(DateTime.now())}.csv';
+
+    String? savePath;
+    try {
+      savePath = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Party Hisab (CSV / Excel)',
+        fileName: filename,
+        type: FileType.custom,
+        allowedExtensions: ['csv'],
+      );
+    } catch (_) {}
+
+    if (savePath == null) {
+      try {
+        final docsDir = await getApplicationDocumentsDirectory();
+        savePath = p.join(docsDir.path, filename);
+      } catch (_) {
+        savePath = p.join(Directory.systemTemp.path, filename);
+      }
+    }
+
+    final file = File(savePath);
+    await file.writeAsString(csvBuffer.toString(), encoding: utf8);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Successfully exported $periodTitle Hisab to:\n$savePath'),
+          backgroundColor: const Color(0xFF166534),
+          duration: const Duration(seconds: 5),
+          action: SnackBarAction(
+            label: 'OPEN FOLDER',
+            textColor: Colors.amberAccent,
+            onPressed: () {
+              try {
+                Process.run('explorer.exe', ['/select,', savePath!]);
+              } catch (_) {}
+            },
+          ),
+        ),
+      );
     }
   }
 
@@ -294,59 +594,125 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
                   ),
                   const SizedBox(width: 14),
 
-                  // 1. Single Date Picker Button
+                  // 1. Quick Period Selector: Today | 7 Days | Monthly | Custom Range
+                  Container(
+                    height: 28,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF0F172A),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: const Color(0xFF334155)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Today Button
+                        InkWell(
+                          onTap: _setPeriodToday,
+                          borderRadius: const BorderRadius.horizontal(left: Radius.circular(5)),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                            color: _isTodayActive ? const Color(0xFF0284C7) : Colors.transparent,
+                            child: Text(
+                              'Today',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: _isTodayActive ? Colors.white : Colors.grey.shade400,
+                              ),
+                            ),
+                          ),
+                        ),
+                        Container(width: 1, height: 16, color: const Color(0xFF334155)),
+                        // 7 Days Button
+                        InkWell(
+                          onTap: _setPeriodLast7Days,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                            color: _is7DaysActive ? const Color(0xFF0284C7) : Colors.transparent,
+                            child: Text(
+                              '7 Days',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: _is7DaysActive ? Colors.white : Colors.grey.shade400,
+                              ),
+                            ),
+                          ),
+                        ),
+                        Container(width: 1, height: 16, color: const Color(0xFF334155)),
+                        // Monthly Button
+                        InkWell(
+                          onTap: _setPeriodThisMonth,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                            color: _isMonthActive ? const Color(0xFF0284C7) : Colors.transparent,
+                            child: Text(
+                              'Monthly',
+                              style: TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.bold,
+                                color: _isMonthActive ? Colors.white : Colors.grey.shade400,
+                              ),
+                            ),
+                          ),
+                        ),
+                        Container(width: 1, height: 16, color: const Color(0xFF334155)),
+                        // Custom Date Range Picker
+                        InkWell(
+                          onTap: _pickCustomRange,
+                          borderRadius: const BorderRadius.horizontal(right: Radius.circular(5)),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                            color: (_isCustomRange && !_is7DaysActive && !_isMonthActive) ? const Color(0xFF0284C7) : Colors.transparent,
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.date_range_rounded,
+                                  size: 12,
+                                  color: (_isCustomRange && !_is7DaysActive && !_isMonthActive) ? Colors.white : const Color(0xFF38BDF8),
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  (_isCustomRange && _rangeStart != null && _rangeEnd != null)
+                                      ? '${DateFormat('dd/MM').format(_rangeStart!)} ➔ ${DateFormat('dd/MM').format(_rangeEnd!)}'
+                                      : 'Custom 📅',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: (_isCustomRange && !_is7DaysActive && !_isMonthActive) ? Colors.white : Colors.grey.shade400,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+
+                  // 2. Specific Single Date Button (when user wants to pick an exact day)
                   InkWell(
                     onTap: _pickSingleDate,
                     borderRadius: BorderRadius.circular(6),
                     child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
                       decoration: BoxDecoration(
-                        color: !_isCustomRange ? const Color(0xFF0284C7) : const Color(0xFF1E293B),
+                        color: !_isCustomRange ? const Color(0xFF1E293B) : const Color(0xFF0F172A),
                         borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: !_isCustomRange ? const Color(0xFF38BDF8) : const Color(0xFF334155)),
+                        border: Border.all(color: !_isCustomRange ? const Color(0xFF38BDF8).withAlpha(150) : const Color(0xFF334155)),
                       ),
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.calendar_today_rounded, size: 12, color: !_isCustomRange ? Colors.white : const Color(0xFF38BDF8)),
-                          const SizedBox(width: 5),
+                          Icon(Icons.calendar_today_rounded, size: 11, color: !_isCustomRange ? const Color(0xFF38BDF8) : Colors.grey),
+                          const SizedBox(width: 4),
                           Text(
                             DateFormat('dd-MM-yyyy').format(_selectedDate),
                             style: TextStyle(
-                              color: !_isCustomRange ? Colors.white : Colors.grey.shade300,
-                              fontSize: 11,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-
-                  // 2. Custom Range Picker Button (Directly opens DateRangePicker)
-                  InkWell(
-                    onTap: _pickCustomRange,
-                    borderRadius: BorderRadius.circular(6),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-                      decoration: BoxDecoration(
-                        color: _isCustomRange ? const Color(0xFF0284C7) : const Color(0xFF1E293B),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: _isCustomRange ? const Color(0xFF38BDF8) : const Color(0xFF334155)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.date_range_rounded, size: 13, color: _isCustomRange ? Colors.white : const Color(0xFF38BDF8)),
-                          const SizedBox(width: 5),
-                          Text(
-                            _isCustomRange && _rangeStart != null && _rangeEnd != null
-                                ? '${DateFormat('dd/MM').format(_rangeStart!)} ➔ ${DateFormat('dd/MM/yy').format(_rangeEnd!)}'
-                                : '📅 Custom Range',
-                            style: TextStyle(
-                              color: _isCustomRange ? Colors.white : Colors.grey.shade300,
-                              fontSize: 11,
+                              color: !_isCustomRange ? Colors.white : Colors.grey.shade400,
+                              fontSize: 10.5,
                               fontWeight: FontWeight.bold,
                             ),
                           ),
@@ -374,16 +740,19 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
                       ),
                     ),
                   ],
-                  const SizedBox(width: 10),
+                  const SizedBox(width: 8),
 
                   // 3. Shift Dropdown
                   Container(
                     height: 28,
                     padding: const EdgeInsets.symmetric(horizontal: 8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF1E293B),
+                      color: _selectedShift == 'ALL' ? const Color(0xFF0369A1).withAlpha(80) : const Color(0xFF1E293B),
                       borderRadius: BorderRadius.circular(6),
-                      border: Border.all(color: const Color(0xFF38BDF8).withAlpha(120)),
+                      border: Border.all(
+                        color: _selectedShift == 'ALL' ? const Color(0xFF38BDF8) : const Color(0xFF38BDF8).withAlpha(120),
+                        width: _selectedShift == 'ALL' ? 1.4 : 1.0,
+                      ),
                     ),
                     child: DropdownButtonHideUnderline(
                       child: DropdownButton<String>(
@@ -392,10 +761,10 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
                         icon: const Icon(Icons.arrow_drop_down, color: Color(0xFF38BDF8), size: 16),
                         style: const TextStyle(color: Color(0xFF38BDF8), fontWeight: FontWeight.bold, fontSize: 11),
                         items: const [
+                          DropdownMenuItem(value: 'ALL', child: Text('⚡ All Shifts (1 PM + 6 PM + 8 PM)')),
                           DropdownMenuItem(value: 'Dear 1 PM', child: Text('Dear 1 PM')),
                           DropdownMenuItem(value: 'Dear 6 PM', child: Text('Dear 6 PM')),
                           DropdownMenuItem(value: 'Dear 8 PM', child: Text('Dear 8 PM')),
-                          DropdownMenuItem(value: 'ALL', child: Text('All Shifts')),
                         ],
                         onChanged: (val) {
                           if (val != null) {
@@ -583,21 +952,35 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
 
             // ── BODY: PARTY CARDS GRID ────────────────────────
             Expanded(
-              child: filteredSummaries.isEmpty
-                  ? Center(
+              child: (voucherState.isLoading || unsoldState.isLoading)
+                  ? const Center(
                       child: Column(
                         mainAxisSize: MainAxisSize.min,
                         children: [
-                          Icon(Icons.inventory_2_outlined, size: 48, color: Colors.grey.shade700),
-                          const SizedBox(height: 12),
+                          CircularProgressIndicator(color: Color(0xFF38BDF8)),
+                          SizedBox(height: 14),
                           Text(
-                            'No Voucher or Unsold records found for $dateStr ($_selectedShift)',
-                            style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                            'Loading and compiling Hisab data...',
+                            style: TextStyle(color: Color(0xFF38BDF8), fontSize: 13, fontWeight: FontWeight.bold),
                           ),
                         ],
                       ),
                     )
-                  : ListView.builder(
+                  : filteredSummaries.isEmpty
+                      ? Center(
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.inventory_2_outlined, size: 48, color: Colors.grey.shade700),
+                              const SizedBox(height: 12),
+                              Text(
+                                'No Voucher or Unsold records found for $dateStr ($_selectedShift)',
+                                style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
+                              ),
+                            ],
+                          ),
+                        )
+                      : ListView.builder(
                       padding: const EdgeInsets.all(16),
                       itemCount: filteredSummaries.length,
                       itemBuilder: (ctx, idx) {
@@ -630,10 +1013,85 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
                     label: const Text('COPY ALL PARTIES TEXT', style: TextStyle(color: Color(0xFF38BDF8), fontWeight: FontWeight.bold, fontSize: 11)),
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(color: Color(0xFF38BDF8)),
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
                     ),
                   ),
+                  const SizedBox(width: 8),
+
+                  // Export CSV / Excel Popup Menu Button
+                  PopupMenuButton<String>(
+                    tooltip: 'Export Hisab to Excel / CSV',
+                    onSelected: (val) => _exportPeriodHisabCsv(val),
+                    color: const Color(0xFF0F172A),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(8),
+                      side: const BorderSide(color: Color(0xFF10B981), width: 1.2),
+                    ),
+                    itemBuilder: (ctx) => [
+                      const PopupMenuItem(
+                        value: '7days',
+                        child: Row(
+                          children: [
+                            Icon(Icons.calendar_view_week_rounded, size: 16, color: Color(0xFF10B981)),
+                            SizedBox(width: 8),
+                            Text('Export 7 Days Hisab (Excel/CSV)', style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'monthly',
+                        child: Row(
+                          children: [
+                            Icon(Icons.calendar_month_rounded, size: 16, color: Color(0xFF38BDF8)),
+                            SizedBox(width: 8),
+                            Text('Export Monthly Hisab (This Month)', style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      const PopupMenuItem(
+                        value: 'custom',
+                        child: Row(
+                          children: [
+                            Icon(Icons.date_range_rounded, size: 16, color: Color(0xFFFBBF24)),
+                            SizedBox(width: 8),
+                            Text('Export Custom Date Range...', style: TextStyle(color: Colors.white, fontSize: 11.5, fontWeight: FontWeight.bold)),
+                          ],
+                        ),
+                      ),
+                      const PopupMenuDivider(height: 1),
+                      const PopupMenuItem(
+                        value: 'current',
+                        child: Row(
+                          children: [
+                            Icon(Icons.file_download_outlined, size: 16, color: Color(0xFFA5B4FC)),
+                            SizedBox(width: 8),
+                            Text('Export Current View (Excel/CSV)', style: TextStyle(color: Colors.white, fontSize: 11.5)),
+                          ],
+                        ),
+                      ),
+                    ],
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                      decoration: BoxDecoration(
+                        gradient: const LinearGradient(colors: [Color(0xFF059669), Color(0xFF10B981)]),
+                        borderRadius: BorderRadius.circular(6),
+                        boxShadow: [BoxShadow(color: const Color(0xFF10B981).withAlpha(100), blurRadius: 6)],
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.table_view_rounded, size: 14, color: Colors.white),
+                          SizedBox(width: 6),
+                          Text('EXPORT EXCEL / CSV', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11)),
+                          SizedBox(width: 4),
+                          Icon(Icons.arrow_drop_down, size: 16, color: Colors.white),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+
                   // Export PDF Button (Party or All Parties)
                   ElevatedButton.icon(
                     onPressed: () async {
@@ -650,7 +1108,7 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: const Color(0xFF0284C7),
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
                     ),
                   ),
@@ -764,7 +1222,25 @@ class _GetFileHisabDialogState extends ConsumerState<GetFileHisabDialog> {
                 ),
                 const SizedBox(width: 6),
 
-                // 3. Preview Modal
+                // 3. Export Single Party CSV
+                ElevatedButton.icon(
+                  onPressed: () => _exportHisabToCsv(
+                    summaries: [summary],
+                    periodTitle: '${summary.partyName}_Hisab_${DateFormat('dd_MM_yyyy').format(_selectedDate)}',
+                  ),
+                  icon: const Icon(Icons.table_chart_outlined, size: 12),
+                  label: const Text('CSV', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 10)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: const Color(0xFF059669),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    minimumSize: const Size(50, 26),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+                  ),
+                ),
+                const SizedBox(width: 6),
+
+                // 4. Preview Modal
                 OutlinedButton.icon(
                   onPressed: () => _previewPartyTextModal(summary),
                   icon: const Icon(Icons.remove_red_eye_outlined, size: 12, color: Colors.grey),

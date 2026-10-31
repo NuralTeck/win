@@ -7,6 +7,7 @@ class UniversalSeriesPriceModel {
   final double ticketPrice;  // Price in ₹
   final bool isActive;
   final DateTime createdAt;
+  final int? colorValue;     // 32-bit ARGB color value (e.g. 0xFF2DD4BF)
 
   const UniversalSeriesPriceModel({
     required this.id,
@@ -14,6 +15,7 @@ class UniversalSeriesPriceModel {
     required this.ticketPrice,
     this.isActive = true,
     required this.createdAt,
+    this.colorValue,
   });
 
   // Getter compatibility for any legacy callers
@@ -27,6 +29,7 @@ class UniversalSeriesPriceModel {
     double? ticketPrice,
     bool? isActive,
     DateTime? createdAt,
+    int? colorValue,
   }) {
     return UniversalSeriesPriceModel(
       id: id ?? this.id,
@@ -34,6 +37,7 @@ class UniversalSeriesPriceModel {
       ticketPrice: ticketPrice ?? this.ticketPrice,
       isActive: isActive ?? this.isActive,
       createdAt: createdAt ?? this.createdAt,
+      colorValue: colorValue ?? this.colorValue,
     );
   }
 }

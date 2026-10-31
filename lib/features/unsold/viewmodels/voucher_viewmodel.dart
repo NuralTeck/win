@@ -1,3 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/database/database_service.dart';
 import '../models/voucher_model.dart';
@@ -35,8 +39,42 @@ class VoucherState {
 class VoucherViewModel extends StateNotifier<VoucherState> {
   final DatabaseService _db = DatabaseService.instance;
 
-  VoucherViewModel() : super(const VoucherState()) {
-    loadVouchers();
+  VoucherViewModel() : super(const VoucherState());
+
+  Future<void> _saveEmergencyJsonBackup(List<VoucherModel> items) async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File(p.join(dir.path, 'emergency_vouchers_backup.json'));
+      List<dynamic> existing = [];
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        if (content.trim().isNotEmpty) {
+          existing = jsonDecode(content) as List<dynamic>;
+        }
+      }
+      existing.addAll(items.map((v) => v.toMap()));
+      await file.writeAsString(jsonEncode(existing), flush: true);
+    } catch (_) {}
+  }
+
+  Future<void> _syncEmergencyJsonBackup() async {
+    try {
+      final dir = await getApplicationDocumentsDirectory();
+      final file = File(p.join(dir.path, 'emergency_vouchers_backup.json'));
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        if (content.trim().isNotEmpty) {
+          final List<dynamic> list = jsonDecode(content);
+          if (list.isNotEmpty) {
+            final maps = list.cast<Map<String, dynamic>>();
+            final success = await _db.insertVouchersBatch(maps);
+            if (success) {
+              await file.delete();
+            }
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> loadVouchers({
@@ -48,6 +86,9 @@ class VoucherViewModel extends StateNotifier<VoucherState> {
   }) async {
     state = state.copyWith(isLoading: true);
     try {
+      // 🔄 Auto-recover any emergency backup vouchers in background
+      _syncEmergencyJsonBackup();
+
       final rows = await _db.getVouchers(
         date: date,
         startDate: startDate,
@@ -69,11 +110,22 @@ class VoucherViewModel extends StateNotifier<VoucherState> {
         state = state.copyWith(
           vouchers: [voucher, ...state.vouchers],
         );
+        return true;
       }
-      return success;
+      // 🛡️ Fallback: Save to emergency JSON backup file if DB write fails
+      await _saveEmergencyJsonBackup([voucher]);
+      state = state.copyWith(
+        vouchers: [voucher, ...state.vouchers],
+        errorMessage: '⚠️ DB Offline. Saved to Emergency Offline JSON Backup!',
+      );
+      return true;
     } catch (e) {
-      state = state.copyWith(errorMessage: e.toString());
-      return false;
+      await _saveEmergencyJsonBackup([voucher]);
+      state = state.copyWith(
+        vouchers: [voucher, ...state.vouchers],
+        errorMessage: '⚠️ DB Offline ($e). Saved to Emergency JSON Backup!',
+      );
+      return true;
     }
   }
 
@@ -86,11 +138,22 @@ class VoucherViewModel extends StateNotifier<VoucherState> {
         state = state.copyWith(
           vouchers: [...newVouchers, ...state.vouchers],
         );
+        return true;
       }
-      return success;
+      // 🛡️ Fallback: Save to emergency JSON backup file if DB write fails
+      await _saveEmergencyJsonBackup(newVouchers);
+      state = state.copyWith(
+        vouchers: [...newVouchers, ...state.vouchers],
+        errorMessage: '⚠️ DB Offline. Saved to Emergency Offline JSON Backup!',
+      );
+      return true;
     } catch (e) {
-      state = state.copyWith(errorMessage: e.toString());
-      return false;
+      await _saveEmergencyJsonBackup(newVouchers);
+      state = state.copyWith(
+        vouchers: [...newVouchers, ...state.vouchers],
+        errorMessage: '⚠️ DB Offline ($e). Saved to Emergency JSON Backup!',
+      );
+      return true;
     }
   }
 

@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:window_manager/window_manager.dart';
@@ -19,29 +20,50 @@ void main() async {
   }
 
   // Initialize Local SQLite Database & Supabase Cloud
-  await DatabaseService.instance.database;
-  await SupabaseService.instance.initialize();
+  try {
+    await DatabaseService.instance.database;
+  } catch (e) {
+    debugPrint('⚠️ Local SQLite initialization note: $e');
+  }
 
+  try {
+    await SupabaseService.instance.initialize();
+  } catch (e) {
+    debugPrint('⚠️ Supabase initialization note: $e');
+  }
 
+  // Desktop Window Management Configuration (Windows / Linux / MacOS only)
+  if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    try {
+      await windowManager.ensureInitialized();
 
-  // Desktop Window Management Configuration
-  await windowManager.ensureInitialized();
-  
-  const WindowOptions windowOptions = WindowOptions(
-    size: Size(1440, 900),
-    minimumSize: Size(1280, 800),
-    center: true,
-    backgroundColor: Colors.transparent,
-    skipTaskbar: false,
-    titleBarStyle: TitleBarStyle.normal,
-    title: 'PhantomManagement | Operations & Hisab Management Platform',
-  );
-  
-  windowManager.waitUntilReadyToShow(windowOptions, () async {
-    await windowManager.maximize();
-    await windowManager.show();
-    await windowManager.focus();
-  });
+      const WindowOptions windowOptions = WindowOptions(
+        size: Size(1440, 900),
+        minimumSize: Size(1280, 800),
+        center: true,
+        backgroundColor: Color(0xFF0F172A),
+        skipTaskbar: false,
+        titleBarStyle: TitleBarStyle.normal,
+        title: 'PhantomManagement | Operations & Hisab Management Platform',
+      );
+
+      windowManager.waitUntilReadyToShow(windowOptions, () async {
+        await windowManager.show();
+        await windowManager.maximize();
+        await windowManager.focus();
+      });
+    } catch (e) {
+      debugPrint('⚠️ Window manager initialization note: $e');
+    }
+
+    // Fallback direct show to guarantee window visibility on Windows desktop
+    Future.microtask(() async {
+      try {
+        await windowManager.show();
+        await windowManager.focus();
+      } catch (_) {}
+    });
+  }
 
   runApp(
     const ProviderScope(

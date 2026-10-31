@@ -35,9 +35,7 @@ class UnsoldState {
 class UnsoldViewModel extends StateNotifier<UnsoldState> {
   final DatabaseService _db = DatabaseService.instance;
 
-  UnsoldViewModel() : super(const UnsoldState()) {
-    loadUnsold();
-  }
+  UnsoldViewModel() : super(const UnsoldState());
 
   Future<void> loadUnsold({
     String? date,

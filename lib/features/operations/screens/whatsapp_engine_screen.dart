@@ -7,6 +7,7 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/services/whatsapp_engine_service.dart';
 import '../../../core/database/database_service.dart';
+import '../../bookings/widgets/pattern_resolver_dialog.dart';
 
 class WhatsAppEngineScreen extends StatefulWidget {
   const WhatsAppEngineScreen({super.key});
@@ -282,7 +283,7 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    'High-Throughput Ingestion | Supabase Bulk Buffer (2s / 100 msgs)',
+                    'High-Throughput Ingestion | Local SQLite Ingestion Buffer',
                     style: AppTypography.bodySm.copyWith(
                       color: AppColors.textSecondary,
                       fontSize: 12,
@@ -347,6 +348,32 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
                   ],
                 ),
               ),
+              // Review Unparsed Messages Button
+              SizedBox(
+                height: 40,
+                child: OutlinedButton.icon(
+                  onPressed: () {
+                    showDialog(
+                      context: context,
+                      builder: (ctx) => const PatternResolverDialog(),
+                    );
+                  },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.amberAccent,
+                    side: const BorderSide(color: Colors.amberAccent),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: AppDecorations.radiusDefault,
+                    ),
+                  ),
+                  icon: const Icon(Icons.rate_review_rounded, size: 18),
+                  label: const Text(
+                    'UNPARSED REVIEW QUEUE',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
               // Switch WhatsApp Account Button (Visible when bot is running or connected)
               if (isOnline) ...[
                 SizedBox(
@@ -370,6 +397,42 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
                 ),
                 const SizedBox(width: 10),
               ],
+              // RELOAD / RESTART ENGINE SERVER BUTTON (Kills old process & reloads fresh code)
+              SizedBox(
+                height: 40,
+                child: OutlinedButton.icon(
+                  onPressed: _isLoadingAction
+                      ? null
+                      : () async {
+                          setState(() => _isLoadingAction = true);
+                          await _engineService.restartEngineServer();
+                          if (mounted) {
+                            setState(() => _isLoadingAction = false);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('🔄 WhatsApp Engine Server Reloaded with Fresh Code! Uptime reset.'),
+                                backgroundColor: Color(0xFF0284C7),
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          }
+                        },
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: Colors.cyanAccent,
+                    side: const BorderSide(color: Colors.cyanAccent),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: AppDecorations.radiusDefault,
+                    ),
+                  ),
+                  icon: const Icon(Icons.restart_alt_rounded, size: 18),
+                  label: const Text(
+                    'RELOAD ENGINE',
+                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11, letterSpacing: 0.5),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
               // START / STOP Toggle Button
               SizedBox(
                 height: 40,
@@ -963,8 +1026,8 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
                   final picked = await showDatePicker(
                     context: context,
                     initialDate: _botLockedDate,
-                    firstDate: DateTime.now().subtract(const Duration(days: 30)),
-                    lastDate: DateTime.now().add(const Duration(days: 30)),
+                    firstDate: DateTime(1970),
+                    lastDate: DateTime(2999),
                     builder: (context, child) {
                       return Theme(
                         data: Theme.of(context).copyWith(
@@ -973,6 +1036,9 @@ class _WhatsAppEngineScreenState extends State<WhatsAppEngineScreen> {
                             onPrimary: Colors.black,
                             surface: Color(0xFF1E293B),
                             onSurface: Colors.white,
+                          ),
+                          dialogTheme: const DialogThemeData(
+                            backgroundColor: Color(0xFF0F172A),
                           ),
                         ),
                         child: child!,

@@ -5,6 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:file_picker/file_picker.dart';
 import '../../../core/constants/app_constants.dart';
+import '../../../core/database/database_service.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
@@ -18,6 +19,7 @@ import '../../shared/models/draw_model.dart';
 import '../models/lottery_sambad_result_model.dart';
 import '../models/winning_claim_model.dart';
 import '../utils/lottery_result_parser.dart';
+import '../services/pdf_result_parser_service.dart';
 import '../../bookings/viewmodels/ticket_sales_viewmodel.dart';
 
 class DrawsScreen extends ConsumerWidget {
@@ -58,23 +60,82 @@ class DrawsScreen extends ConsumerWidget {
                 final result = await FilePicker.platform.pickFiles(
                   type: FileType.custom,
                   allowedExtensions: ['pdf', 'txt', 'csv'],
+                  allowMultiple: true,
                   withData: true,
                 );
                 if (result != null && result.files.isNotEmpty) {
-                  final file = result.files.first;
-                  String content = '';
-                  if (file.bytes != null) {
-                    content = utf8.decode(file.bytes!, allowMalformed: true);
-                  } else if (file.path != null) {
-                    content = await File(file.path!).readAsString();
-                  }
-                  if (content.isNotEmpty) {
-                    rawTextCtrl.text = content;
-                    updateParsedResult(content);
-                    messenger.showSnackBar(SnackBar(
-                      content: Text('File "${file.name}" loaded successfully!'),
-                      backgroundColor: AppColors.success,
-                    ));
+                  if (result.files.length == 1) {
+                    final file = result.files.first;
+                    // Check if PDF
+                    if (file.name.toLowerCase().endsWith('.pdf') && file.path != null) {
+                      final model = await PdfResultParserService.instance.parseSingleFile(
+                        filePath: file.path!,
+                        fileBytes: file.bytes,
+                        defaultShift: selectedDraw?.drawName,
+                      );
+                      if (model != null) {
+                        int winnerCount = 0;
+                        if (selectedDraw != null) {
+                          final soldTickets = ref.read(ticketSalesViewModelProvider).sales;
+                          final winners = ref.read(drawsViewModelProvider.notifier).publishResultAndCheckWinners(selectedDraw!.id, model, soldTickets);
+                          winnerCount = winners.length;
+                        } else {
+                          await DatabaseService.instance.insertLotteryResult(model);
+                        }
+
+                        // Close popup dialog immediately so user is not blocked
+                        if (dialogCtx.mounted && Navigator.of(dialogCtx).canPop()) {
+                          Navigator.of(dialogCtx).pop();
+                        }
+
+                        messenger.showSnackBar(SnackBar(
+                          content: Text('✅ PDF "${file.name}" scanned & published (${model.fifthPrizeNumbers.length} prizes, $winnerCount winners)!'),
+                          backgroundColor: AppColors.success,
+                          duration: const Duration(seconds: 4),
+                        ));
+                        return;
+                      }
+                    }
+
+                    // Plain text / CSV fallback
+                    String content = '';
+                    if (file.bytes != null) {
+                      content = utf8.decode(file.bytes!, allowMalformed: true);
+                    } else if (file.path != null) {
+                      content = await File(file.path!).readAsString();
+                    }
+                    if (content.isNotEmpty) {
+                      rawTextCtrl.text = content;
+                      updateParsedResult(content);
+                      messenger.showSnackBar(SnackBar(
+                        content: Text('File "${file.name}" loaded successfully!'),
+                        backgroundColor: AppColors.success,
+                      ));
+                    }
+                  } else {
+                    // Batch scan multiple PDFs
+                    final report = await PdfResultParserService.instance.parseAndSaveMultipleFiles(
+                      files: result.files,
+                      defaultShift: selectedDraw?.drawName,
+                    );
+
+                    // Close popup dialog immediately
+                    if (dialogCtx.mounted && Navigator.of(dialogCtx).canPop()) {
+                      Navigator.of(dialogCtx).pop();
+                    }
+
+                    if (report.parsedResults.isNotEmpty) {
+                      messenger.showSnackBar(SnackBar(
+                        content: Text('✅ Scanned & saved ${report.successCount} PDFs! Total Winners: ${report.totalWinnersFound}'),
+                        backgroundColor: AppColors.success,
+                        duration: const Duration(seconds: 4),
+                      ));
+                    } else {
+                      messenger.showSnackBar(SnackBar(
+                        content: const Text('⚠️ Could not extract results from the selected files.'),
+                        backgroundColor: AppColors.warning,
+                      ));
+                    }
                   }
                 }
               } catch (e) {
@@ -829,7 +890,7 @@ class DrawsScreen extends ConsumerWidget {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text('NAGALAND STATE LOTTERIES', style: AppTypography.titleLg.copyWith(fontWeight: FontWeight.w900, color: AppColors.primary)),
-                Text(result.drawName, style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.bold)),
+                Text('${result.drawName} • Draw Date: ${result.drawDateStr} • Time: ${result.drawTimeStr}', style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.bold)),
               ],
             ),
             IconButton(icon: const Icon(Icons.close, color: AppColors.textSecondary), onPressed: () { if (Navigator.canPop(dialogCtx)) Navigator.pop(dialogCtx); }),
@@ -973,6 +1034,14 @@ class DrawsScreen extends ConsumerWidget {
                   children: [
                     Text(d.drawName, style: AppTypography.bodySm.copyWith(fontWeight: FontWeight.w600, color: AppColors.textPrimary), overflow: TextOverflow.ellipsis),
                     Text('${d.schemeType} • ${d.conductedBy} • ${d.district}', style: AppTypography.labelSm.copyWith(color: AppColors.textSecondary.withAlpha(150)), overflow: TextOverflow.ellipsis),
+                    if (result != null) ...[
+                      const SizedBox(height: 3),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(color: const Color(0xFF1E1B4B), borderRadius: BorderRadius.circular(4), border: Border.all(color: const Color(0xFF818CF8))),
+                        child: Text('🎯 1st Prize Khula: ${result.firstPrize}', style: const TextStyle(color: Color(0xFFA5B4FC), fontWeight: FontWeight.bold, fontSize: 10)),
+                      ),
+                    ],
                   ],
                 ),
                 Text('₹${d.ticketPrice.toStringAsFixed(d.ticketPrice % 1 == 0 ? 0 : 2)}', style: AppTypography.bodySm.copyWith(fontWeight: FontWeight.w700, color: AppColors.tertiary)),

@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpsCore Cloud — Live Sessions & Remote Kill Switch</title>
+  
+  <!-- Modern Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
+  
+  <!-- Supabase CDN Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Luxury Glassmorphism Stylesheet -->
+  <link rel="stylesheet" href="styles.css?v=2.6">
+</head>
+<body>
+  <!-- Ambient Glassmorphism Radiant Glowing Orbs -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+
+  <div class="app-layout">
+    <!-- Top Global Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-logo">
+          <div class="logo-icon">🛡️</div>
+          <div class="brand-meta">
+            <h1>OPSCORE COMMAND CENTER</h1>
+            <span class="brand-sub">CLOUD ANTI-PIRACY & MASTER ADMIN CONSOLE</span>
+          </div>
+        </div>
+        <div class="live-pill" id="cloudStatusPill">
+          <div class="pulsing-dot"></div>
+          <span id="cloudStatusText">Connecting to Cloud...</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="system-clock" id="systemClock">--:--:-- --</div>
+        <button class="btn-refresh" id="btnManualRefresh" title="Click to refresh live data now">
+          <span class="icon">🔄</span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Top KPI Stats Row -->
+    <section class="kpi-grid">
+      <!-- KPI 1: Live Active Computers -->
+      <div class="kpi-card highlight-card">
+        <div class="kpi-icon-wrap bg-green">
+          <span class="kpi-icon">🟢</span>
+        </div>
+        <div class="kpi-details">
+          <span class="kpi-label">Active Software Instances</span>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiActiveCount">0</span>
+            <span class="kpi-badge online-pulse">ONLINE NOW</span>
+          </div>
+          <span class="kpi-foot" id="kpiActiveFoot">Live connected Windows PCs</span>
+        </div>
+      </div>
+
+      <!-- KPI 2: Total Registered Licenses -->
+      <div class="kpi-card">
+        <div class="kpi-icon-wrap bg-blue">
+          <span class="kpi-icon">👥</span>
+        </div>
+        <div class="kpi-details">
+          <span class="kpi-label">Authorized User Accounts</span>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiTotalSessions">0</span>
+          </div>
+          <span class="kpi-foot">Cloud licenses issued by Owner</span>
+        </div>
+      </div>
+
+      <!-- KPI 3: Remote Party Balance -->
+      <div class="kpi-card">
+        <div class="kpi-icon-wrap bg-purple">
+          <span class="kpi-icon">📊</span>
+        </div>
+        <div class="kpi-details">
+          <span class="kpi-label">Tracked Parties</span>
+          <div class="kpi-value-row">
+            <span class="kpi-value" id="kpiPartyCount">0</span>
+          </div>
+          <span class="kpi-foot">Active dealers & client parties</span>
+        </div>
+      </div>
+
+      <!-- KPI 4: Net Hisab Outstanding -->
+      <div class="kpi-card">
+        <div class="kpi-icon-wrap bg-yellow">
+          <span class="kpi-icon">💰</span>
+        </div>
+        <div class="kpi-details">
+          <span class="kpi-label">Net Hisab Outstanding</span>
+          <div class="kpi-value-row">
+            <span class="kpi-value currency" id="kpiTotalHisab">₹0</span>
+          </div>
+          <span class="kpi-foot">Live Cloud Balance</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Glassmorphic Multi-Page Navigation Bar -->
+    <nav class="nav-tabs-bar">
+      <a href="index.html" class="tab-btn active">
+        <span class="tab-icon">🖥️</span>
+        <span>Live Software Logins</span>
+        <span class="tab-counter" id="activeBadgeCount">0</span>
+      </a>
+      <a href="users.html" class="tab-btn">
+        <span class="tab-icon">👥</span>
+        <span>Users & Remote Licenses</span>
+        <span class="tab-counter" id="licensesBadgeCount">0</span>
+      </a>
+      <a href="hisab.html" class="tab-btn">
+        <span class="tab-icon">📊</span>
+        <span>Remote Party Hisab</span>
+        <span class="tab-counter" id="partyBadgeCount">0</span>
+      </a>
+      <a href="logs.html" class="tab-btn">
+        <span class="tab-icon">📜</span>
+        <span>Login Audit Trail</span>
+      </a>
+      <a href="settings.html" class="tab-btn">
+        <span class="tab-icon">⚙️</span>
+        <span>Cloud Setup & SQL</span>
+      </a>
+    </nav>
+
+    <!-- Main Live Sessions Content View -->
+    <main class="views-container">
+      <section class="tab-view active">
+        <div class="section-toolbar">
+          <div class="toolbar-title-group">
+            <h2>🖥️ Live Software Instances & Remote Kill Switch</h2>
+            <p>Real-time heartbeat monitoring of every machine currently running the software. Click <strong>Block & Lock</strong> to immediately freeze access.</p>
+          </div>
+          <div class="toolbar-actions">
+            <div class="auto-refresh-pill">
+              <span class="pulse-indicator"></span>
+              <span>Live Cloud Sync in: <strong id="refreshCountdown">10s</strong></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Connected Machines Grid -->
+        <div class="sessions-grid" id="liveSessionsGrid">
+          <div class="loading-state">
+            <div class="spinner"></div>
+            <p>Querying Supabase for active sessions & machines...</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Footer -->
+    <!-- Bottom Footer -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span>🔒 OpsCore Cloud Command Center • Remote License Management & Instant Kill Switch</span>
+      </div>
+      <div class="footer-right">
+        <span>Supabase Project: <code id="lblProjectRef">wagslwsfhbrcyakazibv</code></span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- User & Machine Session History Modal -->
+  <div class="modal-backdrop" id="userHistoryModal">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div class="modal-title-group">
+          <div class="modal-icon-box" id="modalUserIcon">💻</div>
+          <div>
+            <h3 id="modalUserName" style="font-size: 17px; font-weight: 700; color: #FFF; margin: 0;">User Session History</h3>
+            <div id="modalUserEmail" style="font-size: 12px; color: #38BDF8; font-family: monospace;">user@opscore.com</div>
+          </div>
+        </div>
+        <button class="modal-btn-close" id="btnCloseModal" title="Close Modal">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <!-- Summary Stats Grid -->
+        <div class="modal-kpis-grid">
+          <div class="modal-kpi-item">
+            <div class="modal-kpi-lbl">Current Status</div>
+            <div class="modal-kpi-val" id="modalStatusVal">🟢 LIVE</div>
+          </div>
+          <div class="modal-kpi-item">
+            <div class="modal-kpi-lbl">Machine Name</div>
+            <div class="modal-kpi-val" id="modalDeviceVal" style="font-size: 14px;">LAPTOP-17E57I3U</div>
+          </div>
+          <div class="modal-kpi-item">
+            <div class="modal-kpi-lbl">Total Online Time</div>
+            <div class="modal-kpi-val" id="modalTotalTimeVal" style="color: #34D399;">0s</div>
+          </div>
+          <div class="modal-kpi-item">
+            <div class="modal-kpi-lbl">Total Logins Recorded</div>
+            <div class="modal-kpi-val" id="modalTotalLoginsVal" style="color: #FBBF24;">0</div>
+          </div>
+        </div>
+
+        <!-- Sessions Log Table -->
+        <div>
+          <h4 style="font-size: 13px; font-weight: 600; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px;">
+            📜 Chronological Login Sessions & Activity
+          </h4>
+          <div style="border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 12px; overflow: hidden; background: rgba(10, 15, 30, 0.6);">
+            <table class="modal-history-table">
+              <thead>
+                <tr>
+                  <th>Login Time (IST)</th>
+                  <th>Last Ping / Logout</th>
+                  <th>Duration</th>
+                  <th>Device / OS</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="modalHistoryTableBody">
+                <tr>
+                  <td colspan="5" style="text-align: center; color: #64748B; padding: 20px;">
+                    Loading session history...
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <div id="modalFooterActions" style="display: flex; gap: 10px;">
+          <!-- Injected dynamically based on user state -->
+        </div>
+        <div>
+          <a href="logs.html" id="modalViewAuditLink" class="btn-action" style="background: rgba(56, 189, 248, 0.15); border: 1px solid rgba(56, 189, 248, 0.3); color: #38BDF8; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; padding: 8px 14px; border-radius: 8px; font-size: 12.5px;">
+            <span>📜 View in Full Audit Trail</span>
+          </a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notification Toast -->
+  <div class="toast" id="toast">Message notification</div>
+
+  <!-- Master Controller Script -->
+  <script src="app.js?v=2.6"></script>
+</body>
+</html>

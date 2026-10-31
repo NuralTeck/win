@@ -524,11 +524,13 @@ class _AnalyticsScreenState extends ConsumerState<AnalyticsScreen> {
                   // Calendar Date Picker Button
                   ElevatedButton.icon(
                     onPressed: () async {
+                      final first = _selectedDate.isBefore(DateTime(2020)) ? _selectedDate : DateTime(2020);
+                      final last = _selectedDate.isAfter(DateTime(2035)) ? _selectedDate : DateTime(2035);
                       final picked = await showDatePicker(
                         context: context,
                         initialDate: _selectedDate,
-                        firstDate: DateTime(2020),
-                        lastDate: DateTime(2030),
+                        firstDate: first,
+                        lastDate: last,
                       );
                       if (picked != null) {
                         setState(() {

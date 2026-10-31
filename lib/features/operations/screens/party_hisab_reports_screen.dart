@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:printing/printing.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../core/database/database_service.dart';
+import '../../../core/database/supabase_service.dart';
 import '../models/lottery_sambad_result_model.dart';
 import '../utils/party_hisab_settlement_engine.dart';
 import '../services/party_hisab_report_service.dart';
@@ -49,6 +50,8 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
   final List<String> _shiftList = ['Dear 1 PM', 'Dear 6 PM', 'Dear 8 PM', 'ALL'];
 
   List<LotterySambadResultModel> _allLotteryResults = [];
+  List<TicketSaleModel> _dbCustomerSales = [];
+  bool _isSyncingCloud = false;
 
   @override
   void initState() {
@@ -75,6 +78,9 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
           endDate: eStr,
           drawShift: shift,
         );
+        try {
+          _dbCustomerSales = await DatabaseService.instance.getTicketSalesByDateRange(_rangeStart!, _rangeEnd!);
+        } catch (_) {}
       } else {
         final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
         ref.read(voucherViewModelProvider.notifier).loadVouchers(
@@ -85,20 +91,28 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
           date: dateStr,
           drawShift: shift,
         );
+        try {
+          _dbCustomerSales = await DatabaseService.instance.getTicketSalesByDate(_selectedDate);
+        } catch (_) {}
       }
-      ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+      if (_activeCategory == MainHisabCategory.customerBookingHisab) {
+        ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+      }
       await _loadResultsFromDatabase();
+      if (mounted) setState(() {});
     } catch (e) {
       debugPrint('Error reloading hisab data: $e');
     }
   }
 
   Future<void> _pickSingleDate() async {
+    final first = _selectedDate.isBefore(DateTime(2020)) ? _selectedDate : DateTime(2020);
+    final last = _selectedDate.isAfter(DateTime(2035)) ? _selectedDate : DateTime(2035);
     final picked = await showDatePicker(
       context: context,
       initialDate: _selectedDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2035),
+      firstDate: first,
+      lastDate: last,
       builder: (context, child) {
         return Theme(
           data: ThemeData.dark().copyWith(
@@ -254,6 +268,8 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
 
     final dateStr = DateFormat('yyyy-MM-dd').format(_selectedDate);
 
+    final isPartyTab = _activeCategory == MainHisabCategory.partyUnsoldHisab;
+
     // Extract all distinct available series dynamically
     final Set<String> allSeriesSet = {'ALL'};
     for (final v in voucherState.vouchers) {
@@ -264,9 +280,11 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
       final s = u.series.trim();
       if (s.isNotEmpty) allSeriesSet.add(s);
     }
-    for (final s in ticketSalesState.sales) {
-      final ser = s.ticketSeries.trim();
-      if (ser.isNotEmpty) allSeriesSet.add(ser);
+    if (!isPartyTab) {
+      for (final s in ticketSalesState.sales) {
+        final ser = s.ticketSeries.trim();
+        if (ser.isNotEmpty) allSeriesSet.add(ser);
+      }
     }
     final availableSeriesList = allSeriesSet.toList()
       ..sort((a, b) {
@@ -294,60 +312,74 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
       ...drawsState.resultsMap.values,
     ];
 
-    // ── 1. PARTY UNSOLD HISAB CALCULATIONS ──────────────────────
-    final allPartySummaries = PartyHisabSettlementEngine.calculatePartySettlements(
-      vouchers: voucherState.vouchers,
-      unsoldList: unsoldState.unsoldList,
-      selectedDate: dateStr,
-      startDate: startStr,
-      endDate: endStr,
-      selectedShift: _selectedShift,
-      selectedSeries: _selectedSeries,
-      groupByDealer: _groupingView == HisabGroupingView.dealerConsolidated,
-      allResults: combinedResults,
-      lotteryResult: matchingResult,
-    );
+    // ── 1. PARTY UNSOLD HISAB CALCULATIONS (Evaluated ONLY when active tab is Party Hisab) ──────────────────────
+    final allPartySummaries = isPartyTab
+        ? PartyHisabSettlementEngine.calculatePartySettlements(
+            vouchers: voucherState.vouchers,
+            unsoldList: unsoldState.unsoldList,
+            selectedDate: dateStr,
+            startDate: startStr,
+            endDate: endStr,
+            selectedShift: _selectedShift,
+            selectedSeries: _selectedSeries,
+            groupByDealer: _groupingView == HisabGroupingView.dealerConsolidated,
+            allResults: combinedResults,
+            lotteryResult: matchingResult,
+          )
+        : const <PartyHisabSummary>[];
 
-    final partySourceFiltered = allPartySummaries.where((s) {
-      if (_sourceFilter == HisabSourceFilter.vouchersOnly) {
-        return s.totalVouchers > 0;
-      } else if (_sourceFilter == HisabSourceFilter.unsoldOnly) {
-        return s.totalUnsold > 0;
-      }
-      return true;
-    }).toList();
+    final partySourceFiltered = isPartyTab
+        ? allPartySummaries.where((s) {
+            if (_sourceFilter == HisabSourceFilter.vouchersOnly) {
+              return s.totalVouchers > 0;
+            } else if (_sourceFilter == HisabSourceFilter.unsoldOnly) {
+              return s.totalUnsold > 0;
+            }
+            return true;
+          }).toList()
+        : const <PartyHisabSummary>[];
 
-    final filteredPartySummaries = _searchQuery.isEmpty
-        ? partySourceFiltered
-        : partySourceFiltered.where((s) => s.partyName.toLowerCase().contains(_searchQuery.toLowerCase())).toList();
+    final filteredPartySummaries = isPartyTab
+        ? (_searchQuery.isEmpty
+            ? partySourceFiltered
+            : partySourceFiltered.where((s) => s.partyName.toLowerCase().contains(_searchQuery.toLowerCase())).toList())
+        : const <PartyHisabSummary>[];
 
-    // ── 2. CUSTOMER BOOKINGS HISAB CALCULATIONS ─────────────────
-    final filteredSales = ticketSalesState.sales.where((s) {
-      final sDateStr = DateFormat('yyyy-MM-dd').format(s.saleDate);
-      final matchesDate = (_isCustomRange && _rangeStart != null && _rangeEnd != null)
-          ? (s.saleDate.isAfter(_rangeStart!.subtract(const Duration(seconds: 1))) &&
-             s.saleDate.isBefore(_rangeEnd!.add(const Duration(days: 1))))
-          : sDateStr == dateStr;
-      final shift = BookingPdfService.instance.getDrawShift(s.drawName);
-      final matchesShift = _selectedShift == 'ALL' || shift == _selectedShift;
+    // ── 2. CUSTOMER BOOKINGS HISAB CALCULATIONS (Evaluated ONLY when active tab is Customer Sales) ─────────────────
+    final sourceSales = _dbCustomerSales.isNotEmpty ? _dbCustomerSales : ticketSalesState.sales;
+    final filteredSales = !isPartyTab
+        ? sourceSales.where((s) {
+            final sDateStr = DateFormat('yyyy-MM-dd').format(s.saleDate);
+            final dDateStr = DateFormat('yyyy-MM-dd').format(s.drawDate);
+            final matchesDate = (_isCustomRange && _rangeStart != null && _rangeEnd != null)
+                ? ((s.saleDate.isAfter(_rangeStart!.subtract(const Duration(seconds: 1))) &&
+                    s.saleDate.isBefore(_rangeEnd!.add(const Duration(days: 1)))) ||
+                   (s.drawDate.isAfter(_rangeStart!.subtract(const Duration(seconds: 1))) &&
+                    s.drawDate.isBefore(_rangeEnd!.add(const Duration(days: 1)))))
+                : (sDateStr == dateStr || dDateStr == dateStr);
+            final shift = BookingPdfService.instance.getDrawShift(s.drawName);
+            final matchesShift = _selectedShift == 'ALL' || shift == _selectedShift;
 
-      final serS = s.ticketSeries.replaceAll(RegExp(r'\D'), '');
-      final serF = _selectedSeries.replaceAll(RegExp(r'\D'), '');
-      final matchesSeries = _selectedSeries == 'ALL' ||
-          s.ticketSeries.trim().toUpperCase() == _selectedSeries.trim().toUpperCase() ||
-          (serS.isNotEmpty && serS == serF);
+            final serS = s.ticketSeries.replaceAll(RegExp(r'\D'), '');
+            final serF = _selectedSeries.replaceAll(RegExp(r'\D'), '');
+            final matchesSeries = _selectedSeries == 'ALL' ||
+                s.ticketSeries.trim().toUpperCase() == _selectedSeries.trim().toUpperCase() ||
+                (serS.isNotEmpty && serS == serF);
 
-      final matchesSearch = _searchQuery.isEmpty ||
-          s.buyerName.toLowerCase().contains(_searchQuery.toLowerCase()) ||
-          s.ticketNumber.toLowerCase().contains(_searchQuery.toLowerCase());
-      return matchesDate && matchesShift && matchesSeries && matchesSearch;
-    }).toList();
+            final matchesSearch = _searchQuery.isEmpty ||
+                s.buyerName.toLowerCase().contains(_searchQuery.toLowerCase()) ||
+                s.ticketNumber.toLowerCase().contains(_searchQuery.toLowerCase());
+            return matchesDate && matchesShift && matchesSeries && matchesSearch;
+          }).toList()
+        : const <TicketSaleModel>[];
 
     // Group customer sales by Buyer Name
     final Map<String, List<TicketSaleModel>> customerGrouped = {};
-    for (final sale in filteredSales) {
-      final buyer = sale.buyerName.trim().isNotEmpty ? sale.buyerName.trim() : 'Walk-in Customer';
-      customerGrouped.putIfAbsent(buyer, () => []).add(sale);
+    if (!isPartyTab) {
+      for (final sale in filteredSales) {
+        final buyer = sale.buyerName.trim().isNotEmpty ? sale.buyerName.trim() : 'Walk-in Customer';
+        customerGrouped.putIfAbsent(buyer, () => []).add(sale);
+      }
     }
 
     return Scaffold(
@@ -679,6 +711,31 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
                     ),
                   ),
+                  const SizedBox(width: 8),
+
+                  // ☁️ Sync Party Name & Hisab to Supabase Cloud
+                  ElevatedButton.icon(
+                    onPressed: _isSyncingCloud
+                        ? null
+                        : () => _syncHisabToSupabase(filteredPartySummaries, customerGrouped),
+                    icon: _isSyncingCloud
+                        ? const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.cloud_upload_rounded, size: 13),
+                    label: Text(
+                      _isSyncingCloud ? 'SYNCING...' : 'SYNC TO SUPABASE',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 10.5),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF0284C7),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                    ),
+                  ),
 
                   // 4. SERIES (FOURTH!)
                   if (availableSeriesList.length > 1) ...[
@@ -765,7 +822,17 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
   }) {
     final isSelected = _activeCategory == category;
     return InkWell(
-      onTap: () => setState(() => _activeCategory = category),
+      onTap: () {
+        if (_activeCategory != category) {
+          setState(() => _activeCategory = category);
+          if (category == MainHisabCategory.customerBookingHisab) {
+            final sales = ref.read(ticketSalesViewModelProvider).sales;
+            if (sales.isEmpty) {
+              ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+            }
+          }
+        }
+      },
       borderRadius: BorderRadius.circular(10),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -1570,7 +1637,7 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
                           runSpacing: 6,
                           children: summary.customerWins.map((w) {
                             return Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                               decoration: BoxDecoration(
                                 color: const Color(0xFF03140C),
                                 borderRadius: BorderRadius.circular(6),
@@ -1579,9 +1646,21 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
                               child: Row(
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF064E3B),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      '${w.displayDate} • ${w.displayTime}',
+                                      style: const TextStyle(color: Color(0xFF6EE7B7), fontSize: 10, fontWeight: FontWeight.w600),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
                                   Text(w.prizeTier, style: const TextStyle(color: Color(0xFF86EFAC), fontWeight: FontWeight.bold, fontSize: 11)),
                                   const SizedBox(width: 8),
-                                  Text('#${w.ticketNumber} (Ser ${w.ticketSeries})', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11.5, fontFamily: 'monospace')),
+                                  Text('#${w.ticketNumber} (Ser ${w.ticketSeries} x ${w.seriesCount} Sem)', style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 11.5, fontFamily: 'monospace')),
                                   const SizedBox(width: 8),
                                   Text('₹${w.prizeAmount.toStringAsFixed(0)}', style: const TextStyle(color: Color(0xFFFBBF24), fontWeight: FontWeight.w900, fontSize: 11.5)),
                                 ],
@@ -1770,68 +1849,138 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
                                   color: sh.hasEntry ? const Color(0xFF334155) : const Color(0xFF1E293B).withAlpha(80),
                                 ),
                               ),
-                              child: Row(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
-                                  Icon(
-                                    sh.canonicalShift == '1PM'
-                                        ? Icons.wb_sunny_outlined
-                                        : (sh.canonicalShift == '6PM' ? Icons.wb_twilight_rounded : Icons.nights_stay_outlined),
-                                    size: 14,
-                                    color: sh.hasEntry ? const Color(0xFF38BDF8) : Colors.grey.shade600,
-                                  ),
-                                  const SizedBox(width: 6),
-                                  SizedBox(
-                                    width: 90,
-                                    child: Text(
-                                      sh.shift,
-                                      style: TextStyle(
-                                        color: sh.hasEntry ? Colors.white : Colors.grey.shade600,
-                                        fontWeight: FontWeight.bold,
-                                        fontSize: 11,
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        sh.canonicalShift == '1PM'
+                                            ? Icons.wb_sunny_outlined
+                                            : (sh.canonicalShift == '6PM' ? Icons.wb_twilight_rounded : Icons.nights_stay_outlined),
+                                        size: 14,
+                                        color: sh.hasEntry ? const Color(0xFF38BDF8) : Colors.grey.shade600,
                                       ),
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-
-                                  if (!sh.hasEntry)
-                                    Text(
-                                      '⚪ Empty / No Entry',
-                                      style: TextStyle(color: Colors.grey.shade600, fontSize: 10.5, fontStyle: FontStyle.italic),
-                                    )
-                                  else ...[
-                                    Text(
-                                      'In: ${sh.totalVouchers} Nos',
-                                      style: const TextStyle(color: Color(0xFF93C5FD), fontSize: 10.5),
-                                    ),
-                                    const Text('  •  ', style: TextStyle(color: Color(0xFF475569))),
-                                    Text(
-                                      'Ret: ${sh.totalUnsold} Nos',
-                                      style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 10.5),
-                                    ),
-                                    const Text('  •  ', style: TextStyle(color: Color(0xFF475569))),
-                                    Text(
-                                      'Net: ${sh.totalNetSold} Nos',
-                                      style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.bold, fontSize: 10.5),
-                                    ),
-                                    const Spacer(),
-                                    Text(
-                                      '₹${sh.totalNetAmount.toStringAsFixed(2)}',
-                                      style: const TextStyle(color: Color(0xFFFBBF24), fontWeight: FontWeight.bold, fontSize: 11),
-                                    ),
-                                    if (sh.customerWins.isNotEmpty) ...[
-                                      const SizedBox(width: 8),
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                        decoration: BoxDecoration(
-                                          color: const Color(0xFF166534),
-                                          borderRadius: BorderRadius.circular(4),
-                                        ),
+                                      const SizedBox(width: 6),
+                                      SizedBox(
+                                        width: 90,
                                         child: Text(
-                                          '🏆 Inam: ₹${sh.totalCustomerWinAmount.toStringAsFixed(0)}',
-                                          style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 9.5),
+                                          sh.shift,
+                                          style: TextStyle(
+                                            color: sh.hasEntry ? Colors.white : Colors.grey.shade600,
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 11,
+                                          ),
                                         ),
                                       ),
+                                      const SizedBox(width: 8),
+
+                                      if (!sh.hasEntry)
+                                        Text(
+                                          '⚪ Empty / No Entry',
+                                          style: TextStyle(color: Colors.grey.shade600, fontSize: 10.5, fontStyle: FontStyle.italic),
+                                        )
+                                      else ...[
+                                        Text(
+                                          'In: ${sh.totalVouchers} Nos',
+                                          style: const TextStyle(color: Color(0xFF93C5FD), fontSize: 10.5),
+                                        ),
+                                        const Text('  •  ', style: TextStyle(color: Color(0xFF475569))),
+                                        Text(
+                                          'Ret: ${sh.totalUnsold} Nos',
+                                          style: const TextStyle(color: Color(0xFFFCA5A5), fontSize: 10.5),
+                                        ),
+                                        const Text('  •  ', style: TextStyle(color: Color(0xFF475569))),
+                                        Text(
+                                          'Net: ${sh.totalNetSold} Nos',
+                                          style: const TextStyle(color: Color(0xFF4ADE80), fontWeight: FontWeight.bold, fontSize: 10.5),
+                                        ),
+                                        const Spacer(),
+                                        Text(
+                                          '₹${sh.totalNetAmount.toStringAsFixed(2)}',
+                                          style: const TextStyle(color: Color(0xFFFBBF24), fontWeight: FontWeight.bold, fontSize: 11),
+                                        ),
+                                        if (sh.customerWins.isNotEmpty) ...[
+                                          const SizedBox(width: 8),
+                                          Container(
+                                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                            decoration: BoxDecoration(
+                                              color: const Color(0xFF166534),
+                                              borderRadius: BorderRadius.circular(4),
+                                            ),
+                                            child: Text(
+                                              '🏆 Inam: ₹${sh.totalCustomerWinAmount.toStringAsFixed(0)}',
+                                              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 9.5),
+                                            ),
+                                          ),
+                                        ],
+                                      ],
                                     ],
+                                  ),
+                                  if (sh.drawResult != null || sh.customerWins.isNotEmpty) ...[
+                                    const SizedBox(height: 6),
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 20),
+                                      child: Wrap(
+                                        spacing: 8,
+                                        runSpacing: 4,
+                                        crossAxisAlignment: WrapCrossAlignment.center,
+                                        children: [
+                                          if (sh.drawResult != null)
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                              decoration: BoxDecoration(
+                                                color: const Color(0xFF1E1B4B),
+                                                borderRadius: BorderRadius.circular(4),
+                                                border: Border.all(color: const Color(0xFF818CF8).withAlpha(140)),
+                                              ),
+                                              child: Row(
+                                                mainAxisSize: MainAxisSize.min,
+                                                children: [
+                                                  const Icon(Icons.stars, color: Color(0xFFFBBF24), size: 12),
+                                                  const SizedBox(width: 4),
+                                                  Text(
+                                                    '🎯 1st Prize Khula: ${sh.drawResult!.firstPrize}',
+                                                    style: const TextStyle(color: Color(0xFFC7D2FE), fontSize: 10, fontWeight: FontWeight.bold),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          if (sh.customerWins.isNotEmpty)
+                                            ...sh.customerWins.map((w) {
+                                              return Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2.5),
+                                                decoration: BoxDecoration(
+                                                  color: const Color(0xFF03140C),
+                                                  borderRadius: BorderRadius.circular(4),
+                                                  border: Border.all(color: const Color(0xFF34D399).withAlpha(120)),
+                                                ),
+                                                child: Text(
+                                                  '🎉 Party Inam: #${w.ticketNumber} (${w.prizeTier} Ser ${w.ticketSeries} x ${w.seriesCount} Sem - ₹${w.prizeAmount.toStringAsFixed(0)})',
+                                                  style: const TextStyle(color: Color(0xFF86EFAC), fontSize: 9.5, fontWeight: FontWeight.bold),
+                                                ),
+                                              );
+                                            })
+                                          else if (sh.hasEntry && sh.drawResult != null)
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                              child: Text(
+                                                '⚪ Party ka koi inam nahi laga',
+                                                style: TextStyle(color: Colors.grey.shade500, fontSize: 9.5, fontStyle: FontStyle.italic),
+                                              ),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ] else if (sh.hasEntry) ...[
+                                    const SizedBox(height: 4),
+                                    Padding(
+                                      padding: const EdgeInsets.only(left: 20),
+                                      child: Text(
+                                        '⏳ Result Sheet Pending (Draw result upload hone par inam auto-match hoga)',
+                                        style: TextStyle(color: Colors.amber.shade700, fontSize: 9.5, fontStyle: FontStyle.italic),
+                                      ),
+                                    ),
                                   ],
                                 ],
                               ),
@@ -2150,6 +2299,88 @@ class _PartyHisabReportsScreenState extends ConsumerState<PartyHisabReportsScree
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text('📋 Copied ${grouped.length} Customer Bookings Summary!'), backgroundColor: const Color(0xFF166534), duration: const Duration(seconds: 3)),
     );
+  }
+
+  Future<void> _syncHisabToSupabase(
+    List<PartyHisabSummary> partySummaries,
+    Map<String, List<TicketSaleModel>> customerGrouped,
+  ) async {
+    if (_isSyncingCloud) return;
+    setState(() => _isSyncingCloud = true);
+
+    try {
+      final List<Map<String, dynamic>> records = [];
+      final nowStr = DateFormat('yyyy-MM-dd').format(DateTime.now());
+
+      if (_activeCategory == MainHisabCategory.partyUnsoldHisab) {
+        for (final p in partySummaries) {
+          records.add({
+            'party_name': p.partyName,
+            'dealer_name': p.dealerName,
+            'total_tickets': p.totalNetSold,
+            'total_sales': p.totalNetAmount,
+            'total_prize': p.totalCustomerWinAmount,
+            'net_hisab': p.finalNetPayable,
+            'category': 'Wholesale Party Hisab',
+            'last_active_date': p.date.isNotEmpty ? p.date : nowStr,
+          });
+        }
+      } else {
+        customerGrouped.forEach((buyer, sales) {
+          final totalQty = sales.fold(0, (s, t) => s + t.quantity);
+          final totalSales = sales.fold(0.0, (s, t) => s + t.totalAmount);
+          records.add({
+            'party_name': buyer,
+            'dealer_name': null,
+            'total_tickets': totalQty,
+            'total_sales': totalSales,
+            'total_prize': 0.0,
+            'net_hisab': totalSales,
+            'category': 'Customer Booking Hisab',
+            'last_active_date': nowStr,
+          });
+        });
+      }
+
+      final count = await SupabaseService.instance.syncPartyHisabBatch(records);
+      if (mounted) {
+        if (count > 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              backgroundColor: const Color(0xFF10B981),
+              duration: const Duration(seconds: 4),
+              content: Row(
+                children: [
+                  const Icon(Icons.cloud_done_rounded, color: Colors.white, size: 18),
+                  const SizedBox(width: 8),
+                  Text('☁️ Synced $count party names & hisab balances to Supabase Cloud!'),
+                ],
+              ),
+            ),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              backgroundColor: Color(0xFFF59E0B),
+              content: Text('⚠️ Supabase Cloud sync: No new records to sync or offline mode.'),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: const Color(0xFFEF4444),
+            content: Text('⚠️ Supabase Cloud sync error: $e'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSyncingCloud = false);
+      }
+    }
   }
 
   void _previewPartyTextModal(PartyHisabSummary summary) {

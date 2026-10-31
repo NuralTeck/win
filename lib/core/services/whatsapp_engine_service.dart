@@ -214,14 +214,9 @@ class WhatsAppEngineService {
     }
 
     try {
-      final sbUrl = dotenv.env['SUPABASE_URL'] ?? '';
-      final sbKey = dotenv.env['SUPABASE_ANON_KEY'] ?? dotenv.env['SUPABASE_SERVICE_ROLE_KEY'] ?? '';
-
       final envMap = {
         ...Platform.environment,
         'PORT': '$_activePort',
-        'SUPABASE_URL': sbUrl,
-        'SUPABASE_KEY': sbKey,
       };
 
       if (isExe) {
@@ -388,14 +383,10 @@ class WhatsAppEngineService {
     }
 
     try {
-      final sbUrl = dotenv.env['SUPABASE_URL'] ?? '';
-      final sbKey = dotenv.env['SUPABASE_ANON_KEY'] ?? dotenv.env['SUPABASE_SERVICE_ROLE_KEY'] ?? '';
-
       final req = await _httpClient.postUrl(Uri.parse('$baseUrl/start'));
       req.headers.contentType = ContentType.json;
       req.write(jsonEncode({
-        'supabaseUrl': sbUrl,
-        'supabaseKey': sbKey,
+        'localOnly': true,
       }));
       final res = await req.close();
       await fetchStatus();
@@ -419,6 +410,19 @@ class WhatsAppEngineService {
       statusNotifier.value = WhatsAppEngineStatus.offline(port: _activePort);
       return false;
     }
+  }
+
+  /// Cleanly kill and restart the background WhatsApp engine to reload updated code & reset uptime
+  Future<bool> restartEngineServer() async {
+    try {
+      final req = await _httpClient.postUrl(Uri.parse('$baseUrl/restart-server'));
+      await req.close();
+    } catch (_) {}
+    _engineProcess?.kill();
+    _engineProcess = null;
+    statusNotifier.value = WhatsAppEngineStatus.offline(port: _activePort);
+    await Future.delayed(const Duration(milliseconds: 1000));
+    return await launchBackgroundEngine();
   }
 
   Future<void> clearLogs() async {

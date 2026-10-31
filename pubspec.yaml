@@ -49,6 +49,9 @@ dependencies:
   pdf: ^3.11.1
   printing: ^5.13.2
   http: ^1.2.1
+  re_editor: ^0.10.0
+  archive: ^4.0.2
+  crypto: ^3.0.8
 
 dev_dependencies:
   flutter_test:

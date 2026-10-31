@@ -5,11 +5,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/database/database_service.dart';
+import '../../../core/services/pattern_matcher_service.dart';
 import '../../shared/models/ticket_sale_model.dart';
 import '../../sellers/models/seller_customer_model.dart';
 import '../viewmodels/ticket_sales_viewmodel.dart';
 import '../../settings/viewmodels/series_price_viewmodel.dart';
 import '../../sellers/viewmodels/seller_customer_viewmodel.dart';
+import '../../operations/utils/winner_verification_engine.dart';
+import 'winning_tickets_dialog.dart';
 
 /// Parsed ticket item model for the Raw Text Parser
 class _ParsedItem {
@@ -17,12 +20,14 @@ class _ParsedItem {
   String ticketNo;
   int quantity;
   double pricePerTicket;
+  bool isSeriesLocked;
 
   _ParsedItem({
     required this.series,
     required this.ticketNo,
     this.quantity = 1,
     this.pricePerTicket = 45.0,
+    this.isSeriesLocked = false,
   });
 
   double get totalAmount => pricePerTicket * quantity;
@@ -627,17 +632,12 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     if (digits.isNotEmpty && digits.length <= 4) {
       return digits;
     }
-    return digits.isNotEmpty ? digits.substring(0, 3) : fallback;
+    return digits.isNotEmpty ? digits.substring(0, math.min(digits.length, 4)) : fallback;
   }
 
   double _getPriceForSeries(String series) {
     final state = ref.read(seriesPriceViewModelProvider);
-    final calculated = state.getPriceForSeries(series);
-    if (calculated > 0) return calculated;
-
-    final cleanDigits = _cleanSeries(series);
-    final numVal = double.tryParse(cleanDigits) ?? 12.0;
-    return numVal * 3.75;
+    return state.getPriceForSeries(series);
   }
 
   List<String>? _expandTicketRange(String startTkt, String endPart) {
@@ -679,6 +679,75 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
 
   List<String> _unparsedLines = [];
 
+  bool _isDateOrTimeOrHeaderLine(String line) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) return true;
+
+    // 🛑 Any line containing a 5-digit number is NOT a pure header!
+    if (RegExp(r'\b\d{5}\b').hasMatch(trimmed)) return false;
+
+    // 1. WhatsApp forwarded / encryption / deleted / media noise
+    if (RegExp(r'^(?:Messages and calls are end-to-end encrypted|This message was deleted|You deleted this message|<Media omitted>|You pinned a message)', caseSensitive: false).hasMatch(trimmed)) return true;
+    if (RegExp(r'^(?:Forwarded|\u203A\u203A\s*Forwarded|fwd|forward|\*forwarded\*)', caseSensitive: false).hasMatch(trimmed)) return true;
+
+    // 2. Chat greetings / casual chatter
+    if (RegExp(r'^\s*(?:hi+|hello+|hlo+|hey+|ok+|haan+|ha+|namaste+|thanks|thx|bye|bhai|sir|boss|yes|no)\s*$', caseSensitive: false).hasMatch(trimmed)) return true;
+
+    // 3. Shift headers (e.g. "Start 8pm", "1:pm booking ab jayega", "Dear 1 PM", "8PM", "6PM", "1PM")
+    if (RegExp(r'^(?:(?:dear\s*)?[168]\s*(?::\s*00)?\s*(?:pm|am|qm|gm|p|baje)|dear\s+[168])$', caseSensitive: false).hasMatch(trimmed)) return true;
+    if (RegExp(r'^(?:start\s+[168]|updated\s+[168]|[168]:?pm\s+booking|booking\s+ab\s+jayega)', caseSensitive: false).hasMatch(trimmed)) return true;
+    if (RegExp(r'^\b(?:morning|day|night|evening)\b$', caseSensitive: false).hasMatch(trimmed)) return true;
+
+    // 4. Booking meta lines (e.g. "S.k.booking", "Rustam g booking", "Laddu", "Updated 10/6/2026=1pm", "Ck booking")
+    if (RegExp(r'^[A-Za-z0-9\s\.\/\-=]+\s+(?:boakg|booking|bookin|bokg|bok|bkg)\b', caseSensitive: false).hasMatch(trimmed)) return true;
+    if (RegExp(r'^(?:date\s*[:=\/\.-]?\s*\d{1,2}[\/\.-]\d{1,2}|time\s*[:=\/\.-]?\s*[168]\s*(?:pm|am|qm|gm|p|baje)?)', caseSensitive: false).hasMatch(trimmed)) return true;
+
+    // 4b. Mixed date and/or time and/or initials header
+    if (RegExp(r'\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b').hasMatch(trimmed) ||
+        RegExp(r'\b(?:[168](?::00|\.00|\.)?\s*(?:pm|am|qm|gm|p|baje)|dear\s+[168])\b', caseSensitive: false).hasMatch(trimmed)) {
+      final withoutDateAndTime = trimmed
+          .replaceAll(RegExp(r'\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b'), '')
+          .replaceAll(RegExp(r'\b(?:\d{1,2}:\d{2}|[168](?::00|\.00|\.)?\s*(?:pm|am|qm|gm|p|baje)|dear\s+[168])\b', caseSensitive: false), '')
+          .trim();
+      if (!RegExp(r'\d{3,}').hasMatch(withoutDateAndTime)) {
+        return true;
+      }
+    }
+
+    // 5. Divider lines / Punctuation noise
+    if (RegExp(r'^[-=_*#]{3,}$').hasMatch(trimmed)) return true;
+    if (RegExp(r'^[.,;]+$').hasMatch(trimmed)) return true;
+    if (RegExp(r'^(?:shiv|radhe|om|jai)\b', caseSensitive: false).hasMatch(trimmed)) return true;
+
+    return false;
+  }
+
+  bool _isPureSeriesLine(String line) {
+    final trimmed = line.trim();
+    if (trimmed.isEmpty) return false;
+
+    // 1. MUST NOT contain any date pattern
+    if (RegExp(r'\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b').hasMatch(trimmed)) return false;
+
+    // 2. MUST NOT contain any time pattern
+    if (RegExp(r'\b(?:\d{1,2}:\d{2}|[168]\s*(?::\s*00)?\s*(?:pm|am|qm|gm|p|baje)|dear\s+[168])\b', caseSensitive: false).hasMatch(trimmed)) return false;
+
+    // 3. MUST NOT contain 5 or more continuous digits
+    if (RegExp(r'\d{5}').hasMatch(trimmed)) return false;
+
+    // 4. Strict standalone series regex
+    final match = RegExp(
+      r'^(?:(?:\(|\[)\s*([0-9]{1,4})\s*(?:\)|\])|(?:series\s*[:=-]?\s*)?([0-9]{1,4})\s*(?:c|sirij|series)?)$',
+      caseSensitive: false,
+    ).firstMatch(trimmed);
+    if (match == null) return false;
+
+    final digits = match.group(1) ?? match.group(2);
+    if (digits == null) return false;
+    final val = int.tryParse(digits) ?? 0;
+    return val > 0 && val <= 5000;
+  }
+
   void _parseRawText(String text) {
     if (text.trim().isEmpty) {
       setState(() {
@@ -691,229 +760,285 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
     String detectedShift = _selectedShift;
     DateTime detectedDate = _selectedDate;
 
-    final rawLines = text.split(RegExp(r'[\r\n]+'));
-    final List<String> lines = [];
-    for (final rLine in rawLines) {
-      final t = rLine.trim();
-      if (t.isEmpty) continue;
-      if (RegExp(r'^\s*(?:forwarded|forwarded message|fwd|forward|\*forwarded\*)\s*$', caseSensitive: false).hasMatch(t)) {
-        continue;
+    // 1. Strip WhatsApp message metadata headers e.g. "[11:50 pm, 8/6/2026] MSM:"
+    final List<String> rawLines = [];
+    for (final l in text.split(RegExp(r'[\r\n]+'))) {
+      String s = l.trim();
+      if (s.isEmpty) continue;
+      final waHeader = RegExp(
+        r'^(?:\[\d{1,2}:\d{2}(?::\d{2})?\s*(?:[aApP][mM])?,\s*\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4}\]|\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s+[\d:]+\s*(?:AM|PM|am|pm)?\s*[-~])\s*[^:]+:\s*(.*)$',
+      ).firstMatch(s);
+      if (waHeader != null) {
+        s = (waHeader.group(1) ?? '').trim();
       }
-      lines.add(t);
+      if (s.isNotEmpty) rawLines.add(s);
+    }
+
+    // Auto-detect shift and date from any header lines
+    for (final line in rawLines) {
+      if (_autoDetectShift) {
+        if (RegExp(r'(?:=|\b)(?:dear\s*)?1(?:\.00|:00|\.)?\s*pm\b|morning|^\s*dear\s*1(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*1(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
+          detectedShift = 'Dear 1 PM';
+        } else if (RegExp(r'(?:=|\b)(?:dear\s*)?6(?:\.00|:00|\.)?\s*pm\b|^\bday\b$|^\s*dear\s*6(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*6(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
+          detectedShift = 'Dear 6 PM';
+        } else if (RegExp(r'(?:=|\b)(?:dear\s*)?8(?:\.00|:00|\.)?\s*pm\b|^\b(?:night|evening)\b$|^\s*dear\s*8(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*8(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
+          detectedShift = 'Dear 8 PM';
+        }
+      }
+      if (_autoDetectDate) {
+        final fullDateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})[=\/\.-](\d{2,4})\b').firstMatch(line);
+        if (fullDateMatch != null) {
+          final day = int.tryParse(fullDateMatch.group(1) ?? '') ?? 1;
+          final month = int.tryParse(fullDateMatch.group(2) ?? '') ?? 1;
+          int year = int.tryParse(fullDateMatch.group(3) ?? '') ?? DateTime.now().year;
+          if (year < 100) year += 2000;
+          if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
+            detectedDate = DateTime(year, month, day);
+          }
+        }
+      }
     }
 
     final List<_ParsedItem> items = [];
     final List<String> unparsed = [];
-    String currentSeries = _fallbackSeries;
 
-    final standardShares = {'1', '2', '3', '4', '5', '6', '10', '12', '18', '20', '24', '25', '30', '36', '40', '50', '60', '100'};
+    // Series tracking:
+    String? currentSeries;
+    bool hasExplicitSeriesAbove = false;
 
-    for (int i = 0; i < lines.length; i++) {
-      var line = lines[i];
+    // Look-ahead check: agar shuruat me koi series nahi hai aur aakhiri line series ho (reverse series lock)
+    String? bottomSeries;
+    for (int idx = rawLines.length - 1; idx >= 0; idx--) {
+      final cand = rawLines[idx].trim();
+      if (_isDateOrTimeOrHeaderLine(cand)) continue;
+      if (_isPureSeriesLine(cand)) {
+        bottomSeries = _cleanSeries(cand, fallback: _fallbackSeries);
+        currentSeries ??= bottomSeries;
+      }
+      break;
+    }
 
-      final waHeader = RegExp(
-        r'^\s*\[([^\]]+)\]\s*([^:\n]+):\s*(.*)$',
-        caseSensitive: false,
-      ).firstMatch(line) ?? RegExp(
-        r'^\s*(\d{1,2}[\/\.-]\d{1,2}[\/\.-]\d{2,4},?\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm|AM|PM)?)\s*-\s*([^:\n]+):\s*(.*)$',
-        caseSensitive: false,
-      ).firstMatch(line);
+    for (int i = 0; i < rawLines.length; i++) {
+      final line = rawLines[i].trim();
+      if (line.isEmpty) continue;
 
-      if (waHeader != null) {
-        final metaPart = waHeader.group(1) ?? '';
-        final bodyPart = waHeader.group(3) ?? '';
+      // 1. Check if recognized header / date / shift
+      if (_isDateOrTimeOrHeaderLine(line)) {
+        continue;
+      }
 
-        if (_autoDetectDate) {
-          final dateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})[=\/\.-](\d{2,4})\b').firstMatch(metaPart);
-          if (dateMatch != null) {
-            final day = int.tryParse(dateMatch.group(1) ?? '') ?? 1;
-            final month = int.tryParse(dateMatch.group(2) ?? '') ?? 1;
-            int year = int.tryParse(dateMatch.group(3) ?? '') ?? DateTime.now().year;
-            if (year < 100) year += 2000;
-            if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-              detectedDate = DateTime(year, month, day);
-            }
+      // 2. Pure Standalone Series Line (e.g. "12", "20", "12c", "(24)", "Series 24")
+      if (_isPureSeriesLine(line)) {
+        final extracted = _cleanSeries(line, fallback: _fallbackSeries);
+        currentSeries = extracted;
+        hasExplicitSeriesAbove = true;
+        // Backward retro-update ONLY unlocked tickets
+        for (int j = items.length - 1; j >= 0; j--) {
+          if (!items[j].isSeriesLocked) {
+            items[j].series = extracted;
+            items[j].pricePerTicket = _getPriceForSeries(extracted);
+            items[j].isSeriesLocked = true;
+          } else {
+            break;
           }
         }
-
-        line = bodyPart.trim();
-        if (line.isEmpty) continue;
-      }
-
-      // STRICT INVALIDATION: Any unbroken number with more than 5 digits is immediately invalid!
-      if (RegExp(r'\b\d{6,}\b').hasMatch(line)) {
-        unparsed.add(line);
         continue;
       }
 
-      final has5Digits = RegExp(r'\b\d{5}\b').hasMatch(line);
-      final isSeriesOnly = RegExp(r'^\s*\(?\d{1,4}[a-z]?\)?\s*[:=-]?\s*$', caseSensitive: false).hasMatch(line);
-      if (has5Digits || isSeriesOnly) {
-        line = line.replaceFirst(RegExp(r'\s+\d{1,2}:\d{2}\s*(?:am|pm)\b', caseSensitive: false), '').trim();
-      }
-
-      bool isDateOrShiftHeader = false;
-
-      // 1. Shift Tag
-      if (_autoDetectShift) {
-        if (RegExp(r'(?:=|\b)(?:dear\s*)?1(?:\.00|:00|\.)?\s*pm\b|morning|^\s*dear\s*1(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*1(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
-          detectedShift = 'Dear 1 PM';
-          isDateOrShiftHeader = true;
-        } else if (RegExp(r'(?:=|\b)(?:dear\s*)?6(?:\.00|:00|\.)?\s*pm\b|^\bday\b$|^\s*dear\s*6(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*6(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
-          detectedShift = 'Dear 6 PM';
-          isDateOrShiftHeader = true;
-        } else if (RegExp(r'(?:=|\b)(?:dear\s*)?8(?:\.00|:00|\.)?\s*pm\b|^\b(?:night|evening)\b$|^\s*dear\s*8(?:\.00|:00|\.)?\s*(?:pm|baje)?\s*$|^\s*8(?:\.00|:00|\.)?\s*(?:pm|baje)\s*$', caseSensitive: false).hasMatch(line)) {
-          detectedShift = 'Dear 8 PM';
-          isDateOrShiftHeader = true;
-        }
-      }
-
-      // 2. Date Tag
-      if (_autoDetectDate) {
-        final fullDateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})[=\/\.-](\d{2,4})\b').firstMatch(line);
-        final shortDateMatch = RegExp(r'\b(\d{1,2})[=\/\.-](\d{1,2})\b').firstMatch(line);
-        final dateMatch = fullDateMatch ?? shortDateMatch;
-        if (dateMatch != null) {
-          final day = int.tryParse(dateMatch.group(1) ?? '') ?? 1;
-          final month = int.tryParse(dateMatch.group(2) ?? '') ?? 1;
-          int year = dateMatch.groupCount >= 3 && dateMatch.group(3) != null
-              ? (int.tryParse(dateMatch.group(3)!) ?? DateTime.now().year)
-              : DateTime.now().year;
-          if (year < 100) year += 2000;
-          if (day >= 1 && day <= 31 && month >= 1 && month <= 12) {
-            detectedDate = DateTime(year, month, day);
-            isDateOrShiftHeader = true;
-          }
-        } else if (RegExp(r'\b(?:kal|tomorrow)\b', caseSensitive: false).hasMatch(line)) {
-          detectedDate = DateTime.now().add(const Duration(days: 1));
-          isDateOrShiftHeader = true;
-        } else if (RegExp(r'\b(?:aaj|today)\b', caseSensitive: false).hasMatch(line)) {
-          detectedDate = DateTime.now();
-          isDateOrShiftHeader = true;
-        }
-      }
-
-      // Skip party/metadata lines without tickets
-      if (RegExp(r'^\s*(?:wakil|sk|booking|bokakg|updated|note|total)\b', caseSensitive: false).hasMatch(line) &&
-          !RegExp(r'\b\d{5}\b').hasMatch(line)) {
-        continue;
-      }
-
-      if (isDateOrShiftHeader && !RegExp(r'\b\d{5}\b').hasMatch(line)) {
-        continue;
-      }
-
-      // 3. Standalone Series line
-      final seriesOnlyMatch = RegExp(r'^\s*(?:series|serial|sere|sereis)?\s*[:=-]?\s*\(?(\d{1,4})[a-z]?\)?\s*[:=-]?\s*$', caseSensitive: false).firstMatch(line);
-      if (seriesOnlyMatch != null && !RegExp(r'\b\d{5}\b').hasMatch(line)) {
-        currentSeries = seriesOnlyMatch.group(1) ?? currentSeries;
-        continue;
-      }
-
-      // 4. Parse Tickets:
-      int previousCount = items.length;
-
-      // Range format e.g. "12- 31112-20", "12- 12345-9", "31112 to 31120", "28311--28315"
-      final explicitRangeMatch = RegExp(
-        r'^(?:\(?(\d{1,4})[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]+)?(\d{5})\s*(?:--|\s+to\s+|-)(\d{1,5})(?:\s*[-=x*:\s]\s*(\d+))?\s*$',
+      // STRICT PATTERN 0: Comma range or double dot range e.g. 70480,,89,,12c or 40350..59
+      final commaRangeMatch = RegExp(
+        r'^[.,;:!_~*#@\s\/\-|]*(\d{5})\s*(?:,,+|\.\.+|___+)\s*(\d{1,3})(?:\s*(?:,,+|\.\.+|___+)\s*(?:([0-9]{1,4})[csCS]|[csCS]\s*([0-9]{1,4})|([0-9]{1,4})))?[.,;:!_~*#@\s\/\-|]*$',
         caseSensitive: false,
       ).firstMatch(line);
+      if (commaRangeMatch != null) {
+        final startTktStr = commaRangeMatch.group(1)!;
+        final endPartStr = commaRangeMatch.group(2)!;
+        final serStr = commaRangeMatch.group(3) ?? commaRangeMatch.group(4) ?? commaRangeMatch.group(5);
+        final effectiveS = serStr != null
+            ? _cleanSeries(serStr, fallback: currentSeries ?? _fallbackSeries)
+            : (currentSeries ?? _fallbackSeries);
 
-      bool handledAsRange = false;
-      if (explicitRangeMatch != null) {
-        final seriesPart = explicitRangeMatch.group(1);
-        final startTkt = explicitRangeMatch.group(2)!;
-        final endPart = explicitRangeMatch.group(3)!;
-        final countPart = explicitRangeMatch.group(4);
+        final startNum = int.tryParse(startTktStr);
+        final prefix = startTktStr.substring(0, 5 - endPartStr.length);
+        final endNum = int.tryParse('$prefix$endPartStr');
 
-        final isExplicit = line.contains('--') || line.toLowerCase().contains('to') || countPart != null;
-        final isShortShare = standardShares.contains(endPart.trim());
-
-        final expandedNumbers = _expandTicketRange(startTkt, endPart);
-        // If series prefix is given (e.g. "12- 31112-20") or explicit range or expandedNumbers is valid, treat as RANGE!
-        if (expandedNumbers != null && expandedNumbers.isNotEmpty && (seriesPart != null || isExplicit || !isShortShare || expandedNumbers.length > 1)) {
-          final s = seriesPart != null ? _cleanSeries(seriesPart, fallback: currentSeries) : currentSeries;
-          currentSeries = s;
-          final price = _getPriceForSeries(s);
-          for (final tNo in expandedNumbers) {
+        if (startNum != null && endNum != null && endNum >= startNum && endNum - startNum <= 100) {
+          final price = _getPriceForSeries(effectiveS);
+          for (int n = startNum; n <= endNum; n++) {
             items.add(_ParsedItem(
-              series: s,
+              series: effectiveS,
+              ticketNo: n.toString().padLeft(5, '0'),
+              quantity: 1,
+              pricePerTicket: price,
+              isSeriesLocked: true,
+            ));
+          }
+          currentSeries = effectiveS;
+          continue;
+        }
+      }
+
+      // STRICT PATTERN 1: Triplet Range e.g. 62759-83-25 or 40280-289-10 or 43300-309=10 pcs
+      final tripletMatch = RegExp(
+        r'^(?:([0-9]{1,4}[A-Za-z]?)\s*[:=/]\s*)?(\d{5})\s*[-~to]+\s*(\d{1,5})\s*[-=x*,\s]+\s*(\d+)(?:\s*(?:pcs?|go|p))?\s*$',
+        caseSensitive: false,
+      ).firstMatch(line);
+      if (tripletMatch != null) {
+        final effectiveS = tripletMatch.group(1) != null
+            ? _cleanSeries(tripletMatch.group(1)!, fallback: currentSeries ?? _fallbackSeries)
+            : (currentSeries ?? _fallbackSeries);
+        final startTkt = tripletMatch.group(2)!;
+        final endPart = tripletMatch.group(3)!;
+        final startNum = int.tryParse(startTkt);
+        final count = int.tryParse(tripletMatch.group(4)!);
+
+        // 🛡️ USER REQUIREMENT: Written quantity can have errors!
+        // Range strictly determines the tickets:
+        final expanded = _expandTicketRange(startTkt, endPart);
+        if (expanded != null && expanded.isNotEmpty) {
+          final price = _getPriceForSeries(effectiveS);
+          for (final tNo in expanded) {
+            items.add(_ParsedItem(
+              series: effectiveS,
               ticketNo: tNo,
               quantity: 1,
               pricePerTicket: price,
+              isSeriesLocked: true,
             ));
           }
-          handledAsRange = true;
+          currentSeries = effectiveS;
+          continue;
+        }
+
+        if (startNum != null && count != null && count > 0 && count <= 150) {
+          final price = _getPriceForSeries(effectiveS);
+          for (int k = 0; k < count; k++) {
+            items.add(_ParsedItem(
+              series: effectiveS,
+              ticketNo: (startNum + k).toString().padLeft(5, '0'),
+              quantity: 1,
+              pricePerTicket: price,
+              isSeriesLocked: true,
+            ));
+          }
+          currentSeries = effectiveS;
+          continue;
         }
       }
 
-      if (handledAsRange) continue;
-
-      // Pattern B: Suffix Series format (e.g. 57952 -60, 52725 -40, 27269-12)
-      final suffixSeriesMatch = RegExp(
-        r'^(\d{5})\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]+\s*\(?(\d{1,4})[a-z]?\)?(?:\s*[-=x*:\s]\s*(\d+))?\s*$',
+      // STRICT PATTERN 2: Hyphen range e.g. 50170-189 or 24: 50170 to 50189 or 68150-159
+      final hyphenMatch = RegExp(
+        r'^(?:([0-9]{1,4}[A-Za-z]?)\s*[:=/]\s*)?(\d{5})\s*[-~/\s]*(?:to|se|-|\/)\s*(\d{1,5})$',
         caseSensitive: false,
       ).firstMatch(line);
+      if (hyphenMatch != null) {
+        final effectiveS = hyphenMatch.group(1) != null
+            ? _cleanSeries(hyphenMatch.group(1)!, fallback: currentSeries ?? _fallbackSeries)
+            : (currentSeries ?? _fallbackSeries);
+        final startTkt = hyphenMatch.group(2)!;
+        final endPart = hyphenMatch.group(3)!;
+        const isKnownSeries = {'6', '12', '18', '20', '24', '30', '36', '40', '48', '50', '60', '75', '100', '120', '150', '200', '250', '300', '500', '1000'};
+        final hasExplicitRange = line.contains('to') || line.contains('se') || startTkt.endsWith('0');
 
-      if (suffixSeriesMatch != null) {
-        final s = _cleanSeries(suffixSeriesMatch.group(2)!, fallback: currentSeries);
-        currentSeries = s;
-        final tNo = suffixSeriesMatch.group(1)!;
-        final qty = int.tryParse(suffixSeriesMatch.group(3) ?? '1') ?? 1;
-        final price = _getPriceForSeries(s);
-        items.add(_ParsedItem(
-          series: s,
-          ticketNo: tNo,
-          quantity: qty > 0 ? qty : 1,
-          pricePerTicket: price,
-        ));
-        continue;
-      }
-
-      // Pattern C: Prefix Series format (e.g. 12=14371, 6=09379, 12-46751)
-      final prefixTktMatch = RegExp(
-        r'^\(?(\d{1,4})[a-z]?\)?\s*[=\-*\/#:\._,~@|\\!\$%\^&+\s]*\s*(\d{5})(?:\s*[-=x*:\s]\s*(\d+))?\s*$',
-        caseSensitive: false,
-      ).firstMatch(line);
-
-      if (prefixTktMatch != null) {
-        final s = _cleanSeries(prefixTktMatch.group(1)!, fallback: currentSeries);
-        currentSeries = s;
-        final tNo = prefixTktMatch.group(2)!;
-        final qty = int.tryParse(prefixTktMatch.group(3) ?? '1') ?? 1;
-        final price = _getPriceForSeries(s);
-        items.add(_ParsedItem(
-          series: s,
-          ticketNo: tNo,
-          quantity: qty > 0 ? qty : 1,
-          pricePerTicket: price,
-        ));
-        continue;
-      }
-
-      // Pattern D: Plain 5-digit tickets (single or multiple on same line)
-      final all5Digits = RegExp(r'\b\d{5}\b').allMatches(line);
-      if (all5Digits.isNotEmpty) {
-        final leadSeriesMatch = RegExp(r'^\s*\(?(\d{1,4})[a-z]?\)?\s*[-=:\s]').firstMatch(line);
-        if (leadSeriesMatch != null) {
-          currentSeries = _cleanSeries(leadSeriesMatch.group(1)!, fallback: currentSeries);
+        if (endPart.isNotEmpty && (!isKnownSeries.contains(endPart.trim()) || hasExplicitRange)) {
+          final expanded = _expandTicketRange(startTkt, endPart);
+          if (expanded != null && expanded.isNotEmpty) {
+            final price = _getPriceForSeries(effectiveS);
+            for (final tNo in expanded) {
+              items.add(_ParsedItem(
+                series: effectiveS,
+                ticketNo: tNo,
+                quantity: 1,
+                pricePerTicket: price,
+                isSeriesLocked: true,
+              ));
+            }
+            currentSeries = effectiveS;
+            continue;
+          }
         }
-        final price = _getPriceForSeries(currentSeries);
-        for (final m in all5Digits) {
-          final tNo = m.group(0)!;
+      }
+
+      // STRICT PATTERN 3: Prefix Series (e.g. 6=83453, 24=43239, 12-42614, 24/81192, (24)79159, 12..44189)
+      if (!RegExp(r'(?:pm|am|qm|gm|baje)\b', caseSensitive: false).hasMatch(line)) {
+        final prefixMatch = RegExp(
+          r'^(?:[\(\[]\s*([0-9]{1,4}[cs]?)\s*[\)\]]|([0-9]{1,4}[cs]?)\s*(?:[:=/\-._~*#@+"\s]+))\s*(\d{5})$',
+          caseSensitive: false,
+        ).firstMatch(line);
+        if (prefixMatch != null) {
+          final rawS = prefixMatch.group(1) ?? prefixMatch.group(2);
+          final effectiveS = _cleanSeries(rawS ?? (currentSeries ?? _fallbackSeries), fallback: currentSeries ?? _fallbackSeries);
+          final tNo = prefixMatch.group(3)!;
           items.add(_ParsedItem(
-            series: currentSeries,
+            series: effectiveS,
             ticketNo: tNo,
             quantity: 1,
-            pricePerTicket: price,
+            pricePerTicket: _getPriceForSeries(effectiveS),
+            isSeriesLocked: true,
+          ));
+          continue;
+        }
+      }
+
+      // STRICT PATTERN 4: Suffix Series (e.g. 09243=12, 43283=6, 36963 -40, 76371-12, 18886..12c, 12454....40, 81684,,20)
+      if (!RegExp(r'(?:pm|am|qm|gm|baje)\b', caseSensitive: false).hasMatch(line)) {
+        final suffixMatch = RegExp(
+          r'^(\d{5})\s*([=:\-\/._~*#@+]|\s+)+\s*([0-9]{1,4}[cs]?|[\(\[][0-9]{1,4}[\)\]])$',
+          caseSensitive: false,
+        ).firstMatch(line);
+        if (suffixMatch != null) {
+          final tNo = suffixMatch.group(1)!;
+          final effectiveS = _cleanSeries(suffixMatch.group(3)!, fallback: currentSeries ?? _fallbackSeries);
+          items.add(_ParsedItem(
+            series: effectiveS,
+            ticketNo: tNo,
+            quantity: 1,
+            pricePerTicket: _getPriceForSeries(effectiveS),
+            isSeriesLocked: true,
+          ));
+          continue;
+        }
+      }
+
+      // STRICT PATTERN 5: Pure 5-digit number(s) on a line
+      // e.g. "84252" or "84252, 14252, 64252"
+      if (RegExp(r'^\d{5}(?:[,\s\t]+\d{5})*$').hasMatch(line)) {
+        final effectiveS = currentSeries ?? _fallbackSeries;
+        final isLocked = hasExplicitSeriesAbove || (bottomSeries != null);
+        final matches = RegExp(r'\b\d{5}\b').allMatches(line);
+        for (final m in matches) {
+          final tNo = m.group(0)!;
+          items.add(_ParsedItem(
+            series: effectiveS,
+            ticketNo: tNo,
+            quantity: 1,
+            pricePerTicket: _getPriceForSeries(effectiveS),
+            isSeriesLocked: isLocked,
           ));
         }
         continue;
       }
 
-      if (items.length == previousCount) {
-        unparsed.add(line);
+      // PATTERN 6: Dynamic Learned Regex Rules (from PatternMatcherService SQLite cache)
+      final learnedResult = PatternMatcherService.instance.parseWithLearnedPatterns(
+        line,
+        defaultSeries: currentSeries ?? _fallbackSeries,
+      );
+      if (learnedResult.isNotEmpty) {
+        for (final r in learnedResult) {
+          final s = r.series.isNotEmpty ? r.series : (currentSeries ?? _fallbackSeries);
+          items.add(_ParsedItem(
+            series: s,
+            ticketNo: r.ticketNo,
+            quantity: r.quantity > 0 ? r.quantity : 1,
+            pricePerTicket: _getPriceForSeries(s),
+            isSeriesLocked: true,
+          ));
+        }
+        continue;
       }
+
+      unparsed.add(line);
     }
 
     setState(() {
@@ -1007,24 +1132,41 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
         }
       } catch (_) {}
 
+      // 🏆 Check for winning tickets across declared draw results
+      final winners = await WinnerVerificationEngine.checkSalesForWinners(salesToSave);
+
       if (mounted) {
-        Navigator.of(context).pop(true);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                const Icon(Icons.check_circle_rounded, color: Colors.greenAccent, size: 20),
-                const SizedBox(width: 10),
-                Text(
-                  '✅ Successfully Booked ${salesToSave.length} Number(s) for "$customer" ($_selectedShift)!',
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ],
+        if (winners.isNotEmpty) {
+          // 🎉 Show celebratory winning popup dialog!
+          await showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (ctx) => WinningTicketsDialog(
+              winners: winners,
+              partyName: customer,
             ),
-            backgroundColor: const Color(0xFF1E293B),
-            behavior: SnackBarBehavior.floating,
-          ),
-        );
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.check_circle_rounded, color: Colors.greenAccent, size: 20),
+                  const SizedBox(width: 10),
+                  Text(
+                    '✅ Successfully Booked ${salesToSave.length} Number(s) for "$customer" ($_selectedShift)!',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              backgroundColor: const Color(0xFF1E293B),
+              behavior: SnackBarBehavior.floating,
+            ),
+          );
+        }
+        if (mounted) {
+          Navigator.of(context).pop(true);
+        }
       }
     } catch (e) {
       if (mounted) {
@@ -1206,11 +1348,13 @@ class _RawTextTicketParserDialogState extends ConsumerState<RawTextTicketParserD
                                 const SizedBox(height: 4),
                                 InkWell(
                                   onTap: () async {
+                                    final first = _selectedDate.isBefore(DateTime(2020)) ? _selectedDate : DateTime(2020);
+                                    final last = _selectedDate.isAfter(DateTime(2035)) ? _selectedDate : DateTime(2035);
                                     final p = await showDatePicker(
                                       context: context,
                                       initialDate: _selectedDate,
-                                      firstDate: DateTime(2020),
-                                      lastDate: DateTime(2030),
+                                      firstDate: first,
+                                      lastDate: last,
                                       builder: (ctx, child) => Theme(
                                         data: ThemeData.dark().copyWith(
                                           colorScheme: const ColorScheme.dark(

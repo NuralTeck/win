@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -26,21 +27,203 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
   DateTime? _rangeStartDate;
   DateTime? _rangeEndDate;
   bool _isLoading = true;
+  String _loadingStatus = 'Fetching booking records...';
   List<TicketSaleModel> _allDateSales = [];
   String _exportRange = 'Today'; // Options: 'Today', 'Weekly', 'Monthly', 'Custom'
   String _selectedShiftFilter = 'All'; // 'All', 'Dear 1 PM', 'Dear 6 PM', 'Dear 8 PM'
   String _selectedCustomerFilter = 'All'; // 'All' or specific customer/seller name
   bool _isExporting = false;
 
+  // 🚀 SMOOTH CHUNK LOADING & CACHING (Zero UI freeze)
+  int _displayedLimit = 100;
+  int _activeBodyTab = 0;
+  final ScrollController _listScrollController = ScrollController();
+  final ScrollController _horizontalScrollController = ScrollController();
+  final ScrollController _seriesScrollController = ScrollController();
+  bool _isLoadingMore = false;
+
+  // Precomputed customer lookups to prevent UI freezing in build()
+  List<String> _cachedCustomerList = ['All'];
+  Map<String, int> _customerQtyMap = {'All': 0};
+  Map<String, int> _customerRecordsMap = {'All': 0};
+
+  List<TicketSaleModel> _customerSales = [];
+  List<TicketSaleModel> _filteredSales = [];
+  List<_LocalSeriesSummary> _sortedSeriesList = [];
+  int _count1PM = 0, _count6PM = 0, _count8PM = 0;
+  double _total1PM = 0, _total6PM = 0, _total8PM = 0;
+  int _grandQty = 0;
+  double _grandAmt = 0;
+
   @override
   void initState() {
     super.initState();
     _selectedDate = widget.initialDate;
+    _listScrollController.addListener(_onListScroll);
     _loadSalesForDate();
   }
 
+  @override
+  void dispose() {
+    _listScrollController.removeListener(_onListScroll);
+    _listScrollController.dispose();
+    _horizontalScrollController.dispose();
+    _seriesScrollController.dispose();
+    super.dispose();
+  }
+
+  void _onListScroll() {
+    if (!_listScrollController.hasClients || _isLoadingMore) return;
+    if (_listScrollController.position.pixels >= _listScrollController.position.maxScrollExtent - 250) {
+      _loadMoreChunks();
+    }
+  }
+
+  void _loadMoreChunks() {
+    if (_isLoadingMore) return;
+    if (_displayedLimit >= _filteredSales.length) return;
+    _isLoadingMore = true;
+    setState(() {
+      _displayedLimit = math.min(_displayedLimit + 250, _filteredSales.length);
+    });
+    Future.microtask(() {
+      if (mounted) _isLoadingMore = false;
+    });
+  }
+
+  /// Single-pass O(N) customer aggregation (avoids quadratic scanning in build())
+  void _computeCustomerStats() {
+    final Map<String, int> qtyMap = {};
+    final Map<String, int> countMap = {};
+    final Set<String> customers = {'All'};
+
+    int totalQtyAll = 0;
+    for (final s in _allDateSales) {
+      final name = s.buyerName.trim();
+      totalQtyAll += s.quantity;
+      if (name.isNotEmpty) {
+        customers.add(name);
+        qtyMap[name] = (qtyMap[name] ?? 0) + s.quantity;
+        countMap[name] = (countMap[name] ?? 0) + 1;
+      }
+    }
+    qtyMap['All'] = totalQtyAll;
+    countMap['All'] = _allDateSales.length;
+
+    final sortedCust = customers.toList()
+      ..sort((a, b) {
+        if (a == 'All') return -1;
+        if (b == 'All') return 1;
+        return a.toLowerCase().compareTo(b.toLowerCase());
+      });
+
+    _cachedCustomerList = sortedCust;
+    _customerQtyMap = qtyMap;
+    _customerRecordsMap = countMap;
+  }
+
+  void _recomputeFilteredSales() {
+    // 1. Customer filter
+    if (_selectedCustomerFilter == 'All') {
+      _customerSales = List.of(_allDateSales);
+    } else {
+      final target = _selectedCustomerFilter.trim().toLowerCase();
+      _customerSales = _allDateSales
+          .where((s) => s.buyerName.trim().toLowerCase() == target)
+          .toList();
+    }
+
+    // 2. Shift filter
+    final list = _customerSales.where((s) {
+      if (_selectedShiftFilter == 'All') return true;
+      return _getShift(s.drawName) == _selectedShiftFilter;
+    }).toList();
+
+    // 3. Structured sort: Shift (1 PM -> 6 PM -> 8 PM), then Series, then Ticket No
+    list.sort((a, b) {
+      final aSer = a.ticketSeries;
+      final bSer = b.ticketSeries;
+      final aMissing = aSer == '?' || aSer.isEmpty || aSer == 'MISSING' || aSer == 'UNKNOWN' || aSer == '—' || aSer == '-';
+      final bMissing = bSer == '?' || bSer.isEmpty || bSer == 'MISSING' || bSer == 'UNKNOWN' || bSer == '—' || bSer == '-';
+
+      if (aMissing && !bMissing) return -1;
+      if (!aMissing && bMissing) return 1;
+
+      // 1. When All shifts are selected, sort chronologically: 1 PM -> 6 PM -> 8 PM
+      if (_selectedShiftFilter == 'All') {
+        final shiftA = _getShiftOrder(a.drawName);
+        final shiftB = _getShiftOrder(b.drawName);
+        if (shiftA != shiftB) {
+          return shiftA.compareTo(shiftB);
+        }
+      }
+
+      // 2. Series order
+      final serComp = a.ticketSeries.compareTo(b.ticketSeries);
+      if (serComp != 0) return serComp;
+
+      // 3. Ticket number numeric order
+      final numA = int.tryParse(a.ticketNumber.trim()) ?? -1;
+      final numB = int.tryParse(b.ticketNumber.trim()) ?? -1;
+      if (numA != -1 && numB != -1 && numA != numB) {
+        return numA.compareTo(numB);
+      }
+
+      return b.saleDate.compareTo(a.saleDate);
+    });
+    _filteredSales = list;
+
+    // 4. Precompute Shift-wise totals
+    _count1PM = 0;
+    _count6PM = 0;
+    _count8PM = 0;
+    _total1PM = 0.0;
+    _total6PM = 0.0;
+    _total8PM = 0.0;
+
+    for (final sale in _customerSales) {
+      final shift = _getShift(sale.drawName);
+      if (shift == 'Dear 1 PM') {
+        _count1PM += sale.quantity;
+        _total1PM += sale.totalAmount;
+      } else if (shift == 'Dear 6 PM') {
+        _count6PM += sale.quantity;
+        _total6PM += sale.totalAmount;
+      } else if (shift == 'Dear 8 PM') {
+        _count8PM += sale.quantity;
+        _total8PM += sale.totalAmount;
+      }
+    }
+
+    _grandQty = _count1PM + _count6PM + _count8PM;
+    _grandAmt = _total1PM + _total6PM + _total8PM;
+
+    // 5. Precompute Series Summary
+    final Map<String, _LocalSeriesSummary> seriesMap = {};
+    for (final sale in _filteredSales) {
+      final ser = sale.ticketSeries.toUpperCase();
+      final existing = seriesMap[ser];
+      if (existing == null) {
+        seriesMap[ser] = _LocalSeriesSummary(
+          series: ser,
+          quantity: sale.quantity,
+          rate: sale.pricePerTicket,
+          totalAmount: sale.totalAmount,
+        );
+      } else {
+        existing.quantity += sale.quantity;
+        existing.totalAmount += sale.totalAmount;
+      }
+    }
+    _sortedSeriesList = seriesMap.values.toList()
+      ..sort((a, b) => a.series.compareTo(b.series));
+  }
+
   Future<void> _loadSalesForDate() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _loadingStatus = 'Fetching records from database...';
+    });
     try {
       List<TicketSaleModel> sales = [];
       if (_exportRange == 'Today') {
@@ -57,9 +240,19 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
         sales = await DatabaseService.instance.getTicketSalesByDate(_selectedDate);
       }
 
+      if (!mounted) return;
+      setState(() {
+        _loadingStatus = 'Organizing ${sales.length} booking records...';
+      });
+      // Yield execution so the UI thread updates the progress message cleanly
+      await Future.delayed(const Duration(milliseconds: 15));
+
       if (mounted) {
+        _allDateSales = sales;
+        _computeCustomerStats();
+        _recomputeFilteredSales();
         setState(() {
-          _allDateSales = sales;
+          _displayedLimit = 100;
           _isLoading = false;
         });
       }
@@ -77,11 +270,13 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
   }
 
   Future<void> _pickDate() async {
+    final first = _selectedDate.isBefore(DateTime(2020)) ? _selectedDate : DateTime(2020);
+    final last = _selectedDate.isAfter(DateTime(2035)) ? _selectedDate : DateTime(2035);
     final picked = await showDatePicker(
       context: context,
       initialDate: _selectedDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2030),
+      firstDate: first,
+      lastDate: last,
       builder: (context, child) {
         return Theme(
           data: ThemeData.dark().copyWith(
@@ -281,15 +476,13 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
   }) async {
     if (_isExporting || _filteredSales.isEmpty) return;
 
-    // 🔒 Check if Result Entry has been completed for this date/shift
-    final hasResult = await _hasDeclaredResultForDateAndShift(_selectedDate, _selectedShiftFilter);
-    if (!hasResult) {
-      if (!mounted) return;
-      _showResultPendingModal(context, _selectedShiftFilter, _selectedDate);
-      return;
-    }
-
+    if (!mounted) return;
     setState(() => _isExporting = true);
+
+    bool dialogOpen = true;
+    double currentProgress = 0.05;
+    String currentStatus = 'Checking results & initializing engine...';
+    StateSetter? dialogSetState;
 
     try {
       final suffix = isSummaryOnly ? ' (SUMMARY ONLY)' : '';
@@ -312,14 +505,191 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
           ? 'BOOKINGS & HISAB REPORT [$dateRangeLabel]$suffix'
           : '$_selectedCustomerFilter - HISAB REPORT [$dateRangeLabel]$suffix';
 
-      // 1. Generate & Save PDF to C:\Lottery_Reports
+      // Show live loading progress dialog immediately (Zero click lag)
+      showDialog(
+        context: context,
+        barrierDismissible: false,
+        useRootNavigator: true,
+        builder: (dialogCtx) {
+          return StatefulBuilder(
+            builder: (ctx, setModalState) {
+              dialogSetState = setModalState;
+              return Dialog(
+                backgroundColor: Colors.transparent,
+                insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+                child: Container(
+                  width: 440,
+                  padding: const EdgeInsets.all(22),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF1E293B),
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: AppColors.primary.withValues(alpha: 0.35), width: 1.5),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Colors.black54,
+                        blurRadius: 24,
+                        spreadRadius: 4,
+                      ),
+                    ],
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Container(
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary.withValues(alpha: 0.15),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(
+                              Icons.picture_as_pdf_rounded,
+                              color: AppColors.primary,
+                              size: 26,
+                            ),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  isSummaryOnly ? 'Generating Summary PDF' : 'Generating Full PDF Report',
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 3),
+                                Text(
+                                  'Processing ${_filteredSales.length} tickets step-by-step',
+                                  style: TextStyle(
+                                    color: Colors.white.withValues(alpha: 0.6),
+                                    fontSize: 12,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Text(
+                            '${(currentProgress * 100).toInt()}%',
+                            style: const TextStyle(
+                              color: AppColors.primary,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 20),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: LinearProgressIndicator(
+                          value: currentProgress > 0 ? currentProgress : null,
+                          minHeight: 10,
+                          backgroundColor: const Color(0xFF334155),
+                          valueColor: const AlwaysStoppedAnimation<Color>(AppColors.primary),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                      Row(
+                        children: [
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(AppColors.primary),
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              currentStatus,
+                              style: const TextStyle(
+                                color: AppColors.textSecondary,
+                                fontSize: 12.5,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        '⚡ Rendering one chunk at a time to prevent UI lag',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.4),
+                          fontSize: 11,
+                          fontStyle: FontStyle.italic,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      );
+
+      // Allow dialog to mount and display smoothly
+      await Future.delayed(const Duration(milliseconds: 60));
+
+      if (mounted && dialogSetState != null) {
+        dialogSetState!(() {
+          currentProgress = 0.08;
+          currentStatus = 'Verifying lottery results lock...';
+        });
+      }
+
+      // 🔒 Check if Result Entry has been completed for this date/shift
+      final hasResult = await _hasDeclaredResultForDateAndShift(_selectedDate, _selectedShiftFilter);
+      if (!hasResult) {
+        if (dialogOpen && mounted) {
+          dialogOpen = false;
+          Navigator.of(context, rootNavigator: true).pop();
+        }
+        if (mounted) {
+          setState(() => _isExporting = false);
+          _showResultPendingModal(context, _selectedShiftFilter, _selectedDate);
+        }
+        return;
+      }
+
+      if (mounted && dialogSetState != null) {
+        dialogSetState!(() {
+          currentProgress = 0.10;
+          currentStatus = 'Preparing ticket data & shifts...';
+        });
+      }
+
+      // 1. Generate & Save PDF to C:\Lottery_Reports step-by-step
       final res = await BookingPdfService.instance.savePdfToDisk(
         date: _selectedDate,
         sales: _filteredSales,
         customerName: _selectedCustomerFilter == 'All' ? null : _selectedCustomerFilter,
         rangeTitle: rangeTitle,
         isSummaryOnly: isSummaryOnly,
+        onProgress: (progress, status) {
+          if (mounted && dialogSetState != null) {
+            dialogSetState!(() {
+              currentProgress = progress;
+              currentStatus = status;
+            });
+          }
+        },
       );
+
+      // Close loading dialog before opening options modal
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
 
       final savedPath = res['filePath'] as String;
       final fileName = res['fileName'] as String;
@@ -338,6 +708,10 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
         totalSales: grandAmt,
       );
     } catch (err) {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -347,6 +721,10 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
         );
       }
     } finally {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context, rootNavigator: true).pop();
+      }
       if (mounted) {
         setState(() => _isExporting = false);
       }
@@ -357,484 +735,376 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
     return BookingPdfService.instance.getDrawShift(drawName);
   }
 
-  List<String> get _availableCustomers {
-    final Set<String> customers = {'All'};
-    for (var s in _allDateSales) {
-      final name = s.buyerName.trim();
-      if (name.isNotEmpty) {
-        customers.add(name);
-      }
-    }
-    final list = customers.toList();
-    list.sort((a, b) {
-      if (a == 'All') return -1;
-      if (b == 'All') return 1;
-      return a.toLowerCase().compareTo(b.toLowerCase());
-    });
-    return list;
+  int _getShiftOrder(String drawName) {
+    final s = _getShift(drawName).toLowerCase();
+    if (s.contains('1')) return 1;
+    if (s.contains('6')) return 2;
+    if (s.contains('8')) return 3;
+    return 4;
   }
 
-  List<TicketSaleModel> get _customerSales {
-    if (_selectedCustomerFilter == 'All') return _allDateSales;
-    return _allDateSales
-        .where((s) => s.buyerName.trim().toLowerCase() == _selectedCustomerFilter.trim().toLowerCase())
-        .toList();
-  }
-
-  List<TicketSaleModel> get _filteredSales {
-    final list = _customerSales.where((s) {
-      if (_selectedShiftFilter == 'All') return true;
-      return _getShift(s.drawName) == _selectedShiftFilter;
-    }).toList();
-
-    // 🎯 Prioritize missing/empty series tickets at the VERY TOP
-    list.sort((a, b) {
-      final aMissing = a.ticketSeries == '?' || a.ticketSeries.trim().isEmpty || a.ticketSeries.toUpperCase() == 'MISSING' || a.ticketSeries.toUpperCase() == 'UNKNOWN' || a.ticketSeries == '—' || a.ticketSeries == '-' || a.ticketSeries.toLowerCase() == 'none';
-      final bMissing = b.ticketSeries == '?' || b.ticketSeries.trim().isEmpty || b.ticketSeries.toUpperCase() == 'MISSING' || b.ticketSeries.toUpperCase() == 'UNKNOWN' || b.ticketSeries == '—' || b.ticketSeries == '-' || b.ticketSeries.toLowerCase() == 'none';
-
-      if (aMissing && !bMissing) return -1; // A comes first (top)
-      if (!aMissing && bMissing) return 1;  // B comes first (top)
-      return b.saleDate.compareTo(a.saleDate); // Newer tickets first otherwise
-    });
-
-    return list;
-  }
+  List<String> get _availableCustomers => _cachedCustomerList;
 
   @override
   Widget build(BuildContext context) {
     final dateFormat = DateFormat('dd-MM-yyyy (EEEE)');
     final dateStr = dateFormat.format(_selectedDate);
 
-    // Calculate Shift-wise summary for selected customer
-    int count1PM = 0, count6PM = 0, count8PM = 0;
-    double total1PM = 0, total6PM = 0, total8PM = 0;
-
-    for (var sale in _customerSales) {
-      final shift = _getShift(sale.drawName);
-      if (shift == 'Dear 1 PM') {
-        count1PM += sale.quantity;
-        total1PM += sale.totalAmount;
-      } else if (shift == 'Dear 6 PM') {
-        count6PM += sale.quantity;
-        total6PM += sale.totalAmount;
-      } else if (shift == 'Dear 8 PM') {
-        count8PM += sale.quantity;
-        total8PM += sale.totalAmount;
-      }
-    }
-
-    int grandQty = count1PM + count6PM + count8PM;
-    double grandAmt = total1PM + total6PM + total8PM;
-
-    // Series Summary map
-    final Map<String, _LocalSeriesSummary> seriesMap = {};
-    for (var sale in _filteredSales) {
-      final ser = sale.ticketSeries.toUpperCase();
-      if (!seriesMap.containsKey(ser)) {
-        seriesMap[ser] = _LocalSeriesSummary(
-          series: ser,
-          quantity: 0,
-          rate: sale.pricePerTicket,
-          totalAmount: 0.0,
-        );
-      }
-      seriesMap[ser]!.quantity += sale.quantity;
-      seriesMap[ser]!.totalAmount += sale.totalAmount;
-    }
-    final sortedSeriesList = seriesMap.values.toList()
-      ..sort((a, b) => a.series.compareTo(b.series));
+    final screenSize = MediaQuery.of(context).size;
+    final dialogW = math.min(1300.0, screenSize.width * 0.96);
+    final dialogH = math.min(880.0, screenSize.height * 0.94);
+    final isCompact = dialogW < 1120;
+    final isNarrow = dialogW < 960;
 
     return Dialog(
+      insetPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
       backgroundColor: AppColors.surfaceContainerHigh,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: const BorderSide(color: AppColors.border),
       ),
       child: Container(
-        width: 1200,
-        height: 750,
-        padding: const EdgeInsets.all(24),
+        width: dialogW,
+        height: dialogH,
+        padding: EdgeInsets.all(isNarrow ? 12 : 20),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ─── TOP HEADER BAR (COMPACT & RESPONSIVE) ───────────────────────
-            Row(
-              children: [
-                Container(
-                  padding: const EdgeInsets.all(8),
-                  decoration: BoxDecoration(
-                    color: AppColors.primaryContainer.withValues(alpha: 0.2),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: const Icon(
-                    Icons.history_rounded,
-                    color: AppColors.primary,
-                    size: 22,
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        'Booking History & Shift Summary',
-                        style: AppTypography.titleMd.copyWith(
-                          color: AppColors.textPrimary,
-                          fontWeight: FontWeight.bold,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      Text(
-                        'Date-by-date ticket sales audit & PDF exporter',
-                        style: AppTypography.bodySm.copyWith(
-                          color: AppColors.textSecondary,
-                          fontSize: 11,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // Filter Range Options (Today, Weekly, Monthly, Custom Range, Date)
-                Container(
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceContainerLow,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: AppColors.border),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      ChoiceChip(
-                        visualDensity: VisualDensity.compact,
-                        label: const Text('Today', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
-                        selected: _exportRange == 'Today',
-                        selectedColor: AppColors.primary,
-                        labelStyle: TextStyle(color: _exportRange == 'Today' ? Colors.white : AppColors.textSecondary),
-                        onSelected: (sel) {
-                          if (sel) {
-                            setState(() {
-                              _exportRange = 'Today';
-                              _selectedDate = DateTime.now();
-                              _rangeStartDate = null;
-                              _rangeEndDate = null;
-                            });
-                            _loadSalesForDate();
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 3),
-                      ChoiceChip(
-                        visualDensity: VisualDensity.compact,
-                        label: const Text('Weekly (7D)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
-                        selected: _exportRange == 'Weekly',
-                        selectedColor: AppColors.primary,
-                        labelStyle: TextStyle(color: _exportRange == 'Weekly' ? Colors.white : AppColors.textSecondary),
-                        onSelected: (sel) {
-                          if (sel) {
-                            setState(() {
-                              _exportRange = 'Weekly';
-                              _rangeStartDate = null;
-                              _rangeEndDate = null;
-                            });
-                            _loadSalesForDate();
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 3),
-                      ChoiceChip(
-                        visualDensity: VisualDensity.compact,
-                        label: const Text('Monthly (30D)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
-                        selected: _exportRange == 'Monthly',
-                        selectedColor: AppColors.primary,
-                        labelStyle: TextStyle(color: _exportRange == 'Monthly' ? Colors.white : AppColors.textSecondary),
-                        onSelected: (sel) {
-                          if (sel) {
-                            setState(() {
-                              _exportRange = 'Monthly';
-                              _rangeStartDate = null;
-                              _rangeEndDate = null;
-                            });
-                            _loadSalesForDate();
-                          }
-                        },
-                      ),
-                      const SizedBox(width: 3),
-                      ActionChip(
-                        visualDensity: VisualDensity.compact,
-                        backgroundColor: _exportRange == 'Custom' ? AppColors.primary.withAlpha(40) : null,
-                        side: _exportRange == 'Custom' ? const BorderSide(color: AppColors.primary, width: 1.5) : null,
-                        avatar: Icon(
-                          Icons.date_range_rounded,
-                          size: 14,
-                          color: _exportRange == 'Custom' ? AppColors.primary : AppColors.textSecondary,
-                        ),
-                        label: Text(
-                          (_exportRange == 'Custom' && _rangeStartDate != null && _rangeEndDate != null)
-                              ? '${DateFormat('dd/MM').format(_rangeStartDate!)} - ${DateFormat('dd/MM/yy').format(_rangeEndDate!)}'
-                              : 'Custom Range 📅',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            fontSize: 11,
-                            color: _exportRange == 'Custom' ? AppColors.primary : AppColors.textPrimary,
-                          ),
-                        ),
-                        onPressed: _pickDateRange,
-                      ),
-                      const SizedBox(width: 3),
-                      ActionChip(
-                        visualDensity: VisualDensity.compact,
-                        avatar: const Icon(Icons.calendar_month_rounded, size: 14, color: AppColors.primary),
-                        label: Text(
-                          DateFormat('dd/MM/yyyy').format(_selectedDate),
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: AppColors.textPrimary),
-                        ),
-                        onPressed: _pickDate,
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                // 1. Export Full Detailed PDF (With Tickets)
-                ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.info,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    shape: RoundedRectangleBorder(
+            // ─── TOP HEADER BAR (RESPONSIVE) ─────────────────────────────────
+            if (isCompact) ...[
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryContainer.withValues(alpha: 0.2),
                       borderRadius: BorderRadius.circular(8),
                     ),
+                    child: const Icon(Icons.history_rounded, color: AppColors.primary, size: 20),
                   ),
-                  icon: _isExporting
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Icon(Icons.picture_as_pdf_rounded, size: 15),
-                  label: Text(
-                    _isExporting ? 'Exporting...' : 'Full PDF',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
-                  ),
-                  onPressed: (_filteredSales.isEmpty || _isExporting)
-                      ? null
-                      : () => _handlePdfExport(
-                            isSummaryOnly: false,
-                            grandQty: grandQty,
-                            grandAmt: grandAmt,
-                          ),
-                ),
-                const SizedBox(width: 6),
-                // 2. Export Summary-Only PDF (Without Ticket Numbers)
-                ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF0D9488),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                  ),
-                  icon: _isExporting
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                        )
-                      : const Icon(Icons.analytics_rounded, size: 15),
-                  label: Text(
-                    _isExporting ? 'Exporting...' : 'Summary PDF',
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
-                  ),
-                  onPressed: (_filteredSales.isEmpty || _isExporting)
-                      ? null
-                      : () => _handlePdfExport(
-                            isSummaryOnly: true,
-                            grandQty: grandQty,
-                            grandAmt: grandAmt,
-                          ),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  tooltip: 'Open Reports Folder in Windows Explorer',
-                  icon: const Icon(Icons.folder_open_rounded, color: AppColors.primary, size: 20),
-                  padding: const EdgeInsets.all(6),
-                  constraints: const BoxConstraints(),
-                  onPressed: () => BookingPdfService.instance.openReportsFolder(),
-                ),
-                const SizedBox(width: 4),
-                IconButton(
-                  icon: const Icon(Icons.close_rounded, color: AppColors.textSecondary, size: 20),
-                  padding: const EdgeInsets.all(6),
-                  constraints: const BoxConstraints(),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-              ],
-            ),
-            const SizedBox(height: 18),
-            const Divider(color: AppColors.border, height: 1),
-            const SizedBox(height: 16),
-
-            // ─── SHIFT SUMMARY STAT CARDS ────────────────────────────────────
-            Row(
-              children: [
-                _buildStatCard(
-                  title: '1 PM Shift (Morning)',
-                  qty: count1PM,
-                  amount: total1PM,
-                  color: Colors.amber,
-                  icon: Icons.wb_sunny_rounded,
-                ),
-                const SizedBox(width: 12),
-                _buildStatCard(
-                  title: '6 PM Shift (Day)',
-                  qty: count6PM,
-                  amount: total6PM,
-                  color: Colors.orangeAccent,
-                  icon: Icons.wb_twilight_rounded,
-                ),
-                const SizedBox(width: 12),
-                _buildStatCard(
-                  title: '8 PM Shift (Night)',
-                  qty: count8PM,
-                  amount: total8PM,
-                  color: Colors.purpleAccent,
-                  icon: Icons.nightlight_round,
-                ),
-                const SizedBox(width: 12),
-                _buildStatCard(
-                  title: _selectedCustomerFilter == 'All' ? 'Total All Shifts' : 'Total ($_selectedCustomerFilter)',
-                  qty: grandQty,
-                  amount: grandAmt,
-                  color: AppColors.success,
-                  icon: Icons.account_balance_wallet_rounded,
-                  isHighlight: true,
-                ),
-              ],
-            ),
-            const SizedBox(height: 16),
-
-            // ─── FILTER CONTROLS: SHIFT TABS + CUSTOMER SELECTOR ─────────────
-            Row(
-              children: [
-                Text(
-                  'Shift:',
-                  style: AppTypography.bodySm.copyWith(
-                    color: AppColors.textSecondary,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                ...['All', 'Dear 1 PM', 'Dear 6 PM', 'Dear 8 PM'].map((shiftName) {
-                  final isSelected = _selectedShiftFilter == shiftName;
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: FilterChip(
-                      selected: isSelected,
-                      label: Text(shiftName),
-                      selectedColor: AppColors.primary,
-                      backgroundColor: AppColors.surfaceContainerLow,
-                      labelStyle: TextStyle(
-                        color: isSelected ? Colors.black : AppColors.textSecondary,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                        fontSize: 12,
-                      ),
-                      onSelected: (val) {
-                        setState(() => _selectedShiftFilter = shiftName);
-                      },
-                    ),
-                  );
-                }),
-                const SizedBox(width: 16),
-                Container(
-                  height: 24,
-                  width: 1,
-                  color: AppColors.border,
-                ),
-                const SizedBox(width: 16),
-                // Customer Filter Dropdown
-                Text(
-                  'Customer:',
-                  style: AppTypography.bodySm.copyWith(
-                    color: AppColors.textSecondary,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: AppColors.surfaceContainerLow,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: _selectedCustomerFilter != 'All' ? AppColors.primary : AppColors.border,
-                      width: _selectedCustomerFilter != 'All' ? 1.5 : 1.0,
-                    ),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      value: _availableCustomers.contains(_selectedCustomerFilter)
-                          ? _selectedCustomerFilter
-                          : 'All',
-                      dropdownColor: AppColors.surfaceContainerHigh,
-                      icon: const Icon(Icons.arrow_drop_down_rounded, color: AppColors.primary, size: 22),
-                      style: const TextStyle(
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Booking History & Audit',
+                      style: AppTypography.titleMd.copyWith(
                         color: AppColors.textPrimary,
                         fontWeight: FontWeight.bold,
-                        fontSize: 12,
+                        fontSize: 15,
                       ),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() => _selectedCustomerFilter = val);
-                        }
-                      },
-                      items: _availableCustomers.map((cust) {
-                        final count = cust == 'All'
-                            ? _allDateSales.length
-                            : _allDateSales
-                                .where((s) => s.buyerName.trim().toLowerCase() == cust.trim().toLowerCase())
-                                .length;
-                        return DropdownMenuItem<String>(
-                          value: cust,
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(
-                                cust == 'All' ? Icons.people_alt_rounded : Icons.person_rounded,
-                                size: 16,
-                                color: cust == 'All' ? AppColors.textSecondary : AppColors.primary,
-                              ),
-                              const SizedBox(width: 6),
-                              Text(cust == 'All' ? 'All Customers ($count)' : '$cust ($count tkts)'),
-                            ],
-                          ),
-                        );
-                      }).toList(),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
+                  _buildPdfButtons(),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: 'Open Reports Folder',
+                    icon: const Icon(Icons.folder_open_rounded, color: AppColors.primary, size: 20),
+                    padding: const EdgeInsets.all(6),
+                    constraints: const BoxConstraints(),
+                    onPressed: () => BookingPdfService.instance.openReportsFolder(),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded, color: AppColors.textSecondary, size: 20),
+                    padding: const EdgeInsets.all(6),
+                    constraints: const BoxConstraints(),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              _buildRangeChipContainer(),
+            ] else ...[
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryContainer.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.history_rounded, color: AppColors.primary, size: 22),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          'Booking History & Shift Summary',
+                          style: AppTypography.titleMd.copyWith(
+                            color: AppColors.textPrimary,
+                            fontWeight: FontWeight.bold,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        Text(
+                          'Date-by-date ticket sales audit & PDF exporter',
+                          style: AppTypography.bodySm.copyWith(
+                            color: AppColors.textSecondary,
+                            fontSize: 11,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _buildRangeChipContainer(),
+                  const SizedBox(width: 8),
+                  _buildPdfButtons(),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    tooltip: 'Open Reports Folder',
+                    icon: const Icon(Icons.folder_open_rounded, color: AppColors.primary, size: 20),
+                    padding: const EdgeInsets.all(6),
+                    constraints: const BoxConstraints(),
+                    onPressed: () => BookingPdfService.instance.openReportsFolder(),
+                  ),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.close_rounded, color: AppColors.textSecondary, size: 20),
+                    padding: const EdgeInsets.all(6),
+                    constraints: const BoxConstraints(),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 12),
+            const Divider(color: AppColors.border, height: 1),
+            const SizedBox(height: 12),
+
+            // ─── SHIFT SUMMARY STAT CARDS (RESPONSIVE) ───────────────────────
+            if (isNarrow) ...[
+              Row(
+                children: [
+                  _buildStatCard(title: '1 PM (Morning)', qty: _count1PM, amount: _total1PM, color: Colors.amber, icon: Icons.wb_sunny_rounded),
+                  const SizedBox(width: 8),
+                  _buildStatCard(title: '6 PM (Day)', qty: _count6PM, amount: _total6PM, color: Colors.orangeAccent, icon: Icons.wb_twilight_rounded),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  _buildStatCard(title: '8 PM (Night)', qty: _count8PM, amount: _total8PM, color: Colors.purpleAccent, icon: Icons.nightlight_round),
+                  const SizedBox(width: 8),
+                  _buildStatCard(title: _selectedCustomerFilter == 'All' ? 'Total All Shifts' : 'Total ($_selectedCustomerFilter)', qty: _grandQty, amount: _grandAmt, color: AppColors.success, icon: Icons.account_balance_wallet_rounded, isHighlight: true),
+                ],
+              ),
+            ] else ...[
+              Row(
+                children: [
+                  _buildStatCard(title: '1 PM Shift (Morning)', qty: _count1PM, amount: _total1PM, color: Colors.amber, icon: Icons.wb_sunny_rounded),
+                  const SizedBox(width: 12),
+                  _buildStatCard(title: '6 PM Shift (Day)', qty: _count6PM, amount: _total6PM, color: Colors.orangeAccent, icon: Icons.wb_twilight_rounded),
+                  const SizedBox(width: 12),
+                  _buildStatCard(title: '8 PM Shift (Night)', qty: _count8PM, amount: _total8PM, color: Colors.purpleAccent, icon: Icons.nightlight_round),
+                  const SizedBox(width: 12),
+                  _buildStatCard(title: _selectedCustomerFilter == 'All' ? 'Total All Shifts' : 'Total ($_selectedCustomerFilter)', qty: _grandQty, amount: _grandAmt, color: AppColors.success, icon: Icons.account_balance_wallet_rounded, isHighlight: true),
+                ],
+              ),
+            ],
+            const SizedBox(height: 12),
+
+            // ─── FILTER CONTROLS: SHIFT TABS + CUSTOMER SELECTOR (RESPONSIVE WRAP) ───
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Shift:', style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 8),
+                    ...['All', 'Dear 1 PM', 'Dear 6 PM', 'Dear 8 PM'].map((shiftName) {
+                      final isSelected = _selectedShiftFilter == shiftName;
+                      return Padding(
+                        padding: const EdgeInsets.only(right: 6),
+                        child: FilterChip(
+                          selected: isSelected,
+                          label: Text(shiftName),
+                          selectedColor: AppColors.primary,
+                          backgroundColor: AppColors.surfaceContainerLow,
+                          labelStyle: TextStyle(
+                            color: isSelected ? Colors.black : AppColors.textSecondary,
+                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                            fontSize: 12,
+                          ),
+                          onSelected: (val) {
+                            setState(() {
+                              _selectedShiftFilter = shiftName;
+                              _displayedLimit = 100;
+                              _recomputeFilteredSales();
+                            });
+                          },
+                        ),
+                      );
+                    }),
+                  ],
                 ),
-                const Spacer(),
-                Text(
-                  'Showing ${_filteredSales.length} records',
-                  style: AppTypography.bodySm.copyWith(
-                    color: AppColors.textSecondary,
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text('Customer:', style: AppTypography.bodySm.copyWith(color: AppColors.textSecondary, fontWeight: FontWeight.bold)),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: AppColors.surfaceContainerLow,
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: _selectedCustomerFilter != 'All' ? AppColors.primary : AppColors.border,
+                          width: _selectedCustomerFilter != 'All' ? 1.5 : 1.0,
+                        ),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<String>(
+                          value: _availableCustomers.contains(_selectedCustomerFilter)
+                              ? _selectedCustomerFilter
+                              : 'All',
+                          dropdownColor: AppColors.surfaceContainerHigh,
+                          icon: const Icon(Icons.arrow_drop_down_rounded, color: AppColors.primary, size: 22),
+                          style: const TextStyle(
+                            color: AppColors.textPrimary,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                          onChanged: (val) {
+                            if (val != null) {
+                              setState(() {
+                                _selectedCustomerFilter = val;
+                                _displayedLimit = 100;
+                                _recomputeFilteredSales();
+                              });
+                            }
+                          },
+                          items: _cachedCustomerList.map((cust) {
+                            final totalQty = _customerQtyMap[cust] ?? 0;
+                            final totalRecords = _customerRecordsMap[cust] ?? 0;
+                            return DropdownMenuItem<String>(
+                              value: cust,
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    cust == 'All' ? Icons.people_alt_rounded : Icons.person_rounded,
+                                    size: 16,
+                                    color: cust == 'All' ? AppColors.textSecondary : AppColors.primary,
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Text(cust == 'All'
+                                      ? 'All Customers ($totalQty tkts / $totalRecords rec)'
+                                      : '$cust ($totalQty tkts)'),
+                                ],
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.surfaceContainerLow,
+                    borderRadius: BorderRadius.circular(6),
+                    border: Border.all(color: AppColors.border),
+                  ),
+                  child: Text(
+                    'Showing ${math.min(_displayedLimit, _filteredSales.length)} of ${_filteredSales.length} records ($_grandQty total tkts)',
+                    style: AppTypography.bodySm.copyWith(
+                      color: AppColors.textSecondary,
+                    ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 12),
+
+            if (isNarrow) ...[
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Expanded(
+                    child: ChoiceChip(
+                      avatar: const Icon(Icons.table_chart_rounded, size: 16),
+                      label: Text('Bookings List (${_filteredSales.length})', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                      selected: _activeBodyTab == 0,
+                      selectedColor: AppColors.primary,
+                      labelStyle: TextStyle(color: _activeBodyTab == 0 ? Colors.black : AppColors.textSecondary),
+                      onSelected: (_) => setState(() => _activeBodyTab = 0),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: ChoiceChip(
+                      avatar: const Icon(Icons.pie_chart_outline_rounded, size: 16),
+                      label: Text('Series Summary (${_sortedSeriesList.length})', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                      selected: _activeBodyTab == 1,
+                      selectedColor: AppColors.primary,
+                      labelStyle: TextStyle(color: _activeBodyTab == 1 ? Colors.black : AppColors.textSecondary),
+                      onSelected: (_) => setState(() => _activeBodyTab = 1),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 10),
 
             // ─── BODY CONTENT: SERIES SUMMARY + SALES DATA TABLE ────────────
             Expanded(
               child: _isLoading
-                  ? const Center(
-                      child: CircularProgressIndicator(color: AppColors.primary),
+                  ? Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 24),
+                        decoration: BoxDecoration(
+                          color: AppColors.surfaceContainerLow,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: AppColors.border),
+                          boxShadow: const [
+                            BoxShadow(
+                              color: Colors.black26,
+                              blurRadius: 16,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const SizedBox(
+                              width: 36,
+                              height: 36,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 3,
+                                color: AppColors.primary,
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            Text(
+                              _loadingStatus,
+                              style: AppTypography.titleMd.copyWith(
+                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            const SizedBox(height: 6),
+                            Text(
+                              'Optimizing view and calculating live aggregates...',
+                              style: AppTypography.bodySm.copyWith(
+                                color: AppColors.textSecondary,
+                                fontSize: 11.5,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     )
                   : _filteredSales.isEmpty
                       ? Center(
@@ -856,283 +1126,576 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
                             ],
                           ),
                         )
-                      : Row(
-                          crossAxisAlignment: CrossAxisAlignment.start,
+                      : isNarrow
+                          ? (_activeBodyTab == 0 ? _buildBookingsTable(isNarrow: true) : _buildSeriesSummary())
+                          : Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                SizedBox(
+                                  width: math.min(310.0, dialogW * 0.28),
+                                  child: _buildSeriesSummary(),
+                                ),
+                                const SizedBox(width: 14),
+                                Expanded(child: _buildBookingsTable(isNarrow: false)),
+                              ],
+                            ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPdfButtons() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: AppColors.info,
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          icon: _isExporting
+              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.picture_as_pdf_rounded, size: 15),
+          label: Text(
+            _isExporting ? 'Exporting...' : 'Full PDF',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
+          ),
+          onPressed: (_filteredSales.isEmpty || _isExporting)
+              ? null
+              : () => _handlePdfExport(
+                    isSummaryOnly: false,
+                    grandQty: _grandQty,
+                    grandAmt: _grandAmt,
+                  ),
+        ),
+        const SizedBox(width: 6),
+        ElevatedButton.icon(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0D9488),
+            foregroundColor: Colors.white,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          icon: _isExporting
+              ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+              : const Icon(Icons.analytics_rounded, size: 15),
+          label: Text(
+            _isExporting ? 'Exporting...' : 'Summary PDF',
+            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11.5),
+          ),
+          onPressed: (_filteredSales.isEmpty || _isExporting)
+              ? null
+              : () => _handlePdfExport(
+                    isSummaryOnly: true,
+                    grandQty: _grandQty,
+                    grandAmt: _grandAmt,
+                  ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildRangeChipContainer() {
+    return Container(
+      padding: const EdgeInsets.all(2),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: AppColors.border),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ChoiceChip(
+              visualDensity: VisualDensity.compact,
+              label: const Text('Today', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+              selected: _exportRange == 'Today',
+              selectedColor: AppColors.primary,
+              labelStyle: TextStyle(color: _exportRange == 'Today' ? Colors.white : AppColors.textSecondary),
+              onSelected: (sel) {
+                if (sel) {
+                  setState(() {
+                    _exportRange = 'Today';
+                    _selectedDate = DateTime.now();
+                    _rangeStartDate = null;
+                    _rangeEndDate = null;
+                  });
+                  _loadSalesForDate();
+                }
+              },
+            ),
+            const SizedBox(width: 3),
+            ChoiceChip(
+              visualDensity: VisualDensity.compact,
+              label: const Text('Weekly (7D)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+              selected: _exportRange == 'Weekly',
+              selectedColor: AppColors.primary,
+              labelStyle: TextStyle(color: _exportRange == 'Weekly' ? Colors.white : AppColors.textSecondary),
+              onSelected: (sel) {
+                if (sel) {
+                  setState(() {
+                    _exportRange = 'Weekly';
+                    _rangeStartDate = null;
+                    _rangeEndDate = null;
+                  });
+                  _loadSalesForDate();
+                }
+              },
+            ),
+            const SizedBox(width: 3),
+            ChoiceChip(
+              visualDensity: VisualDensity.compact,
+              label: const Text('Monthly (30D)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 11)),
+              selected: _exportRange == 'Monthly',
+              selectedColor: AppColors.primary,
+              labelStyle: TextStyle(color: _exportRange == 'Monthly' ? Colors.white : AppColors.textSecondary),
+              onSelected: (sel) {
+                if (sel) {
+                  setState(() {
+                    _exportRange = 'Monthly';
+                    _rangeStartDate = null;
+                    _rangeEndDate = null;
+                  });
+                  _loadSalesForDate();
+                }
+              },
+            ),
+            const SizedBox(width: 3),
+            ActionChip(
+              visualDensity: VisualDensity.compact,
+              backgroundColor: _exportRange == 'Custom' ? AppColors.primary.withAlpha(40) : null,
+              side: _exportRange == 'Custom' ? const BorderSide(color: AppColors.primary, width: 1.5) : null,
+              avatar: Icon(
+                Icons.date_range_rounded,
+                size: 14,
+                color: _exportRange == 'Custom' ? AppColors.primary : AppColors.textSecondary,
+              ),
+              label: Text(
+                (_exportRange == 'Custom' && _rangeStartDate != null && _rangeEndDate != null)
+                    ? '${DateFormat('dd/MM').format(_rangeStartDate!)} - ${DateFormat('dd/MM/yy').format(_rangeEndDate!)}'
+                    : 'Custom Range 📅',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 11,
+                  color: _exportRange == 'Custom' ? AppColors.primary : AppColors.textPrimary,
+                ),
+              ),
+              onPressed: _pickDateRange,
+            ),
+            const SizedBox(width: 3),
+            ActionChip(
+              visualDensity: VisualDensity.compact,
+              avatar: const Icon(Icons.calendar_month_rounded, size: 14, color: AppColors.primary),
+              label: Text(
+                DateFormat('dd/MM/yyyy').format(_selectedDate),
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: AppColors.textPrimary),
+              ),
+              onPressed: _pickDate,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSeriesSummary() {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(
+                Icons.pie_chart_outline_rounded,
+                color: AppColors.primary,
+                size: 20,
+              ),
+              const SizedBox(width: 8),
+              Text(
+                'Series Rate Summary',
+                style: AppTypography.titleMd.copyWith(
+                  color: AppColors.primary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          const Divider(color: AppColors.border, height: 1),
+          const SizedBox(height: 8),
+          Expanded(
+            child: Scrollbar(
+              controller: _seriesScrollController,
+              thumbVisibility: true,
+              child: ListView.separated(
+                controller: _seriesScrollController,
+                physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                itemCount: _sortedSeriesList.length,
+                separatorBuilder: (_, _) =>
+                    const Divider(color: AppColors.border, height: 1),
+                itemBuilder: (context, idx) {
+                  final item = _sortedSeriesList[idx];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      mainAxisAlignment:
+                          MainAxisAlignment.spaceBetween,
+                      children: [
+                        Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.start,
                           children: [
-                            // LEFT SIDE: SERIES SUMMARY BREAKDOWN
-                            Container(
-                              width: 320,
-                              decoration: BoxDecoration(
-                                color: AppColors.surfaceContainerLow,
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(color: AppColors.border),
-                              ),
-                              padding: const EdgeInsets.all(14),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      const Icon(
-                                        Icons.pie_chart_outline_rounded,
-                                        color: AppColors.primary,
-                                        size: 20,
-                                      ),
-                                      const SizedBox(width: 8),
-                                      Text(
-                                        'Series Rate Summary',
-                                        style: AppTypography.titleMd.copyWith(
-                                          color: AppColors.primary,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 10),
-                                  const Divider(color: AppColors.border, height: 1),
-                                  const SizedBox(height: 8),
-                                  Expanded(
-                                    child: ListView.separated(
-                                      itemCount: sortedSeriesList.length,
-                                      separatorBuilder: (_, _) =>
-                                          const Divider(color: AppColors.border, height: 1),
-                                      itemBuilder: (context, idx) {
-                                        final item = sortedSeriesList[idx];
-                                        return Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                            vertical: 8,
-                                          ),
-                                          child: Row(
-                                            mainAxisAlignment:
-                                                MainAxisAlignment.spaceBetween,
-                                            children: [
-                                              Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.start,
-                                                children: [
-                                                  Text(
-                                                    'Series ${item.series}',
-                                                    style: AppTypography.bodyMd
-                                                        .copyWith(
-                                                      color: AppColors.textPrimary,
-                                                      fontWeight: FontWeight.bold,
-                                                    ),
-                                                  ),
-                                                  Text(
-                                                    'Rate: ₹${item.rate.toStringAsFixed(2)} / tkt',
-                                                    style: AppTypography.bodySm
-                                                        .copyWith(
-                                                      color: AppColors.textSecondary,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                              Column(
-                                                crossAxisAlignment:
-                                                    CrossAxisAlignment.end,
-                                                children: [
-                                                  Text(
-                                                    '${item.quantity} Tkts',
-                                                    style: AppTypography.bodyMd
-                                                        .copyWith(
-                                                      color: AppColors.primary,
-                                                      fontWeight: FontWeight.bold,
-                                                    ),
-                                                  ),
-                                                  Text(
-                                                    '₹${item.totalAmount.toStringAsFixed(2)}',
-                                                    style: AppTypography.bodySm
-                                                        .copyWith(
-                                                      color: AppColors.success,
-                                                      fontWeight: FontWeight.bold,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ],
-                                          ),
-                                        );
-                                      },
-                                    ),
-                                  ),
-                                  const Divider(color: AppColors.border, height: 1),
-                                  const SizedBox(height: 8),
-                                  Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    children: [
-                                      Text(
-                                        'Total Series: ${sortedSeriesList.length}',
-                                        style: AppTypography.bodySm.copyWith(
-                                          color: AppColors.textSecondary,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                      Text(
-                                        '₹${seriesMap.values.fold<double>(0, (sum, e) => sum + e.totalAmount).toStringAsFixed(2)}',
-                                        style: AppTypography.bodyMd.copyWith(
-                                          color: AppColors.success,
-                                          fontWeight: FontWeight.bold,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
+                            Text(
+                              'Series ${item.series}',
+                              style: AppTypography.bodyMd
+                                  .copyWith(
+                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.bold,
                               ),
                             ),
-                            const SizedBox(width: 14),
-
-                            // RIGHT SIDE: BOOKINGS DETAILED TABLE (HIGH-PERFORMANCE VIRTUALIZED LIST)
-                            Expanded(
-                              child: Container(
-                                decoration: BoxDecoration(
-                                  color: AppColors.surfaceContainerLow,
-                                  borderRadius: BorderRadius.circular(12),
-                                  border: Border.all(color: AppColors.border),
-                                ),
-                                clipBehavior: Clip.antiAlias,
-                                child: Column(
-                                  children: [
-                                    // Sticky Header Row
-                                    Container(
-                                      color: AppColors.surfaceContainerHigh,
-                                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
-                                      child: const Row(
-                                        children: [
-                                          SizedBox(width: 45, child: Text('#', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 90, child: Text('Shift', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 80, child: Text('Series', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 115, child: Text('Ticket No.', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 55, child: Text('Qty', textAlign: TextAlign.center, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 90, child: Text('Rate (₹)', textAlign: TextAlign.right, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 95, child: Text('Total (₹)', textAlign: TextAlign.right, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                          SizedBox(width: 16),
-                                          Expanded(child: Text('Seller / Customer', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
-                                        ],
-                                      ),
-                                    ),
-                                    const Divider(height: 1, color: AppColors.border),
-                                    // Virtualized Scroll List (Only renders visible rows — Zero Hang / 60 FPS)
-                                    Expanded(
-                                      child: ListView.separated(
-                                        itemCount: _filteredSales.length,
-                                        separatorBuilder: (context, index) => const Divider(height: 1, color: AppColors.border),
-                                        itemBuilder: (context, idx) {
-                                          final sale = _filteredSales[idx];
-                                          final shift = _getShift(sale.drawName);
-                                          final isNoSeries = sale.ticketSeries == '?' ||
-                                              sale.ticketSeries.isEmpty ||
-                                              sale.ticketSeries == 'UNKNOWN' ||
-                                              sale.ticketSeries == 'MISSING';
-
-                                          return Container(
-                                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                                            color: idx.isEven ? Colors.transparent : AppColors.surfaceContainerHighest.withAlpha(25),
-                                            child: Row(
-                                              children: [
-                                                SizedBox(width: 45, child: Text('${idx + 1}', style: const TextStyle(fontSize: 12, color: AppColors.textSecondary))),
-                                                SizedBox(
-                                                  width: 90,
-                                                  child: Container(
-                                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                                    decoration: BoxDecoration(
-                                                      color: shift.contains('1 PM')
-                                                          ? Colors.amber.withValues(alpha: 0.18)
-                                                          : shift.contains('6 PM')
-                                                              ? Colors.orange.withValues(alpha: 0.18)
-                                                              : Colors.purple.withValues(alpha: 0.18),
-                                                      borderRadius: BorderRadius.circular(4),
-                                                    ),
-                                                    child: Text(
-                                                      shift,
-                                                      style: TextStyle(
-                                                        fontSize: 10.5,
-                                                        fontWeight: FontWeight.bold,
-                                                        color: shift.contains('1 PM')
-                                                            ? Colors.amber
-                                                            : shift.contains('6 PM')
-                                                                ? Colors.orangeAccent
-                                                                : Colors.purpleAccent,
-                                                      ),
-                                                      overflow: TextOverflow.ellipsis,
-                                                    ),
-                                                  ),
-                                                ),
-                                                SizedBox(
-                                                  width: 80,
-                                                  child: isNoSeries
-                                                      ? Container(
-                                                          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                                                          decoration: BoxDecoration(
-                                                            color: Colors.amber.withValues(alpha: 0.25),
-                                                            borderRadius: BorderRadius.circular(4),
-                                                            border: Border.all(color: Colors.amber, width: 1),
-                                                          ),
-                                                          child: const Text('NO SER', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 9.5)),
-                                                        )
-                                                      : Text(
-                                                          sale.ticketSeries,
-                                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.primary),
-                                                        ),
-                                                ),
-                                                SizedBox(
-                                                  width: 115,
-                                                  child: Text(
-                                                    sale.ticketNumber,
-                                                    style: const TextStyle(
-                                                      fontFamily: 'monospace',
-                                                      fontWeight: FontWeight.bold,
-                                                      fontSize: 12,
-                                                      color: AppColors.textPrimary,
-                                                    ),
-                                                  ),
-                                                ),
-                                                SizedBox(
-                                                  width: 55,
-                                                  child: Text(
-                                                    '${sale.quantity}',
-                                                    textAlign: TextAlign.center,
-                                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textPrimary),
-                                                  ),
-                                                ),
-                                                SizedBox(
-                                                  width: 90,
-                                                  child: Text(
-                                                    '₹${sale.pricePerTicket.toStringAsFixed(2)}',
-                                                    textAlign: TextAlign.right,
-                                                    style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
-                                                  ),
-                                                ),
-                                                SizedBox(
-                                                  width: 95,
-                                                  child: Text(
-                                                    '₹${sale.totalAmount.toStringAsFixed(2)}',
-                                                    textAlign: TextAlign.right,
-                                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5, color: AppColors.success),
-                                                  ),
-                                                ),
-                                                const SizedBox(width: 16),
-                                                Expanded(
-                                                  child: Text(
-                                                    sale.buyerName.isNotEmpty ? sale.buyerName : sale.agentName,
-                                                    style: const TextStyle(fontSize: 12, color: AppColors.textPrimary),
-                                                    overflow: TextOverflow.ellipsis,
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                  ],
-                                ),
+                            Text(
+                              'Rate: ₹${item.rate.toStringAsFixed(2)} / tkt',
+                              style: AppTypography.bodySm
+                                  .copyWith(
+                                color: AppColors.textSecondary,
                               ),
                             ),
                           ],
                         ),
+                        Column(
+                          crossAxisAlignment:
+                              CrossAxisAlignment.end,
+                          children: [
+                            Text(
+                              '${item.quantity} Tkts',
+                              style: AppTypography.bodyMd
+                                  .copyWith(
+                                color: AppColors.primary,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                            Text(
+                              '₹${item.totalAmount.toStringAsFixed(2)}',
+                              style: AppTypography.bodySm
+                                  .copyWith(
+                                color: AppColors.success,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
             ),
-          ],
-        ),
+          ),
+          const Divider(color: AppColors.border, height: 1),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment:
+                MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Total Series: ${_sortedSeriesList.length}',
+                style: AppTypography.bodySm.copyWith(
+                  color: AppColors.textSecondary,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              Text(
+                '₹${_sortedSeriesList.fold<double>(0, (sum, e) => sum + e.totalAmount).toStringAsFixed(2)}',
+                style: AppTypography.bodyMd.copyWith(
+                  color: AppColors.success,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBookingsTable({required bool isNarrow}) {
+    return Container(
+      decoration: BoxDecoration(
+        color: AppColors.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.border),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, box) {
+          final tableW = math.max(680.0, box.maxWidth);
+          return Scrollbar(
+            controller: _horizontalScrollController,
+            thumbVisibility: true,
+            child: SingleChildScrollView(
+              controller: _horizontalScrollController,
+              scrollDirection: Axis.horizontal,
+              child: SizedBox(
+                width: tableW,
+                child: Column(
+                  children: [
+                    // Sticky Header Row
+                    Container(
+                      color: AppColors.surfaceContainerHigh,
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
+                      child: const Row(
+                        children: [
+                          SizedBox(width: 45, child: Text('#', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 90, child: Text('Shift', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 80, child: Text('Series', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 115, child: Text('Ticket No.', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 55, child: Text('Qty', textAlign: TextAlign.center, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 90, child: Text('Rate (₹)', textAlign: TextAlign.right, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 95, child: Text('Total (₹)', textAlign: TextAlign.right, style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                          SizedBox(width: 16),
+                          Expanded(child: Text('Seller / Customer', style: TextStyle(color: AppColors.textSecondary, fontWeight: FontWeight.bold, fontSize: 12))),
+                        ],
+                      ),
+                    ),
+                    const Divider(height: 1, color: AppColors.border),
+                    // High-Performance Virtualized Scroll List with itemExtent: 38.0 (Butter-smooth 60/120 FPS)
+                    Expanded(
+                      child: Builder(
+                        builder: (context) {
+                          final visibleCount = math.min(_displayedLimit, _filteredSales.length);
+
+                          return Scrollbar(
+                            controller: _listScrollController,
+                            thumbVisibility: true,
+                            child: ListView.builder(
+                              controller: _listScrollController,
+                              itemCount: visibleCount,
+                              itemExtent: 38.0,
+                              physics: const AlwaysScrollableScrollPhysics(parent: BouncingScrollPhysics()),
+                              itemBuilder: (context, idx) {
+                                final sale = _filteredSales[idx];
+                                final shift = _getShift(sale.drawName);
+                                final isNoSeries = sale.ticketSeries == '?' ||
+                                    sale.ticketSeries.isEmpty ||
+                                    sale.ticketSeries == 'UNKNOWN' ||
+                                    sale.ticketSeries == 'MISSING';
+
+                                return Container(
+                                  height: 38.0,
+                                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                                  decoration: BoxDecoration(
+                                    color: idx.isEven ? Colors.transparent : AppColors.surfaceContainerHighest.withAlpha(25),
+                                    border: const Border(bottom: BorderSide(color: AppColors.border, width: 0.8)),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      SizedBox(width: 45, child: Text('${idx + 1}', style: const TextStyle(fontSize: 12, color: AppColors.textSecondary))),
+                                      SizedBox(
+                                        width: 90,
+                                        child: Container(
+                                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                          decoration: BoxDecoration(
+                                            color: shift.contains('1 PM')
+                                                ? Colors.amber.withValues(alpha: 0.18)
+                                                : shift.contains('6 PM')
+                                                    ? Colors.orange.withValues(alpha: 0.18)
+                                                    : Colors.purple.withValues(alpha: 0.18),
+                                            borderRadius: BorderRadius.circular(4),
+                                          ),
+                                          child: Text(
+                                            shift,
+                                            style: TextStyle(
+                                              fontSize: 10.5,
+                                              fontWeight: FontWeight.bold,
+                                              color: shift.contains('1 PM')
+                                                  ? Colors.amber
+                                                  : shift.contains('6 PM')
+                                                      ? Colors.orangeAccent
+                                                      : Colors.purpleAccent,
+                                            ),
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 80,
+                                        child: isNoSeries
+                                            ? Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.amber.withValues(alpha: 0.25),
+                                                  borderRadius: BorderRadius.circular(4),
+                                                  border: Border.all(color: Colors.amber, width: 1),
+                                                ),
+                                                child: const Text('NO SER', style: TextStyle(color: Colors.amber, fontWeight: FontWeight.bold, fontSize: 9.5)),
+                                              )
+                                            : Text(
+                                                sale.ticketSeries,
+                                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.primary),
+                                              ),
+                                      ),
+                                      SizedBox(
+                                        width: 115,
+                                        child: Text(
+                                          sale.ticketNumber,
+                                          style: const TextStyle(
+                                            fontFamily: 'monospace',
+                                            fontWeight: FontWeight.bold,
+                                            fontSize: 12,
+                                            color: AppColors.textPrimary,
+                                          ),
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 55,
+                                        child: sale.quantity > 1
+                                            ? Container(
+                                                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                                decoration: BoxDecoration(
+                                                  color: Colors.amber.withValues(alpha: 0.25),
+                                                  borderRadius: BorderRadius.circular(4),
+                                                  border: Border.all(color: Colors.amber, width: 1.0),
+                                                ),
+                                                child: Text(
+                                                  '${sale.quantity}',
+                                                  textAlign: TextAlign.center,
+                                                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 12, color: Colors.amber),
+                                                ),
+                                              )
+                                            : Text(
+                                                '${sale.quantity}',
+                                                textAlign: TextAlign.center,
+                                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: AppColors.textPrimary),
+                                              ),
+                                      ),
+                                      SizedBox(
+                                        width: 90,
+                                        child: Text(
+                                          '₹${sale.pricePerTicket.toStringAsFixed(2)}',
+                                          textAlign: TextAlign.right,
+                                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                                        ),
+                                      ),
+                                      SizedBox(
+                                        width: 95,
+                                        child: Text(
+                                          '₹${sale.totalAmount.toStringAsFixed(2)}',
+                                          textAlign: TextAlign.right,
+                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12.5, color: AppColors.success),
+                                        ),
+                                      ),
+                                      const SizedBox(width: 16),
+                                      Expanded(
+                                        child: Text(
+                                          sale.buyerName.isNotEmpty ? sale.buyerName : sale.agentName,
+                                          style: const TextStyle(fontSize: 12, color: AppColors.textPrimary),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    // Bottom Sticky Pagination Toolbar (Zero Scroll Jitter)
+                    Container(
+                      height: 44,
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      decoration: const BoxDecoration(
+                        color: AppColors.surfaceContainerHigh,
+                        border: Border(top: BorderSide(color: AppColors.border)),
+                      ),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.list_alt_rounded, size: 16, color: AppColors.textSecondary),
+                              const SizedBox(width: 6),
+                              Text(
+                                'Showing ${math.min(_displayedLimit, _filteredSales.length)} of ${_filteredSales.length} records ($_grandQty total tkts)',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: AppColors.textSecondary,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (_displayedLimit < _filteredSales.length) ...[
+                            Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                ElevatedButton.icon(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: AppColors.primary,
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                  ),
+                                  icon: const Icon(Icons.arrow_downward_rounded, size: 14),
+                                  label: const Text('Load +250 More', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                  onPressed: _loadMoreChunks,
+                                ),
+                                const SizedBox(width: 8),
+                                OutlinedButton.icon(
+                                  style: OutlinedButton.styleFrom(
+                                    foregroundColor: AppColors.primary,
+                                    side: const BorderSide(color: AppColors.primary),
+                                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
+                                  ),
+                                  icon: const Icon(Icons.all_inclusive_rounded, size: 14),
+                                  label: Text('Load All (${_filteredSales.length})', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                                  onPressed: () {
+                                    setState(() {
+                                      _displayedLimit = _filteredSales.length;
+                                    });
+                                  },
+                                ),
+                              ],
+                            ),
+                          ] else ...[
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: AppColors.success.withAlpha(25),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: AppColors.success.withAlpha(80)),
+                              ),
+                              child: const Text(
+                                'All records loaded',
+                                style: TextStyle(fontSize: 11, color: AppColors.success, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
       ),
     );
   }
@@ -1224,7 +1787,7 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
       builder: (dialogCtx) => Dialog(
         backgroundColor: Colors.transparent,
         child: Container(
-          width: 540,
+          width: math.min(540.0, MediaQuery.of(dialogCtx).size.width * 0.94),
           padding: const EdgeInsets.all(26),
           decoration: BoxDecoration(
             color: const Color(0xFF111827),
@@ -1325,6 +1888,24 @@ class _BookingHistoryDialogState extends State<BookingHistoryDialog> {
                         ),
                       ],
                     ),
+                    if (_sortedSeriesList.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: AppColors.primaryContainer.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: AppColors.primary.withValues(alpha: 0.3)),
+                        ),
+                        child: Text(
+                          'Series Sold: ${_sortedSeriesList.map((s) => "Ser ${s.series} (${s.quantity} tkts)").join(" • ")}',
+                          style: const TextStyle(color: AppColors.primary, fontSize: 11, fontWeight: FontWeight.bold),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     Row(
                       children: [

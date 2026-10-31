@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
-import 'package:supabase_flutter/supabase_flutter.dart';
+import '../database/database_service.dart';
 
 class SystemMasterConfigModel {
   final bool isSystemLocked;
@@ -101,13 +101,13 @@ class SystemControlService {
 
   SystemMasterConfigModel get currentConfig => _cachedConfig;
 
-  /// Load and sync master configuration from Supabase Cloud
+  /// Load master configuration strictly from 100% Local SQLite Database (Zero Cloud)
   Future<SystemMasterConfigModel> loadConfig() async {
     try {
-      final client = Supabase.instance.client;
-      final List res = await client.from('master_system_config').select().eq('id', 'global_config');
-      if (res.isNotEmpty) {
-        final newConfig = SystemMasterConfigModel.fromMap(Map<String, dynamic>.from(res.first));
+      final jsonStr = await DatabaseService.instance.getSetting('master_system_config');
+      if (jsonStr != null && jsonStr.isNotEmpty) {
+        final Map<String, dynamic> map = jsonDecode(jsonStr);
+        final newConfig = SystemMasterConfigModel.fromMap(map);
         _cachedConfig = newConfig;
         if (configNotifier.value.updatedAt != newConfig.updatedAt ||
             configNotifier.value.isSystemLocked != newConfig.isSystemLocked ||
@@ -116,12 +116,12 @@ class SystemControlService {
         }
       }
     } catch (_) {
-      // Silently fall back to cached local config when offline
+      // Silently fall back to cached local config
     }
     return _cachedConfig;
   }
 
-  /// Update Master System Lock state
+  /// Update Master System Lock state locally
   Future<void> updateMasterLock(bool isLocked) async {
     _cachedConfig = SystemMasterConfigModel(
       isSystemLocked: isLocked,
@@ -129,10 +129,10 @@ class SystemControlService {
       masterPin: _cachedConfig.masterPin,
       updatedAt: DateTime.now(),
     );
-    await _saveToCloud();
+    await _saveLocal();
   }
 
-  /// Update Tab Permission
+  /// Update Tab Permission locally
   Future<void> updateTabPermission(String tabKey, bool isAllowed) async {
     final newTabs = Map<String, bool>.from(_cachedConfig.allowedTabs);
     newTabs[tabKey] = isAllowed;
@@ -143,16 +143,16 @@ class SystemControlService {
       masterPin: _cachedConfig.masterPin,
       updatedAt: DateTime.now(),
     );
-    await _saveToCloud();
+    await _saveLocal();
   }
 
-  Future<void> _saveToCloud() async {
+  Future<void> _saveLocal() async {
     try {
-      final client = Supabase.instance.client;
-      await client.from('master_system_config').upsert(_cachedConfig.toMap());
-      debugPrint('☁️ [SYSTEM CONTROL] Master Config Synced to Cloud!');
+      await DatabaseService.instance.saveSetting('master_system_config', jsonEncode(_cachedConfig.toMap()));
+      configNotifier.value = _cachedConfig;
+      debugPrint('💾 [SYSTEM CONTROL] Master Config Saved Locally in opscore_pro.db (100% Offline)!');
     } catch (e) {
-      debugPrint('⚠️ [SYSTEM CONTROL] Master Config Cloud Save Error: $e');
+      debugPrint('⚠️ [SYSTEM CONTROL] Master Config Local Save Error: $e');
     }
   }
 }

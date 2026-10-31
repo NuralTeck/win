@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpsCore Cloud — User Accounts & Remote License Control</title>
+  
+  <!-- Modern Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
+  
+  <!-- Supabase CDN Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Luxury Glassmorphism Stylesheet -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Ambient Glassmorphism Radiant Glowing Orbs -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+
+  <div class="app-layout">
+    <!-- Top Global Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-logo">
+          <div class="logo-icon">🛡️</div>
+          <div class="brand-meta">
+            <h1>OPSCORE COMMAND CENTER</h1>
+            <span class="brand-sub">CLOUD ANTI-PIRACY & MASTER ADMIN CONSOLE</span>
+          </div>
+        </div>
+        <div class="live-pill" id="cloudStatusPill">
+          <div class="pulsing-dot"></div>
+          <span id="cloudStatusText">Connecting to Cloud...</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="system-clock" id="systemClock">--:--:-- --</div>
+        <button class="btn-refresh" id="btnManualRefresh" title="Click to refresh live data now">
+          <span class="icon">🔄</span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Glassmorphic Multi-Page Navigation Bar -->
+    <nav class="nav-tabs-bar">
+      <a href="index.html" class="tab-btn">
+        <span class="tab-icon">🖥️</span>
+        <span>Live Software Logins</span>
+        <span class="tab-counter" id="activeBadgeCount">0</span>
+      </a>
+      <a href="users.html" class="tab-btn active">
+        <span class="tab-icon">👥</span>
+        <span>Users & Remote Licenses</span>
+        <span class="tab-counter" id="licensesBadgeCount">0</span>
+      </a>
+      <a href="hisab.html" class="tab-btn">
+        <span class="tab-icon">📊</span>
+        <span>Remote Party Hisab</span>
+        <span class="tab-counter" id="partyBadgeCount">0</span>
+      </a>
+      <a href="logs.html" class="tab-btn">
+        <span class="tab-icon">📜</span>
+        <span>Login Audit Trail</span>
+      </a>
+      <a href="settings.html" class="tab-btn">
+        <span class="tab-icon">⚙️</span>
+        <span>Cloud Setup & SQL</span>
+      </a>
+    </nav>
+
+    <!-- Main Content: Users & Remote License Control -->
+    <main class="views-container">
+      <section class="tab-view active">
+        <div class="section-toolbar">
+          <div class="toolbar-title-group">
+            <h2>👥 User Management & Remote License Control</h2>
+            <p>Create authorized software accounts and remotely control license access. If you Block a user, their software locks instantly across all machines.</p>
+          </div>
+          <div class="toolbar-actions">
+            <div class="search-box">
+              <span class="search-icon">🔍</span>
+              <input type="text" id="licenseSearchInput" placeholder="Filter user email or name...">
+            </div>
+          </div>
+        </div>
+
+        <div class="two-col-layout">
+          <!-- Left Column: Create New User Account Form -->
+          <div class="card form-card user-create-card">
+            <div class="card-header">
+              <div class="card-header-icon bg-blue">➕</div>
+              <div>
+                <h3>Create Authorized User Account</h3>
+                <span class="card-subtitle">Adds user to Supabase Auth & activates cloud license</span>
+              </div>
+            </div>
+
+            <form id="newUserForm" class="form-grid" onsubmit="return false;">
+              <div class="form-group">
+                <label for="newEmail">User Email / Login ID <span class="required">*</span></label>
+                <input type="email" id="newEmail" placeholder="client@opscore.com" required autocomplete="off">
+                <span class="field-hint">Used by client to login on their desktop PC</span>
+              </div>
+
+              <div class="form-group">
+                <label for="newName">Full Name / Client Name <span class="required">*</span></label>
+                <input type="text" id="newName" placeholder="e.g. Ramesh Kumar (Kolkata Counter)" required>
+              </div>
+
+              <div class="form-group">
+                <label for="newPassword">Initial Password <span class="required">*</span></label>
+                <div class="input-with-action">
+                  <input type="text" id="newPassword" placeholder="Strong password" required>
+                  <button type="button" class="btn-inline" id="btnGenPass" title="Generate random secure password">🎲 Auto</button>
+                </div>
+              </div>
+
+              <div class="form-group">
+                <label for="newValidity">License Validity Duration</label>
+                <select id="newValidity">
+                  <option value="Lifetime" selected>🌟 Lifetime Access (Recommended)</option>
+                  <option value="1 Year">📅 1 Year Subscription</option>
+                  <option value="6 Months">📅 6 Months Subscription</option>
+                  <option value="1 Month">📅 1 Month Trial</option>
+                </select>
+              </div>
+
+              <div class="form-group">
+                <label for="newNotes">License Notes / Installation Machine</label>
+                <input type="text" id="newNotes" placeholder="e.g. Terminal 1, City Branch Office">
+              </div>
+
+              <div class="form-actions">
+                <button type="submit" class="btn-primary-large" id="btnCreateUser">
+                  <span>🚀 CREATE & ACTIVATE USER</span>
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <!-- Right Column: Registered Licenses List -->
+          <div class="card table-card">
+            <div class="card-header">
+              <div class="card-header-icon bg-green">📋</div>
+              <div>
+                <h3>Issued Software Licenses</h3>
+                <span class="card-subtitle">Remote access status, validity, and emergency kill switches</span>
+              </div>
+            </div>
+
+            <div class="table-wrapper">
+              <table class="data-table">
+                <thead>
+                  <tr>
+                    <th>User / Login Email</th>
+                    <th>Full Name</th>
+                    <th>Validity</th>
+                    <th>Created</th>
+                    <th>License Status</th>
+                    <th>Remote Action</th>
+                  </tr>
+                </thead>
+                <tbody id="licensesTableBody">
+                  <tr>
+                    <td colspan="6" class="text-center py-5" style="color: #64748B;">
+                      Loading user licenses from cloud...
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Footer -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span>🔒 OpsCore Cloud Command Center • Remote License Management & Anti-Piracy Protection</span>
+      </div>
+      <div class="footer-right">
+        <span>Supabase Project: <code id="lblProjectRef">wagslwsfhbrcyakazibv</code></span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Notification Toast -->
+  <div class="toast" id="toast">Message notification</div>
+
+  <!-- Admin Password Reset Modal Dialog -->
+  <div id="resetPassModal" style="display: none; position: fixed; inset: 0; background: rgba(5, 10, 20, 0.85); backdrop-filter: blur(6px); z-index: 9999; align-items: center; justify-content: center;">
+    <div style="background: #0F172A; border: 1px solid #334155; border-radius: 14px; width: 90%; max-width: 440px; padding: 26px; box-shadow: 0 24px 48px rgba(0,0,0,0.7);">
+      <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px;">
+        <div style="display: flex; align-items: center; gap: 10px;">
+          <span style="font-size: 22px;">🔑</span>
+          <h3 style="margin: 0; font-size: 18px; color: #F8FAFC; font-weight: 800;">Admin Password Reset</h3>
+        </div>
+        <button type="button" onclick="closeResetPassModal()" style="background: transparent; border: none; color: #94A3B8; font-size: 24px; cursor: pointer; line-height: 1;">&times;</button>
+      </div>
+
+      <div style="background: rgba(30, 41, 59, 0.6); padding: 12px; border-radius: 8px; border: 1px solid #1E293B; margin-bottom: 18px;">
+        <div style="font-size: 11px; color: #94A3B8; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 700;">Target User Account:</div>
+        <div id="resetTargetEmail" style="font-size: 14px; font-weight: 700; color: #38BDF8; font-family: monospace; word-break: break-all; margin-top: 2px;">user@opscore.com</div>
+      </div>
+
+      <p style="font-size: 12px; color: #10B981; margin-bottom: 18px; line-height: 1.4; font-weight: 600;">
+        🔒 Security Policy: Only the Master Admin has the authority to reset or assign passwords.
+      </p>
+
+      <div class="form-group" style="margin-bottom: 22px;">
+        <label for="resetNewPass" style="font-size: 12px; color: #CBD5E1; font-weight: 700; display: block; margin-bottom: 6px;">New Password <span class="required" style="color: #EF4444;">*</span></label>
+        <div style="display: flex; gap: 8px;">
+          <input type="text" id="resetNewPass" placeholder="Enter new strong password" style="flex: 1; padding: 10px 12px; background: #1E293B; border: 1px solid #334155; border-radius: 8px; color: white; font-size: 13.5px; font-weight: 600;" required>
+          <button type="button" class="btn-inline" onclick="generateResetPassword()" style="padding: 0 14px; background: #334155; border: 1px solid #475569; border-radius: 8px; color: #E2E8F0; cursor: pointer; font-size: 12px; font-weight: 700;">🎲 Auto</button>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: flex-end; gap: 10px;">
+        <button type="button" onclick="closeResetPassModal()" style="padding: 9px 16px; background: transparent; border: 1px solid #475569; border-radius: 8px; color: #CBD5E1; cursor: pointer; font-size: 13px; font-weight: 600;">Cancel</button>
+        <button type="button" id="btnConfirmResetPass" onclick="submitPasswordReset()" style="padding: 9px 20px; background: #0072FF; border: none; border-radius: 8px; color: white; cursor: pointer; font-size: 13px; font-weight: 700; box-shadow: 0 4px 14px rgba(0, 114, 255, 0.4);">Update Password</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Master Controller Script -->
+  <script src="app.js"></script>
+</body>
+</html>

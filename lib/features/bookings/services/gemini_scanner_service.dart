@@ -16,7 +16,9 @@ class GeminiScannedItem {
   String sellerName;
   String? targetDate;
   String? drawShift;
-  String? aiDoubt; // ⚠️ AI Confusion / Doubt reason (e.g. "Unclear digit", "Series assumed")
+  String?
+  aiDoubt; // ⚠️ AI Confusion / Doubt reason (e.g. "Unclear digit", "Series assumed")
+  int photoIndex; // 📸 0-based index of the photo/slip this ticket came from
 
   GeminiScannedItem({
     required this.series,
@@ -29,6 +31,7 @@ class GeminiScannedItem {
     this.targetDate,
     this.drawShift,
     this.aiDoubt,
+    this.photoIndex = 0,
   }) : fromTicket =
            fromTicket ??
            (ticketNo.contains('-')
@@ -72,7 +75,29 @@ class GeminiScannerService {
   LastStockScanSession? lastStockScanSession;
   String? lastDetectedShift;
   String? lastDetectedParty;
-  List<String> lastAiConfusions = []; // ⚠️ Doubts or unparsed notes from latest scan
+  List<String> lastAiConfusions =
+      []; // ⚠️ Doubts or unparsed notes from latest scan
+
+  // 🔒 Deterministic In-Memory Scan Cache: Eliminates random fluctuations when scanning the same slip multiple times
+  final Map<String, List<GeminiScannedItem>> _scanCache = {};
+
+  void clearScanCache() {
+    _scanCache.clear();
+  }
+
+  String _computeCacheKey(
+    Uint8List bytes,
+    ScanContext context,
+    String defaultSeller,
+  ) {
+    final len = bytes.length;
+    int hash = 0;
+    final step = (len / 100).clamp(1, 1000).toInt();
+    for (int i = 0; i < len; i += step) {
+      hash = (hash * 31 + bytes[i]) & 0x7FFFFFFF;
+    }
+    return '${len}_${hash}_${context.name}_$defaultSeller';
+  }
 
   String? detectShiftFromText(String text) {
     // 1:00 PM / Day / Morning / 1 PM / 1:00 / 1pm
@@ -99,8 +124,15 @@ class GeminiScannerService {
     return null;
   }
 
+  int _roundRobinKeyIndex = 0;
+
+  Future<List<String>> getActiveApiKeys() async {
+    return await DatabaseService.instance.getGeminiApiKeys();
+  }
+
   Future<String?> getActiveApiKey() async {
-    return await DatabaseService.instance.getGeminiApiKey();
+    final keys = await getActiveApiKeys();
+    return keys.isNotEmpty ? keys.first : null;
   }
 
   /// Scan image bytes and extract lottery tickets (Online with Gemini or 100% Offline with Local OCR)
@@ -110,13 +142,52 @@ class GeminiScannerService {
     String defaultSeller = 'Walk-in Customer',
     ScanContext scanContext = ScanContext.booking,
   }) async {
-    final apiKey = await getActiveApiKey();
-    if (apiKey == null || apiKey.trim().isEmpty) {
+    // ⚡ Check Deterministic Cache: Returns 100% identical results instantly on repeated scans of the same slip
+    final cacheKey = _computeCacheKey(imageBytes, scanContext, defaultSeller);
+    if (_scanCache.containsKey(cacheKey)) {
+      debugPrint(
+        '⚡ [GEMINI SCAN CACHE HIT]: Returning identical deterministic scan results ($cacheKey)',
+      );
+      final cached = _scanCache[cacheKey]!;
+      return cached
+          .map(
+            (it) => GeminiScannedItem(
+              series: it.series,
+              ticketNo: it.ticketNo,
+              fromTicket: it.fromTicket,
+              toTicket: it.toTicket,
+              amount: it.amount,
+              quantity: it.quantity,
+              sellerName: it.sellerName,
+              targetDate: it.targetDate,
+              drawShift: it.drawShift,
+              aiDoubt: it.aiDoubt,
+              photoIndex: it.photoIndex,
+            ),
+          )
+          .toList();
+    }
+
+    final allKeys = await getActiveApiKeys();
+    if (allKeys.isEmpty) {
       debugPrint(
         'ℹ️ [OFFLINE OCR MODE] No Gemini key found. Using 100% Pure Local Offline OCR Engine...',
       );
       return await _scanOfflineWithLocalEngine(imageBytes, defaultSeller);
     }
+
+    // 🔄 Multi-Key Load Balancing Pool: Rotate starting key using Round-Robin across requests
+    final int startIdx = _roundRobinKeyIndex % allKeys.length;
+    _roundRobinKeyIndex = (_roundRobinKeyIndex + 1) % allKeys.length;
+
+    // Ordered key pool starting with rotated key, followed by remaining keys as instant failovers
+    final List<String> keyPool = [];
+    for (int i = 0; i < allKeys.length; i++) {
+      keyPool.add(allKeys[(startIdx + i) % allKeys.length]);
+    }
+    debugPrint(
+      '🚀 [GEMINI POOL] ${allKeys.length} API Key(s) Active. Starting request with Key index $startIdx.',
+    );
 
     final base64Image = base64Encode(imageBytes);
 
@@ -164,23 +235,44 @@ UNIVERSAL PARSING RULES:
      Example C: "(24) 6:Pm" column: "40350-399, 550 to 750-799"
         -> Always preserve "to" in "550 to 750-799" or write each packet: "550-599, 650-699, 750-799".
         -> Never drop intermediate packets like 650-699!
+     Example D: "26100-300-399" (under (12) or (24) Dear 6 PM)
+        -> Top row baseRange is "26100-300-399" (prefix 26, ranges 100-199, 200-299, 300-399).
+        -> Prefix for date 28 is "26".
+        -> Subsequent row prefix (e.g. for date 29) is "18" (applies to the exact same 100-199, 200-299, 300-399 ranges).
+        -> Always output compound ranges like "26100-300-399" EXACTLY as written without altering or dropping digits!
 
 
-6. OUTPUT FORMAT:
-Output ONLY a valid JSON array of sections inside ```json ``` code fence:
-[
-  {
-    "series": "<series_name_or_number>",
-    "drawShift": "<Dear 1 PM / Dear 6 PM / Dear 8 PM>",
-    "partyName": "<party_name_or_null>",
-    "baseRange": "<top_row_base_range_as_written>",
-    "prefixes": [
-      {"date": "<date_str>", "prefix": "<prefix_or_ticket_number>"}
-    ]
-  }
-]
+6. OUTPUT FORMAT & CONFUSION REPORTING:
+If any handwriting is ambiguous, blurry, cut off, or you have doubt on any digit (e.g. '7' vs '1' or '9' vs '2') or series or date:
+- Report it in "aiConfusions" array as a clear explanation string so the operator can manually test/verify.
+- In that specific prefix, include "aiDoubt": "<concise reason, e.g. 'unclear if 18 or 28'>".
+- If you have NO doubt on an item, set "aiDoubt": null.
 
-No conversational commentary. Output ONLY the JSON array.
+Output ONLY a valid JSON object:
+{
+  "detectedShift": "<Dear 1 PM / Dear 6 PM / Dear 8 PM or null>",
+  "partyName": "<party_name_or_null>",
+  "aiConfusions": [
+    "<Any unclear line, blurry digit, ambiguous series, or doubt encountered. If none, empty array []>"
+  ],
+  "sections": [
+    {
+      "series": "<series_name_or_number>",
+      "drawShift": "<Dear 1 PM / Dear 6 PM / Dear 8 PM>",
+      "partyName": "<party_name_or_null>",
+      "baseRange": "<top_row_base_range_as_written>",
+      "prefixes": [
+        {
+          "date": "<date_str>",
+          "prefix": "<prefix_or_ticket_number>",
+          "aiDoubt": "<optional explanation if handwriting was unclear or doubtful, otherwise null>"
+        }
+      ]
+    }
+  ]
+}
+
+No conversational commentary. Output ONLY the JSON object.
 ''';
     } else if (scanContext == ScanContext.unsold) {
       prompt = '''
@@ -296,64 +388,120 @@ Output ONLY the data. No explanations.
           ],
         },
       ],
-      'generationConfig': {'temperature': 0.1, 'maxOutputTokens': 8192},
+      'generationConfig': {
+        'temperature': 0.0,
+        'topP': 1.0,
+        'topK': 1,
+        'responseMimeType': 'application/json',
+        'maxOutputTokens': 8192,
+      },
     });
 
     final candidateModels = [
-      'gemini-3.5-flash-lite',
-      'gemini-flash-lite-latest',
+      'gemini-2.5-flash',
+      'gemini-1.5-flash',
+      'gemini-2.0-flash',
       'gemini-3.5-flash',
-      'gemini-3.7-flash',
       'gemini-flash-latest',
+      'gemini-2.5-flash-lite',
+      'gemini-1.5-pro',
     ];
 
     String lastError = '';
-    for (final modelName in candidateModels) {
-      for (int attempt = 1; attempt <= 2; attempt++) {
-        try {
-          final url = Uri.parse(
-            'https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=${apiKey.trim()}',
-          );
 
-          final response = await http.post(
-            url,
-            headers: {'Content-Type': 'application/json'},
-            body: requestBody,
-          );
+    // ⚡ Multi-Key Load Balancing with Instant Auto-Failover:
+    // Try the rotated primary key first. If it hits quota (429), busy (503), or network timeout,
+    // immediately fail over to the next key in the pool!
+    for (int keyIdx = 0; keyIdx < keyPool.length; keyIdx++) {
+      final currentApiKey = keyPool[keyIdx].trim();
+      final keyShort = currentApiKey.length > 8
+          ? '${currentApiKey.substring(0, 8)}...'
+          : currentApiKey;
 
-          if (response.statusCode == 200) {
-            final data = jsonDecode(response.body);
-            final text =
-                data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? '';
-            debugPrint('📸 [GEMINI SCAN RESULT RAW ($modelName)]:\n$text');
-            final parsedItems = _parseExtractedText(
-              text,
-              defaultSeller,
-              scanContext,
+      for (final modelName in candidateModels) {
+        for (int attempt = 1; attempt <= 2; attempt++) {
+          try {
+            final url = Uri.parse(
+              'https://generativelanguage.googleapis.com/v1beta/models/$modelName:generateContent?key=$currentApiKey',
             );
-            if (scanContext == ScanContext.voucher ||
-                scanContext == ScanContext.unsold) {
-              return condenseIntoRanges(parsedItems);
-            }
-            return parsedItems;
-          } else {
-            lastError = 'HTTP ${response.statusCode}: ${response.body}';
-            if ((response.statusCode == 503 || response.statusCode == 429) &&
-                attempt == 1) {
+
+            final response = await http
+                .post(
+                  url,
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': currentApiKey,
+                  },
+                  body: requestBody,
+                )
+                .timeout(const Duration(seconds: 20));
+
+            if (response.statusCode == 200) {
+              final data = jsonDecode(response.body);
+              final text =
+                  data['candidates']?[0]?['content']?['parts']?[0]?['text'] ??
+                  '';
               debugPrint(
-                '⚠️ [GEMINI BUSY] $modelName returned ${response.statusCode}. Retrying in 1.5s...',
+                '📸 [GEMINI SCAN RESULT RAW ($modelName with Key $keyShort)]:\n$text',
               );
-              await Future.delayed(const Duration(milliseconds: 1500));
-              continue;
+              final parsedItems = _parseExtractedText(
+                text,
+                defaultSeller,
+                scanContext,
+              );
+              final finalItems =
+                  (scanContext == ScanContext.voucher ||
+                      scanContext == ScanContext.unsold)
+                  ? condenseIntoRanges(parsedItems)
+                  : parsedItems;
+
+              // Save in deterministic cache
+              _scanCache[cacheKey] = finalItems;
+              return finalItems;
+            } else {
+              lastError = 'HTTP ${response.statusCode}: ${response.body}';
+
+              // If Rate-Limit (429) or Server Busy (503) and we have other keys in pool,
+              // immediately fail over to the next key!
+              if ((response.statusCode == 429 || response.statusCode == 503) &&
+                  keyIdx < keyPool.length - 1) {
+                debugPrint(
+                  '⚠️ [LOAD BALANCER FAILOVER] Key $keyShort hit HTTP ${response.statusCode}. Instantly switching to next API key in pool...',
+                );
+                // Break out of model/attempt loop to jump straight to next API Key in keyPool!
+                break;
+              }
+
+              if ((response.statusCode == 503 || response.statusCode == 429) &&
+                  attempt == 1) {
+                debugPrint(
+                  '⚠️ [GEMINI BUSY] $modelName returned ${response.statusCode}. Retrying in 1s...',
+                );
+                await Future.delayed(const Duration(milliseconds: 1000));
+                continue;
+              }
+
+              debugPrint(
+                '⚠️ [GEMINI SCAN NOTE] $modelName on Key $keyShort returned $lastError. Trying next fallback...',
+              );
+              break;
             }
+          } catch (e) {
+            lastError = e.toString();
             debugPrint(
-              '⚠️ [GEMINI SCAN NOTE] $modelName returned $lastError. Trying fallback model...',
+              '⚠️ [GEMINI SCAN EXCEPTION] Key $keyShort on $modelName: $e',
             );
+            if (keyIdx < keyPool.length - 1) {
+              debugPrint(
+                '⚠️ [LOAD BALANCER FAILOVER] Network error on $keyShort. Switching to next key in pool...',
+              );
+              break; // Jump to next key
+            }
             break;
           }
-        } catch (e) {
-          lastError = e.toString();
-          debugPrint('⚠️ [GEMINI SCAN EXCEPTION] $modelName: $e');
+        }
+        // If quota was exceeded on this key, don't waste time trying other models on the same dead key!
+        if (lastError.contains('429') && keyIdx < keyPool.length - 1) {
           break;
         }
       }
@@ -467,14 +615,18 @@ Output ONLY the data. No explanations.
       final m = dmyMatch.group(2)!.padLeft(2, '0');
       final rawY = dmyMatch.group(3)!;
       final yNum = int.tryParse(rawY);
-      final y = (rawY.length == 2 || (yNum != null && (yNum < now.year - 1 || yNum > now.year + 1)))
+      final y =
+          (rawY.length == 2 ||
+              (yNum != null && (yNum < now.year - 1 || yNum > now.year + 1)))
           ? '${now.year}'
           : rawY;
       return '$y-$m-$d';
     }
 
     // 3. DD-MM or DD/MM (with optional trailing slash e.g. 28/08/ or 31/8)
-    final dmMatch = RegExp(r'^(\d{1,2})[-\/](\d{1,2})[-\/]?$').firstMatch(clean);
+    final dmMatch = RegExp(
+      r'^(\d{1,2})[-\/](\d{1,2})[-\/]?$',
+    ).firstMatch(clean);
     if (dmMatch != null) {
       final d = int.parse(dmMatch.group(1)!);
       final m = int.parse(dmMatch.group(2)!);
@@ -520,48 +672,33 @@ Output ONLY the data. No explanations.
       (m) => '${m.group(1)}50 to ${m.group(3)}50',
     );
 
-    // 1. If the whole range is 5-digit to 5-digit e.g. 57200-57299, 57200 to 57299, 57200 se 57299
-    final full5Match = RegExp(
-      r'^(\d{2})(\d{3})\s*(?:[-~]+|\s+(?:to|se|tak|--)\s+)\s*(\d{2})?(\d{3})$',
-      caseSensitive: false,
-    ).firstMatch(cleaned);
-    if (full5Match != null) {
-      final s = int.parse(full5Match.group(2)!);
-      final e = int.parse(full5Match.group(4)!);
-      if (e >= s) {
-        ranges.add({'start': s, 'end': e});
-        return ranges;
-      }
-    }
-
-    // 2. If starts with 5 digits (e.g. 57200-299 or 40350-399), strip leading 2-digit prefix
+    // 1. If starts with 5 digits (e.g. 26100-300-399 or 57200-299), strip leading 2-digit prefix
     final lead5Match = RegExp(r'^(\d{2})(\d{3})').firstMatch(cleaned);
     if (lead5Match != null) {
       cleaned = cleaned.substring(2);
     }
 
-    // 3. Split by comma, semicolon, slash, plus, ampersand, pipe, or spaces between independent ranges
+    // 2. Split by comma, semicolon, slash, plus, ampersand, pipe, or spaces between independent ranges
     final parts = cleaned.split(
-      RegExp(r'[,;/+&|]|(?<!to|se|tak)\s+(?=\d{2,3}\s*[-~])', caseSensitive: false),
+      RegExp(
+        r'[,;/+&|]|(?<!to|se|tak)\s+(?=\d{2,3}\s*[-~])',
+        caseSensitive: false,
+      ),
     );
 
     for (String part in parts) {
       part = part.trim();
       if (part.isEmpty) continue;
 
-      final sepPattern = r'(?:[-~]+|\s*(?:to|se|tak|--|\/|\+)\s*)';
-
-      // Case 0: Full hundred packet span e.g. "300-399 to 600-699" or "300 to 600-699"
-      final hundredSpan = RegExp(
-        r'(\d)00(?:-\d{3})?\s*(?:to|se|tak|--|\/|\+)\s*(?:(\d)00\s*[-~]+\s*)?(\d)99',
+      // Pattern A: Compound hundred series shorthand e.g. "100-300-399", "100-200-300-399", "100 to 300-399", "100-399", "100 to 399"
+      final hundredSeriesMatch = RegExp(
+        r'^(\d)00\s*(?:[-~to\s]+(?:\d00)?)*\s*[-~to\s]+(\d)99$',
         caseSensitive: false,
       ).firstMatch(part);
-      if (hundredSpan != null) {
-        final sH = int.parse(hundredSpan.group(1)!);
-        final eH = int.parse(
-          hundredSpan.group(3) ?? hundredSpan.group(2) ?? hundredSpan.group(1)!,
-        );
-        if (eH >= sH) {
+      if (hundredSeriesMatch != null) {
+        final sH = int.parse(hundredSeriesMatch.group(1)!);
+        final eH = int.parse(hundredSeriesMatch.group(2)!);
+        if (eH >= sH && (eH - sH) <= 9) {
           for (int h = sH; h <= eH; h++) {
             ranges.add({'start': h * 100, 'end': h * 100 + 99});
           }
@@ -569,17 +706,15 @@ Output ONLY the data. No explanations.
         }
       }
 
-      // Case 1: Packet Range e.g. "450 to 550-599", "450 to 650-699", "550 to 750-799", "650 to 750-799"
-      final packetRange = RegExp(
-        r'(\d)50\s*(?:[-~]+|\s*(?:to|se|tak|--|\/|\+)\s*)\s*(?:(\d)50\s*[-~]+\s*)?(\d)(?:50|99)',
+      // Pattern B: Packet range e.g. "450 to 550-599", "550 to 750-799", "650 to 750-799", "150-550-599"
+      final packetRangeMatch = RegExp(
+        r'(\d)50\s*(?:[-~to\s]+(?:\d50)?)*\s*[-~to\s]+(\d)(?:50|99)',
         caseSensitive: false,
       ).firstMatch(part);
-      if (packetRange != null) {
-        final sH = int.parse(packetRange.group(1)!);
-        final eH = int.parse(
-          packetRange.group(3) ?? packetRange.group(2) ?? packetRange.group(1)!,
-        );
-        if (eH >= sH) {
+      if (packetRangeMatch != null) {
+        final sH = int.parse(packetRangeMatch.group(1)!);
+        final eH = int.parse(packetRangeMatch.group(2)!);
+        if (eH >= sH && (eH - sH) <= 9) {
           for (int h = sH; h <= eH; h++) {
             ranges.add({'start': h * 100 + 50, 'end': h * 100 + 99});
           }
@@ -587,25 +722,9 @@ Output ONLY the data. No explanations.
         }
       }
 
-      // Case 2: Packet Range without -99 e.g. "450 to 550", "550 to 750"
-      final packetRangeSimple = RegExp(
-        r'(\d)50\s*(?:[-~]+|\s*(?:to|se|tak|--|\/|\+)\s*)\s*(\d)50',
-        caseSensitive: false,
-      ).firstMatch(part);
-      if (packetRangeSimple != null) {
-        final sH = int.parse(packetRangeSimple.group(1)!);
-        final eH = int.parse(packetRangeSimple.group(2)!);
-        if (eH >= sH) {
-          for (int h = sH; h <= eH; h++) {
-            ranges.add({'start': h * 100 + 50, 'end': h * 100 + 99});
-          }
-          continue;
-        }
-      }
-
-      // Case 3: Standard range e.g. "200-299", "350-399", "650-699", "00-99", "50-99"
+      // Pattern C: Standard range e.g. "200-299", "350-399", "650-699", "00-99", "50-99"
       final rangeMatch = RegExp(
-        '(\\d{2,3})\\s*$sepPattern\\s*(\\d{1,5})',
+        r'(\d{2,3})\s*[-~to\s]+\s*(\d{1,5})',
         caseSensitive: false,
       ).firstMatch(part);
       if (rangeMatch != null) {
@@ -627,7 +746,7 @@ Output ONLY the data. No explanations.
         }
       }
 
-      // Case 4: Standalone 50-packet notation e.g. "450", "550", "650", "750", "350"
+      // Pattern D: Standalone 50-packet notation e.g. "450", "550", "650", "750", "350"
       final single50 = RegExp(r'^(\d)50$').firstMatch(part);
       if (single50 != null) {
         final h = int.parse(single50.group(1)!);
@@ -635,7 +754,7 @@ Output ONLY the data. No explanations.
         continue;
       }
 
-      // Case 5: Single 2 or 3-digit number e.g. "200", "50"
+      // Pattern E: Single 2 or 3-digit number e.g. "200", "50"
       final singleNum = RegExp(r'^\d{2,3}$').firstMatch(part);
       if (singleNum != null) {
         final n = int.parse(singleNum.group(0)!);
@@ -661,16 +780,22 @@ Output ONLY the data. No explanations.
     final List<dynamic> workingPrefixes = List<dynamic>.from(prefixes);
 
     // ⚡ Auto-Capture First Prefix from baseRange (e.g. "56150 to 550-599" -> prefix is "56")
-    final basePrefixMatch = RegExp(r'^(\d{2})\d{3}').firstMatch(baseRange.trim());
+    final basePrefixMatch = RegExp(
+      r'^(\d{2})\d{3}',
+    ).firstMatch(baseRange.trim());
     if (basePrefixMatch != null) {
       final basePref = basePrefixMatch.group(1)!;
       final alreadyPresent = workingPrefixes.any((p) {
         if (p is! Map) return false;
-        final pStr = p['prefix']?.toString().replaceAll(RegExp(r'\D'), '').padLeft(2, '0');
+        final pStr = p['prefix']
+            ?.toString()
+            .replaceAll(RegExp(r'\D'), '')
+            .padLeft(2, '0');
         return pStr == basePref;
       });
       if (!alreadyPresent) {
-        final firstDate = workingPrefixes.isNotEmpty && workingPrefixes.first is Map
+        final firstDate =
+            workingPrefixes.isNotEmpty && workingPrefixes.first is Map
             ? (workingPrefixes.first['date']?.toString() ?? '31/8')
             : '31/8';
         workingPrefixes.insert(0, {'date': firstDate, 'prefix': basePref});
@@ -680,7 +805,9 @@ Output ONLY the data. No explanations.
         if (workingPrefixes.length > 1 && workingPrefixes[1] is Map) {
           final d0 = workingPrefixes[0]['date']?.toString().trim() ?? '';
           final d1 = workingPrefixes[1]['date']?.toString().trim() ?? '';
-          if (d0 == d1 || d0.replaceAll(RegExp(r'\D'), '') == d1.replaceAll(RegExp(r'\D'), '')) {
+          if (d0 == d1 ||
+              d0.replaceAll(RegExp(r'\D'), '') ==
+                  d1.replaceAll(RegExp(r'\D'), '')) {
             for (int i = 1; i < workingPrefixes.length; i++) {
               if (workingPrefixes[i] is! Map) continue;
               final prevD = workingPrefixes[i - 1]['date']?.toString() ?? '';
@@ -708,9 +835,12 @@ Output ONLY the data. No explanations.
       final targetDate = _normalizeScannedDate(rawDate, lastDate);
       lastDate = DateTime.tryParse(targetDate) ?? lastDate;
 
-      final rawPrefix = prefObj['prefix']?.toString().replaceAll(RegExp(r'\D'), '') ?? '';
+      final rawPrefix =
+          prefObj['prefix']?.toString().replaceAll(RegExp(r'\D'), '') ?? '';
       if (rawPrefix.isEmpty) continue;
       final prefix = rawPrefix.padLeft(2, '0');
+      final prefDoubt =
+          prefObj['aiDoubt']?.toString() ?? prefObj['doubt']?.toString();
 
       if (suffixRanges.isNotEmpty) {
         for (final sr in suffixRanges) {
@@ -730,12 +860,15 @@ Output ONLY the data. No explanations.
               sellerName: defaultSeller,
               targetDate: targetDate,
               drawShift: drawShift,
+              aiDoubt: prefDoubt,
             ),
           );
         }
       } else {
         // Pattern 2: Continuous 5-Digit Range e.g. 28100-28500
-        final contMatch = RegExp(r'(\d{5})\s*[-~to]+\s*(\d{5})').firstMatch(baseRange);
+        final contMatch = RegExp(
+          r'(\d{5})\s*[-~to]+\s*(\d{5})',
+        ).firstMatch(baseRange);
         if (contMatch != null) {
           final startNum = int.parse(contMatch.group(1)!);
           final endNum = int.parse(contMatch.group(2)!);
@@ -751,6 +884,7 @@ Output ONLY the data. No explanations.
               sellerName: defaultSeller,
               targetDate: targetDate,
               drawShift: drawShift,
+              aiDoubt: prefDoubt,
             ),
           );
         } else if (rawPrefix.length == 5) {
@@ -765,6 +899,7 @@ Output ONLY the data. No explanations.
               sellerName: defaultSeller,
               targetDate: targetDate,
               drawShift: drawShift,
+              aiDoubt: prefDoubt,
             ),
           );
         }
@@ -777,11 +912,28 @@ Output ONLY the data. No explanations.
   String? _normalizeShift(String? raw) {
     if (raw == null || raw.trim().isEmpty) return null;
     final clean = raw.toLowerCase().trim();
-    if (clean.contains('1') || clean.contains('one') || clean.contains('morning') || clean.contains('day')) return 'Dear 1 PM';
-    if (clean.contains('6') || clean.contains('six') || clean.contains('evening')) return 'Dear 6 PM';
-    if (clean.contains('8') || clean.contains('eight') || clean.contains('night')) return 'Dear 8 PM';
+    if (clean.contains('1') ||
+        clean.contains('one') ||
+        clean.contains('morning') ||
+        clean.contains('day'))
+      return 'Dear 1 PM';
+    if (clean.contains('6') ||
+        clean.contains('six') ||
+        clean.contains('evening'))
+      return 'Dear 6 PM';
+    if (clean.contains('8') ||
+        clean.contains('eight') ||
+        clean.contains('night'))
+      return 'Dear 8 PM';
     return raw.trim();
   }
+
+  @visibleForTesting
+  List<GeminiScannedItem> parseExtractedTextForTesting(
+    String text,
+    String defaultSeller, [
+    ScanContext scanContext = ScanContext.booking,
+  ]) => _parseExtractedText(text, defaultSeller, scanContext);
 
   List<GeminiScannedItem> _parseExtractedText(
     String text,
@@ -791,51 +943,92 @@ Output ONLY the data. No explanations.
     // 1. Try parsing JSON format for wholesale vouchers
     if (scanContext == ScanContext.voucher ||
         text.contains('"baseRange"') ||
-        text.contains('"prefixes"')) {
+        text.contains('"prefixes"') ||
+        text.contains('"sections"')) {
       try {
-        String jsonStr = text;
+        String jsonStr = text.trim();
         final jsonMatch = RegExp(
           r'```(?:json)?\s*([\s\S]*?)\s*```',
         ).firstMatch(text);
         if (jsonMatch != null) {
-          jsonStr = jsonMatch.group(1)!;
+          jsonStr = jsonMatch.group(1)!.trim();
         }
-        final startIndex = jsonStr.indexOf('[');
-        final endIndex = jsonStr.lastIndexOf(']');
-        if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
-          final cleanJson = jsonStr.substring(startIndex, endIndex + 1);
-          final dynamic decoded = jsonDecode(cleanJson);
-          if (decoded is List && decoded.isNotEmpty) {
-            final List<GeminiScannedItem> jsonItems = [];
-            for (final block in decoded) {
-              if (block is Map) {
-                final ser = block['series']?.toString() ?? '12';
-                final baseRange = block['baseRange']?.toString() ?? '';
-                final rawShift = block['drawShift']?.toString() ?? block['shift']?.toString();
-                final blockShift = _normalizeShift(rawShift);
-                final blockParty = block['partyName']?.toString();
-                if (blockParty != null && blockParty.trim().isNotEmpty) {
-                  lastDetectedParty = blockParty.trim();
-                }
-                final prefixes = block['prefixes'];
-                if (prefixes is List) {
-                  final expanded = _expandVoucherBlock(
-                    series: ser,
-                    baseRange: baseRange,
-                    prefixes: prefixes,
-                    defaultSeller: defaultSeller,
-                    drawShift: blockShift,
-                  );
-                  jsonItems.addAll(expanded);
-                }
+
+        dynamic decoded;
+        try {
+          decoded = jsonDecode(jsonStr);
+        } catch (_) {
+          final startIndex = jsonStr.indexOf(RegExp(r'[\[\{]'));
+          final lastBracket = jsonStr.lastIndexOf(']');
+          final lastBrace = jsonStr.lastIndexOf('}');
+          final endIndex = lastBracket > lastBrace ? lastBracket : lastBrace;
+          if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
+            decoded = jsonDecode(jsonStr.substring(startIndex, endIndex + 1));
+          }
+        }
+
+        List<dynamic> sections = [];
+        if (decoded is Map) {
+          final detectedShift = _normalizeShift(
+            decoded['detectedShift']?.toString(),
+          );
+          if (detectedShift != null) {
+            lastDetectedShift = detectedShift;
+          }
+          final party = decoded['partyName']?.toString();
+          if (party != null && party.trim().isNotEmpty) {
+            lastDetectedParty = party.trim();
+          }
+          final confusions =
+              decoded['aiConfusions'] ??
+              decoded['doubts'] ??
+              decoded['confusions'];
+          if (confusions is List) {
+            lastAiConfusions = confusions
+                .map((c) => c.toString().trim())
+                .where((s) => s.isNotEmpty)
+                .toList();
+          }
+          final sec =
+              decoded['sections'] ?? decoded['items'] ?? decoded['blocks'];
+          if (sec is List) {
+            sections = sec;
+          }
+        } else if (decoded is List) {
+          sections = decoded;
+        }
+
+        if (sections.isNotEmpty) {
+          final List<GeminiScannedItem> jsonItems = [];
+          for (final block in sections) {
+            if (block is Map) {
+              final ser = block['series']?.toString() ?? '12';
+              final baseRange = block['baseRange']?.toString() ?? '';
+              final rawShift =
+                  block['drawShift']?.toString() ?? block['shift']?.toString();
+              final blockShift = _normalizeShift(rawShift) ?? lastDetectedShift;
+              final blockParty = block['partyName']?.toString();
+              if (blockParty != null && blockParty.trim().isNotEmpty) {
+                lastDetectedParty = blockParty.trim();
+              }
+              final prefixes = block['prefixes'];
+              if (prefixes is List) {
+                final expanded = _expandVoucherBlock(
+                  series: ser,
+                  baseRange: baseRange,
+                  prefixes: prefixes,
+                  defaultSeller: defaultSeller,
+                  drawShift: blockShift,
+                );
+                jsonItems.addAll(expanded);
               }
             }
-            if (jsonItems.isNotEmpty) {
-              debugPrint(
-                '✅ [JSON VOUCHER PARSE SUCCESS] Extracted ${jsonItems.length} ranges from ${decoded.length} blocks',
-              );
-              return jsonItems;
-            }
+          }
+          if (jsonItems.isNotEmpty) {
+            debugPrint(
+              '✅ [JSON VOUCHER PARSE SUCCESS] Extracted ${jsonItems.length} ranges from ${sections.length} blocks with ${lastAiConfusions.length} AI confusions flagged',
+            );
+            return jsonItems;
           }
         }
       } catch (e) {
@@ -905,8 +1098,8 @@ Output ONLY the data. No explanations.
 
           final effectiveParty =
               (detectedParty != null && detectedParty.isNotEmpty)
-                  ? detectedParty
-                  : defaultSeller;
+              ? detectedParty
+              : defaultSeller;
 
           if (itemsList.isNotEmpty) {
             final List<GeminiScannedItem> jsonItems = [];
@@ -914,10 +1107,16 @@ Output ONLY the data. No explanations.
               if (it is Map) {
                 final ser = it['series']?.toString() ?? '12';
                 final fTkt =
-                    it['fromTicket']?.toString().replaceAll(RegExp(r'\D'), '').padLeft(5, '0') ??
+                    it['fromTicket']
+                        ?.toString()
+                        .replaceAll(RegExp(r'\D'), '')
+                        .padLeft(5, '0') ??
                     '';
                 final tTkt =
-                    it['toTicket']?.toString().replaceAll(RegExp(r'\D'), '').padLeft(5, '0') ??
+                    it['toTicket']
+                        ?.toString()
+                        .replaceAll(RegExp(r'\D'), '')
+                        .padLeft(5, '0') ??
                     fTkt;
                 // ⚡ ALWAYS recalculate quantity from ticket range (fromTicket to toTicket).
                 // NEVER trust handwritten/AI-parsed quantity — it is often wrong on parchas.
@@ -931,11 +1130,15 @@ Output ONLY the data. No explanations.
                 }
                 if (q <= 0) q = 1;
 
-                final tNo = it['ticketNo']?.toString() ??
+                final tNo =
+                    it['ticketNo']?.toString() ??
                     (q > 1 ? '$fTkt - $tTkt' : fTkt);
 
                 final rawDoubt = it['aiDoubt']?.toString().trim();
-                final doubt = (rawDoubt != null && rawDoubt.isNotEmpty && rawDoubt.toLowerCase() != 'null')
+                final doubt =
+                    (rawDoubt != null &&
+                        rawDoubt.isNotEmpty &&
+                        rawDoubt.toLowerCase() != 'null')
                     ? rawDoubt
                     : null;
 
@@ -975,12 +1178,46 @@ Output ONLY the data. No explanations.
       }
     }
 
+    // 3. Try parsing JSON array of booking items or strings
+    try {
+      final decodedJson = jsonDecode(text.trim());
+      if (decodedJson is List) {
+        final List<GeminiScannedItem> parsedList = [];
+        for (final item in decodedJson) {
+          if (item is Map) {
+            final s = item['series']?.toString() ?? '12';
+            final tNo = item['ticketNo']?.toString() ?? item['ticket']?.toString() ?? '';
+            if (tNo.isNotEmpty) {
+              parsedList.add(GeminiScannedItem(
+                series: s,
+                ticketNo: tNo,
+                amount: (item['amount'] as num?)?.toDouble() ?? 0.0,
+                sellerName: defaultSeller,
+              ));
+            }
+          } else if (item is String) {
+            final cleanStr = item.trim().replaceAll(RegExp(r'''^[\["\'`\s]+|[\]",\'`\s]+$'''), '');
+            final eqParts = cleanStr.split('=');
+            if (eqParts.length == 2) {
+              parsedList.add(GeminiScannedItem(
+                series: eqParts[0].trim(),
+                ticketNo: eqParts[1].trim(),
+                amount: 0.0,
+                sellerName: defaultSeller,
+              ));
+            }
+          }
+        }
+        if (parsedList.isNotEmpty) return parsedList;
+      }
+    } catch (_) {}
+
     final List<GeminiScannedItem> items = [];
     final lines = text.split(RegExp(r'\r?\n'));
     String currentSeries = '';
 
     for (final line in lines) {
-      String l = line.trim();
+      String l = line.trim().replaceAll(RegExp(r'''^[\["\'`\s]+|[\]",\'`\s]+$'''), '');
       if (l.isEmpty) {
         currentSeries = '';
         continue;
@@ -998,7 +1235,7 @@ Output ONLY the data. No explanations.
 
       // Standalone Header
       final headerMatch = RegExp(
-        r'^(?:SERIES|SR|SER|SERI)?\s*[\(\[\{]?\s*([0-9]{1,3}\s*[A-Za-z]{0,8}|[A-Za-z]{1,4}\s*[0-9]{1,3})\s*[\)\]\}]?\s*[-:,\/=\s._~|*xX#@+]*$',
+        r'^(?:SERIES|SR|SER|SERI)?\s*[\(\[\{]?\s*([0-9]{1,4}\s*[A-Za-z]{0,8}|[A-Za-z]{1,4}\s*[0-9]{1,4})\s*[\)\]\}]?\s*[-:,\/=\s._~|*xX#@+]*$',
         caseSensitive: false,
       ).firstMatch(l);
 
@@ -1022,7 +1259,7 @@ Output ONLY the data. No explanations.
 
       // Full 5-Digit Range e.g. 40=39150-39199 or 39150-39199=40 or 39150 to 39199
       final fullRangeMatch = RegExp(
-        r'(?:^|[\s,;])(?:([0-9]{1,3}[A-Za-z]{0,4}|[A-Za-z]{1,4}[0-9]{1,3})\s*[-:,\/=\s._~|*xX#@+]+)?(\d{5})\s*[-~to]+\s*(\d{5})(?:\s*[-:,\/=\s._~|*xX#@+]+\s*([0-9]{1,3}[A-Za-z]{0,4}))?',
+        r'(?:^|[\s,;])(?:([0-9]{1,4}[A-Za-z]{0,4}|[A-Za-z]{1,4}[0-9]{1,4})\s*[-:,\/=\s._~|*xX#@+]+)?(\d{5})\s*[-~to]+\s*(\d{5})(?:\s*[-:,\/=\s._~|*xX#@+]+\s*([0-9]{1,4}[A-Za-z]{0,4}))?',
         caseSensitive: false,
       ).firstMatch(l);
 
@@ -1236,7 +1473,8 @@ Output ONLY the data. No explanations.
           }
           i++;
           continue;
-        } else if (current.toTicket.length > 5 && current.fromTicket.length == 5) {
+        } else if (current.toTicket.length > 5 &&
+            current.fromTicket.length == 5) {
           final p1 = current.fromTicket.substring(0, 2);
           final last3 = current.toTicket.substring(current.toTicket.length - 3);
           final newTo = '$p1$last3';

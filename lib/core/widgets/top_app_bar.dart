@@ -5,7 +5,10 @@ import '../theme/app_colors.dart';
 import '../theme/app_typography.dart';
 import '../theme/app_decorations.dart';
 import '../constants/app_constants.dart';
+import '../config/app_routes.dart';
 import '../services/whatsapp_engine_service.dart';
+import '../services/pending_photos_service.dart';
+import '../process/widgets/process_status_pill.dart';
 import '../../features/auth/viewmodels/auth_viewmodel.dart';
 import '../../features/auth/models/user_model.dart';
 
@@ -175,14 +178,17 @@ class TopAppBar extends ConsumerWidget {
                       onPressed: () async {
                         Navigator.of(ctx).pop();
                         await ref.read(authControllerProvider).logout();
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
+                        final rootCtx = rootNavigatorKey.currentContext;
+                        if (rootCtx != null && rootCtx.mounted) {
+                          ScaffoldMessenger.of(rootCtx).showSnackBar(
                             const SnackBar(
                               content: Text('🔒 Logged out successfully. See you soon!'),
                               backgroundColor: AppColors.primary,
                               duration: Duration(seconds: 2),
                             ),
                           );
+                          rootCtx.go(AppConstants.routeLogin);
+                        } else if (context.mounted) {
                           context.go(AppConstants.routeLogin);
                         }
                       },
@@ -259,6 +265,50 @@ class TopAppBar extends ConsumerWidget {
 
           Row(
             children: [
+              // 📸 Quiet Pending WhatsApp Photos Badge (Keeps photos in one place until user wants to review)
+              ValueListenableBuilder<int>(
+                valueListenable: PendingPhotosService.instance.pendingCountNotifier,
+                builder: (context, count, _) {
+                  if (count <= 0) return const SizedBox.shrink();
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 12),
+                    child: InkWell(
+                      onTap: () {
+                        PendingPhotosService.instance.requestOpenQueue();
+                        context.go(AppConstants.routeBookings);
+                      },
+                      borderRadius: BorderRadius.circular(8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 6,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.amber.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.amberAccent, width: 1.2),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.photo_library_rounded, size: 16, color: Colors.amberAccent),
+                            const SizedBox(width: 6),
+                            Text(
+                              '$count Photos Pending',
+                              style: const TextStyle(
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.amberAccent,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+
               // WhatsApp Engine Console Terminal Toggle Button
               ValueListenableBuilder<WhatsAppEngineStatus>(
                 valueListenable: WhatsAppEngineService.instance.statusNotifier,
@@ -303,6 +353,10 @@ class TopAppBar extends ConsumerWidget {
                   );
                 },
               ),
+              const SizedBox(width: 14),
+
+              // 🚀 Real-time Process Manager & Queue Status Pill
+              const ProcessStatusPill(),
               const SizedBox(width: 16),
 
               // System Live Operational Badge

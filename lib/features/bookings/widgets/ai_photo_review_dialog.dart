@@ -1,5 +1,6 @@
-import 'dart:typed_data';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../../core/theme/app_colors.dart';
@@ -10,6 +11,40 @@ import '../services/gemini_scanner_service.dart';
 import '../../settings/viewmodels/series_price_viewmodel.dart';
 import '../../sellers/viewmodels/seller_customer_viewmodel.dart';
 
+/// Persistent controller bundle per scanned item to completely eliminate cursor loss
+class _ItemEditControllers {
+  final TextEditingController seriesCtrl;
+  final TextEditingController ticketCtrl;
+  final TextEditingController amountCtrl;
+  final TextEditingController sellerCtrl;
+  final FocusNode seriesFocus;
+  final FocusNode ticketFocus;
+  final FocusNode amountFocus;
+  final FocusNode sellerFocus;
+
+  _ItemEditControllers({
+    required this.seriesCtrl,
+    required this.ticketCtrl,
+    required this.amountCtrl,
+    required this.sellerCtrl,
+    required this.seriesFocus,
+    required this.ticketFocus,
+    required this.amountFocus,
+    required this.sellerFocus,
+  });
+
+  void dispose() {
+    seriesCtrl.dispose();
+    ticketCtrl.dispose();
+    amountCtrl.dispose();
+    sellerCtrl.dispose();
+    seriesFocus.dispose();
+    ticketFocus.dispose();
+    amountFocus.dispose();
+    sellerFocus.dispose();
+  }
+}
+
 class AiPhotoReviewDialog extends ConsumerStatefulWidget {
   final Uint8List imageBytes;
   final List<Uint8List>? allImageBytes;
@@ -18,6 +53,7 @@ class AiPhotoReviewDialog extends ConsumerStatefulWidget {
   final DateTime activeDate;
   final String defaultSeller;
   final String? pendingPhotoId;
+  final List<String>? pendingPhotoIds;
 
   const AiPhotoReviewDialog({
     super.key,
@@ -28,6 +64,7 @@ class AiPhotoReviewDialog extends ConsumerStatefulWidget {
     required this.activeDate,
     required this.defaultSeller,
     this.pendingPhotoId,
+    this.pendingPhotoIds,
   });
 
   @override
@@ -38,15 +75,54 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
   late List<GeminiScannedItem> _items;
   late TextEditingController _customerCtrl;
   final TextEditingController _searchCtrl = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  final FocusNode _dialogFocusNode = FocusNode();
   String _searchQuery = '';
   late ValueNotifier<double> _totalAmountNotifier;
   bool _isSaving = false;
   int _currentImageIndex = 0;
+  bool _filterByCurrentPhoto = true; // 📸 Strictly show only active photo's numbers by default
+  final Set<GeminiScannedItem> _selectedItems = {};
+  final TextEditingController _customSeriesCtrl = TextEditingController();
+  late List<Uint8List> _allImageBytesList;
+  late List<String?> _pendingPhotoIdsList;
+
+  // ⚡ Persistent controllers & focus nodes to guarantee zero cursor loss on typing
+  final Map<GeminiScannedItem, _ItemEditControllers> _controllersMap = {};
+
+  _ItemEditControllers _getControllers(GeminiScannedItem item) {
+    return _controllersMap.putIfAbsent(item, () {
+      final ser = item.series == '?' ? '' : item.series;
+      final amt = item.amount > 0
+          ? (item.amount % 1 == 0 ? item.amount.toInt().toString() : item.amount.toStringAsFixed(2))
+          : '';
+      return _ItemEditControllers(
+        seriesCtrl: TextEditingController(text: ser),
+        ticketCtrl: TextEditingController(text: item.ticketNo),
+        amountCtrl: TextEditingController(text: amt),
+        sellerCtrl: TextEditingController(text: item.sellerName),
+        seriesFocus: FocusNode(),
+        ticketFocus: FocusNode(),
+        amountFocus: FocusNode(),
+        sellerFocus: FocusNode(),
+      );
+    });
+  }
+
+  void _moveToNextRow(int currentIdx) {
+    final list = _displayedItems;
+    if (currentIdx + 1 < list.length) {
+      final nextItem = list[currentIdx + 1];
+      _getControllers(nextItem).ticketFocus.requestFocus();
+    } else {
+      _addNewRow();
+    }
+  }
 
   Uint8List get _currentImageBytes {
-    if (widget.allImageBytes != null && widget.allImageBytes!.isNotEmpty) {
-      final idx = _currentImageIndex.clamp(0, widget.allImageBytes!.length - 1);
-      return widget.allImageBytes![idx];
+    if (_allImageBytesList.isNotEmpty) {
+      final idx = _currentImageIndex.clamp(0, _allImageBytesList.length - 1);
+      return _allImageBytesList[idx];
     }
     return widget.imageBytes;
   }
@@ -54,11 +130,24 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
   @override
   void initState() {
     super.initState();
+    if (widget.allImageBytes != null && widget.allImageBytes!.isNotEmpty) {
+      _allImageBytesList = List<Uint8List>.from(widget.allImageBytes!);
+      if (widget.pendingPhotoIds != null && widget.pendingPhotoIds!.length == widget.allImageBytes!.length) {
+        _pendingPhotoIdsList = List<String?>.from(widget.pendingPhotoIds!);
+      } else {
+        _pendingPhotoIdsList = List<String?>.filled(widget.allImageBytes!.length, widget.pendingPhotoId, growable: true);
+      }
+    } else {
+      _allImageBytesList = [widget.imageBytes];
+      _pendingPhotoIdsList = [widget.pendingPhotoId];
+    }
+
     final initialCust = widget.defaultSeller.isNotEmpty ? widget.defaultSeller : 'Walk-in Customer';
     _customerCtrl = TextEditingController(text: initialCust);
     _items = List.from(widget.initialItems);
     for (final item in _items) {
       item.sellerName = initialCust;
+      _getControllers(item);
     }
     // 📑 Keep items in strict physical visual order of the scanned parcha (Column 1, Column 2, etc.)
     _recalculateAllPrices();
@@ -66,8 +155,13 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
   }
 
   List<GeminiScannedItem> get _displayedItems {
-    if (_searchQuery.isEmpty) return _items;
-    return _items.where((it) {
+    var items = _items;
+    // 📸 Strictly filter by current photo if multiple photos uploaded
+    if (_allImageBytesList.length > 1 && _filterByCurrentPhoto) {
+      items = items.where((it) => it.photoIndex == _currentImageIndex).toList();
+    }
+    if (_searchQuery.isEmpty) return items;
+    return items.where((it) {
       final tkt = it.ticketNo.toLowerCase();
       final ser = it.series.toLowerCase();
       final amt = it.amount.toString();
@@ -91,6 +185,13 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
         if (item.series == '?' || item.series.trim().isEmpty) {
           item.series = clean;
           item.amount = defaultAmt;
+          final ctrls = _controllersMap[item];
+          if (ctrls != null) {
+            ctrls.seriesCtrl.text = clean;
+            ctrls.amountCtrl.text = defaultAmt > 0
+                ? (defaultAmt % 1 == 0 ? defaultAmt.toInt().toString() : defaultAmt.toStringAsFixed(2))
+                : '';
+          }
         }
       }
       _totalAmountNotifier.value = _totalAmount;
@@ -101,8 +202,231 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
   void dispose() {
     _customerCtrl.dispose();
     _searchCtrl.dispose();
+    _searchFocusNode.dispose();
+    _dialogFocusNode.dispose();
+    _customSeriesCtrl.dispose();
     _totalAmountNotifier.dispose();
+    for (final c in _controllersMap.values) {
+      c.dispose();
+    }
+    _controllersMap.clear();
     super.dispose();
+  }
+
+  void _toggleSelectAll() {
+    setState(() {
+      final disp = _displayedItems;
+      if (_selectedItems.length == disp.length) {
+        _selectedItems.clear();
+      } else {
+        _selectedItems.clear();
+        _selectedItems.addAll(disp);
+      }
+    });
+  }
+
+  void _toggleItemSelection(GeminiScannedItem item) {
+    setState(() {
+      if (_selectedItems.contains(item)) {
+        _selectedItems.remove(item);
+      } else {
+        _selectedItems.add(item);
+      }
+    });
+  }
+
+  void _applySeries(String series) {
+    final clean = series.trim().toUpperCase();
+    if (clean.isEmpty) return;
+    final targets = _selectedItems.isNotEmpty ? _selectedItems.toList() : _displayedItems;
+    setState(() {
+      final defaultAmt = _getPriceForSeries(clean);
+      for (final it in targets) {
+        it.series = clean;
+        it.amount = defaultAmt;
+        final ctrls = _controllersMap[it];
+        if (ctrls != null) {
+          ctrls.seriesCtrl.text = clean;
+          ctrls.amountCtrl.text = defaultAmt > 0
+              ? (defaultAmt % 1 == 0 ? defaultAmt.toInt().toString() : defaultAmt.toStringAsFixed(2))
+              : '';
+        }
+      }
+      _recalculateAllPrices();
+      _totalAmountNotifier.value = _totalAmount;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('✅ Set Series $clean on ${targets.length} tickets'),
+        backgroundColor: const Color(0xFF166534),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _showAddMultipleSeriesDialog() async {
+    final targets = _selectedItems.isNotEmpty ? _selectedItems.toList() : _displayedItems;
+    if (targets.isEmpty) return;
+
+    final seriesCtrl = TextEditingController(text: '24');
+    final quickOptions = ['12', '20', '24', '36', '40', '60', '100'];
+
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlgState) => AlertDialog(
+          backgroundColor: AppColors.surfaceContainerHigh,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          title: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: Colors.purple.withAlpha(40),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.copy_all_rounded, color: Colors.purpleAccent, size: 22),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text('Add / Duplicate Series', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                    Text(
+                      'Clone ${targets.length} ticket(s) with another series',
+                      style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Select or Enter Series to Add:', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: quickOptions.map((opt) {
+                  final isSel = seriesCtrl.text.trim() == opt;
+                  return InkWell(
+                    onTap: () {
+                      setDlgState(() => seriesCtrl.text = opt);
+                    },
+                    borderRadius: BorderRadius.circular(6),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: isSel ? Colors.purpleAccent : const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(6),
+                        border: Border.all(color: isSel ? Colors.purpleAccent : AppColors.border),
+                      ),
+                      child: Text(
+                        'S$opt',
+                        style: TextStyle(
+                          color: isSel ? Colors.black : Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: seriesCtrl,
+                autofocus: true,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                decoration: InputDecoration(
+                  labelText: 'Target Series',
+                  hintText: 'e.g. 24 or 36',
+                  prefixIcon: const Icon(Icons.tag_rounded, size: 18),
+                  isDense: true,
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel', style: TextStyle(color: Colors.grey)),
+            ),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purpleAccent,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              ),
+              icon: const Icon(Icons.add, size: 16),
+              label: Text('Add ${targets.length} Tickets', style: const TextStyle(fontWeight: FontWeight.bold)),
+              onPressed: () {
+                final s = seriesCtrl.text.trim();
+                if (s.isNotEmpty) {
+                  Navigator.pop(ctx, s);
+                }
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (result != null && result.trim().isNotEmpty) {
+      final clean = result.trim().toUpperCase();
+      final defaultAmt = _getPriceForSeries(clean);
+      final List<GeminiScannedItem> newClones = [];
+      for (final it in targets) {
+        newClones.add(GeminiScannedItem(
+          series: clean,
+          ticketNo: it.ticketNo,
+          amount: defaultAmt,
+          quantity: it.quantity,
+          sellerName: it.sellerName,
+          photoIndex: it.photoIndex,
+        ));
+      }
+      setState(() {
+        _items.addAll(newClones);
+        _recalculateAllPrices();
+        _totalAmountNotifier.value = _totalAmount;
+      });
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Added ${newClones.length} tickets in Series $clean! Total: ${_items.length}'),
+          backgroundColor: Colors.purple.shade800,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  void _deleteSelectedItems() {
+    if (_selectedItems.isEmpty) return;
+    final count = _selectedItems.length;
+    for (final it in _selectedItems) {
+      _controllersMap[it]?.dispose();
+      _controllersMap.remove(it);
+    }
+    setState(() {
+      _items.removeWhere((it) => _selectedItems.contains(it));
+      _selectedItems.clear();
+      _totalAmountNotifier.value = _totalAmount;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('🗑️ Removed $count selected tickets'),
+        backgroundColor: Colors.red.shade800,
+        duration: const Duration(seconds: 2),
+      ),
+    );
   }
 
   double _getPriceForSeries(String series) {
@@ -144,22 +468,30 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
   }
 
   void _addNewRow() {
+    final lastSeries = _items.isNotEmpty && _items.last.series != '?' ? _items.last.series : '12';
+    final defaultAmt = _getPriceForSeries(lastSeries);
+    final newItem = GeminiScannedItem(
+      series: lastSeries,
+      ticketNo: '',
+      amount: defaultAmt,
+      sellerName: _customerCtrl.text.trim().isNotEmpty ? _customerCtrl.text.trim() : widget.defaultSeller,
+      photoIndex: _currentImageIndex,
+    );
     setState(() {
-      final lastSeries = _items.isNotEmpty && _items.last.series != '?' ? _items.last.series : '12';
-      final defaultAmt = _getPriceForSeries(lastSeries);
-      _items.add(GeminiScannedItem(
-        series: lastSeries,
-        ticketNo: '',
-        amount: defaultAmt,
-        sellerName: widget.defaultSeller,
-      ));
+      _items.add(newItem);
       _totalAmountNotifier.value = _totalAmount;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _getControllers(newItem).ticketFocus.requestFocus();
     });
   }
 
   void _deleteItem(GeminiScannedItem item) {
+    _controllersMap[item]?.dispose();
+    _controllersMap.remove(item);
     setState(() {
       _items.remove(item);
+      _selectedItems.remove(item);
       _totalAmountNotifier.value = _totalAmount;
     });
   }
@@ -172,6 +504,18 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
     if (_items.isEmpty) {
       Navigator.pop(context, false);
       return;
+    }
+
+    // ⚡ Sync latest controller text into items before saving
+    for (final item in _items) {
+      final c = _controllersMap[item];
+      if (c != null) {
+        if (c.ticketCtrl.text.trim().isNotEmpty) item.ticketNo = c.ticketCtrl.text.trim();
+        if (c.seriesCtrl.text.trim().isNotEmpty) item.series = c.seriesCtrl.text.trim().toUpperCase();
+        final a = double.tryParse(c.amountCtrl.text.trim());
+        if (a != null) item.amount = a;
+        if (c.sellerCtrl.text.trim().isNotEmpty) item.sellerName = c.sellerCtrl.text.trim();
+      }
     }
 
     setState(() => _isSaving = true);
@@ -195,8 +539,8 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
         buyerPhone: '+91 9876543210',
         agentCode: 'AG-AI',
         agentName: cleanSeller,
-        drawCode: widget.activeShift.replaceAll(' ', '-').toUpperCase(),
-        drawName: widget.activeShift,
+        drawCode: ((item.drawShift != null && item.drawShift!.isNotEmpty) ? item.drawShift! : widget.activeShift).replaceAll(' ', '-').toUpperCase(),
+        drawName: (item.drawShift != null && item.drawShift!.isNotEmpty) ? item.drawShift! : widget.activeShift,
         ticketSeries: cleanSeries,
         ticketNumber: '$cleanSeries $cleanTicketNo',
         quantity: item.quantity > 0 ? item.quantity : 1,
@@ -206,17 +550,29 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
         status: TicketStatus.sold,
         paymentMode: PaymentMode.cash,
         saleDate: DateTime(
-          widget.activeDate.year,
-          widget.activeDate.month,
-          widget.activeDate.day,
+          item.targetDate != null && DateTime.tryParse(item.targetDate!) != null
+              ? DateTime.tryParse(item.targetDate!)!.year
+              : widget.activeDate.year,
+          item.targetDate != null && DateTime.tryParse(item.targetDate!) != null
+              ? DateTime.tryParse(item.targetDate!)!.month
+              : widget.activeDate.month,
+          item.targetDate != null && DateTime.tryParse(item.targetDate!) != null
+              ? DateTime.tryParse(item.targetDate!)!.day
+              : widget.activeDate.day,
           now.hour,
           now.minute,
           now.second,
         ),
         drawDate: DateTime(
-          widget.activeDate.year,
-          widget.activeDate.month,
-          widget.activeDate.day,
+          item.targetDate != null && DateTime.tryParse(item.targetDate!) != null
+              ? DateTime.tryParse(item.targetDate!)!.year
+              : widget.activeDate.year,
+          item.targetDate != null && DateTime.tryParse(item.targetDate!) != null
+              ? DateTime.tryParse(item.targetDate!)!.month
+              : widget.activeDate.month,
+          item.targetDate != null && DateTime.tryParse(item.targetDate!) != null
+              ? DateTime.tryParse(item.targetDate!)!.day
+              : widget.activeDate.day,
           12,
           0,
           0,
@@ -230,8 +586,11 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
       // ⚡ INSTANT BATCH INSERTION (0.015s for 100+ tickets!)
       await ref.read(ticketSalesViewModelProvider.notifier).addTicketSalesBulk(salesToSave);
 
-      if (widget.pendingPhotoId != null) {
-        await DatabaseService.instance.updatePendingPhotoStatus(widget.pendingPhotoId!, 'approved');
+      // Approve remaining active photos
+      for (final id in _pendingPhotoIdsList) {
+        if (id != null && id.isNotEmpty) {
+          await DatabaseService.instance.updatePendingPhotoStatus(id, 'approved');
+        }
       }
 
       if (mounted) {
@@ -255,43 +614,296 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             backgroundColor: AppColors.error,
-            content: Text('⚠️ Error saving confirmed numbers: $e'),
+            content: Text('Failed to save tickets: $e'),
           ),
         );
       }
     }
   }
 
-  Future<void> _rejectPendingPhoto() async {
-    if (widget.pendingPhotoId != null) {
-      await DatabaseService.instance.updatePendingPhotoStatus(widget.pendingPhotoId!, 'rejected');
-    }
-    if (mounted) {
-      Navigator.pop(context, false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          backgroundColor: AppColors.warning,
-          content: Text('❌ Photo booking rejected & dismissed.'),
+  Future<void> _confirmRejectCurrentPhoto() async {
+    if (_allImageBytesList.isEmpty) return;
+    final targetIdx = _currentImageIndex.clamp(0, _allImageBytesList.length - 1);
+    final count = _items.where((it) => it.photoIndex == targetIdx).length;
+    final parchaName = _allImageBytesList.length > 1 ? 'Parcha ${targetIdx + 1}' : 'This Photo';
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: AppColors.error, width: 1.5),
         ),
-      );
+        title: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: AppColors.error, size: 24),
+            const SizedBox(width: 8),
+            Text('Reject $parchaName?', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Text(
+          'Are you sure you want to reject and discard $parchaName?\n\n'
+          '• $count scanned number(s) belonging to this photo will be deleted.\n'
+          '• This photo will be removed from the pending queue.',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            icon: const Icon(Icons.delete_forever_rounded, size: 16),
+            label: Text('Yes, Reject $parchaName', style: const TextStyle(fontWeight: FontWeight.bold)),
+            onPressed: () => Navigator.pop(ctx, true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      await _executeRejectPhoto(targetIdx);
+    }
+  }
+
+  Future<void> _executeRejectPhoto(int targetIdx) async {
+    // 1. Mark in database if pendingPhotoId exists
+    if (targetIdx < _pendingPhotoIdsList.length && _pendingPhotoIdsList[targetIdx] != null) {
+      final pId = _pendingPhotoIdsList[targetIdx]!;
+      await DatabaseService.instance.updatePendingPhotoStatus(pId, 'rejected');
+    }
+
+    // 2. Remove controllers for items belonging to targetIdx
+    final itemsToRemove = _items.where((it) => it.photoIndex == targetIdx).toList();
+    for (final it in itemsToRemove) {
+      _selectedItems.remove(it);
+      final c = _controllersMap.remove(it);
+      c?.dispose();
+    }
+    _items.removeWhere((it) => it.photoIndex == targetIdx);
+
+    // 3. Re-index photoIndex for subsequent photos
+    for (final it in _items) {
+      if (it.photoIndex > targetIdx) {
+        it.photoIndex -= 1;
+      }
+    }
+
+    // 4. Remove from photo lists
+    if (targetIdx < _allImageBytesList.length) {
+      _allImageBytesList = List<Uint8List>.from(_allImageBytesList)..removeAt(targetIdx);
+    }
+    if (targetIdx < _pendingPhotoIdsList.length) {
+      _pendingPhotoIdsList = List<String?>.from(_pendingPhotoIdsList)..removeAt(targetIdx);
+    }
+
+    // 5. Update state or close if empty
+    if (_allImageBytesList.isEmpty || _items.isEmpty) {
+      if (mounted) {
+        Navigator.pop(context, true); // true to reload queue in parent screen
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppColors.warning,
+            content: Row(
+              children: [
+                Icon(Icons.delete_outline_rounded, color: Colors.white),
+                SizedBox(width: 8),
+                Text('All photos rejected & dismissed from queue.'),
+              ],
+            ),
+          ),
+        );
+      }
+    } else {
+      setState(() {
+        if (_currentImageIndex >= _allImageBytesList.length) {
+          _currentImageIndex = _allImageBytesList.length - 1;
+        }
+        _totalAmountNotifier.value = _totalAmount;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            backgroundColor: AppColors.warning,
+            content: Text('🗑️ Parcha ${targetIdx + 1} rejected. ${_allImageBytesList.length} parcha(s) remaining.'),
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _confirmRejectAllPhotos() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E293B),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: const BorderSide(color: AppColors.error, width: 1.5),
+        ),
+        title: const Row(
+          children: [
+            Icon(Icons.delete_sweep_rounded, color: AppColors.error, size: 24),
+            SizedBox(width: 8),
+            Text('Reject All Photos?', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Text(
+          'Are you sure you want to reject all ${_allImageBytesList.length} photos and dismiss all ${_items.length} numbers?\n\n'
+          'All pending photos in this batch will be marked as rejected.',
+          style: const TextStyle(color: AppColors.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel', style: TextStyle(color: Colors.white70)),
+          ),
+          ElevatedButton.icon(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.error,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            icon: const Icon(Icons.delete_forever_rounded, size: 16),
+            label: const Text('Reject All', style: TextStyle(fontWeight: FontWeight.bold)),
+            onPressed: () => Navigator.pop(ctx, true),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      for (final id in _pendingPhotoIdsList) {
+        if (id != null && id.isNotEmpty) {
+          await DatabaseService.instance.updatePendingPhotoStatus(id, 'rejected');
+        }
+      }
+      if (mounted) {
+        Navigator.pop(context, true);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            backgroundColor: AppColors.warning,
+            content: Text('❌ All pending photos rejected & dismissed.'),
+          ),
+        );
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final screenWidth = MediaQuery.of(context).size.width;
+    final screenHeight = MediaQuery.of(context).size.height;
+
     return Dialog(
       backgroundColor: AppColors.surfaceContainerHigh,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
         side: const BorderSide(color: AppColors.border, width: 1.5),
       ),
-      child: Container(
-        width: 1050,
-        height: 700,
-        padding: const EdgeInsets.all(22),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      child: Focus(
+        focusNode: _dialogFocusNode,
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+          final isCtrl = HardwareKeyboard.instance.isControlPressed;
+          final isAlt = HardwareKeyboard.instance.isAltPressed;
+          final key = event.logicalKey;
+
+          // Ctrl+Enter or Cmd+Enter -> Confirm and Book all tickets
+          if (isCtrl && (key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.numpadEnter)) {
+            if (!_isSaving) {
+              _saveAllConfirmedTickets();
+            }
+            return KeyEventResult.handled;
+          }
+
+          // Alt+N or Ctrl+N -> Add Row
+          if ((isAlt || isCtrl) && key == LogicalKeyboardKey.keyN) {
+            _addNewRow();
+            return KeyEventResult.handled;
+          }
+
+          // Ctrl+F -> Focus Search
+          if (isCtrl && key == LogicalKeyboardKey.keyF) {
+            _searchFocusNode.requestFocus();
+            _searchCtrl.selection = TextSelection(baseOffset: 0, extentOffset: _searchCtrl.text.length);
+            return KeyEventResult.handled;
+          }
+
+          // Alt+A -> Toggle Select All
+          if (isAlt && key == LogicalKeyboardKey.keyA) {
+            _toggleSelectAll();
+            return KeyEventResult.handled;
+          }
+
+          // Alt+Delete or Delete when items selected
+          if ((isAlt && key == LogicalKeyboardKey.delete) || (key == LogicalKeyboardKey.delete && _selectedItems.isNotEmpty)) {
+            _deleteSelectedItems();
+            return KeyEventResult.handled;
+          }
+
+          // F1 - F7 or Alt+1 - Alt+7 -> Quick Series
+          if (key == LogicalKeyboardKey.f1 || (isAlt && key == LogicalKeyboardKey.digit1)) {
+            _applySeries('12');
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.f2 || (isAlt && key == LogicalKeyboardKey.digit2)) {
+            _applySeries('20');
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.f3 || (isAlt && key == LogicalKeyboardKey.digit3)) {
+            _applySeries('24');
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.f4 || (isAlt && key == LogicalKeyboardKey.digit4)) {
+            _applySeries('36');
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.f5 || (isAlt && key == LogicalKeyboardKey.digit5)) {
+            _applySeries('40');
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.f6 || (isAlt && key == LogicalKeyboardKey.digit6)) {
+            _applySeries('60');
+            return KeyEventResult.handled;
+          }
+          if (key == LogicalKeyboardKey.f7 || (isAlt && key == LogicalKeyboardKey.digit7)) {
+            _applySeries('100');
+            return KeyEventResult.handled;
+          }
+
+          // Switch photos with Alt+Left / Alt+Right
+          if (isAlt && key == LogicalKeyboardKey.arrowLeft) {
+            if (_currentImageIndex > 0) {
+              setState(() => _currentImageIndex--);
+            }
+            return KeyEventResult.handled;
+          }
+          if (isAlt && key == LogicalKeyboardKey.arrowRight) {
+            if (_currentImageIndex < _allImageBytesList.length - 1) {
+              setState(() => _currentImageIndex++);
+            }
+            return KeyEventResult.handled;
+          }
+
+          return KeyEventResult.ignored;
+        },
+        child: Container(
+          width: math.min(1320.0, math.max(1050.0, screenWidth * 0.94)),
+          height: math.min(880.0, math.max(680.0, screenHeight * 0.90)),
+          padding: const EdgeInsets.all(22),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
             // 1. Header Bar
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -314,10 +926,26 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                           'AI Photo Scanned — Review & Confirm Booking',
                           style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: AppColors.textPrimary),
                         ),
-                        const SizedBox(height: 2),
-                        Text(
-                          'Shift: ${widget.activeShift} | Date: ${DateFormat('dd-MM-yyyy').format(widget.activeDate)} | Verify & Edit before booking',
-                          style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                        Row(
+                          children: [
+                            Text(
+                              'Shift: ${widget.activeShift} | Date: ${DateFormat('dd-MM-yyyy').format(widget.activeDate)}',
+                              style: const TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                            ),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: AppColors.primary.withAlpha(25),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: AppColors.primary.withAlpha(70)),
+                              ),
+                              child: const Text(
+                                '⌨️ [Ctrl+Enter] Book | [Alt+N] Add | [Enter] Next | [F1..F7] Series | [Ctrl+F] Search',
+                                style: TextStyle(fontSize: 10, color: AppColors.primary, fontWeight: FontWeight.bold),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -333,7 +961,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
                       ),
                       icon: const Icon(Icons.add, size: 16),
-                      label: const Text('Add Row', style: TextStyle(fontWeight: FontWeight.bold)),
+                      label: const Text('Add Row (Alt+N)', style: TextStyle(fontWeight: FontWeight.bold)),
                       onPressed: _addNewRow,
                     ),
                     const SizedBox(width: 10),
@@ -347,7 +975,116 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
             ),
             const SizedBox(height: 16),
             const Divider(color: AppColors.border, height: 1),
-            const SizedBox(height: 14),
+            const SizedBox(height: 12),
+
+            // 📑 MULTI-PARCHA TABS (All parchas in one screen)
+            if (_allImageBytesList.length > 1)
+              Container(
+                margin: const EdgeInsets.only(bottom: 12),
+                padding: const EdgeInsets.all(4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF0F172A),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: AppColors.border),
+                ),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      for (int i = 0; i < _allImageBytesList.length; i++) ...[
+                        Builder(builder: (context) {
+                          final isSel = _filterByCurrentPhoto && _currentImageIndex == i;
+                          final count = _items.where((it) => it.photoIndex == i).length;
+                          return Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: InkWell(
+                              onTap: () {
+                                setState(() {
+                                  _currentImageIndex = i;
+                                  _filterByCurrentPhoto = true;
+                                });
+                              },
+                              borderRadius: BorderRadius.circular(8),
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                                decoration: BoxDecoration(
+                                  color: isSel ? AppColors.primary : const Color(0xFF1E293B),
+                                  borderRadius: BorderRadius.circular(8),
+                                  border: Border.all(
+                                    color: isSel ? AppColors.primary : AppColors.border,
+                                    width: isSel ? 1.4 : 1.0,
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(
+                                      Icons.receipt_long_rounded,
+                                      size: 15,
+                                      color: isSel ? Colors.black : Colors.amberAccent,
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      'Parcha ${i + 1} ($count)',
+                                      style: TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.bold,
+                                        color: isSel ? Colors.black : Colors.white,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          );
+                        }),
+                      ],
+                      // "All Parchas" Tab
+                      Builder(builder: (context) {
+                        final isAllSel = !_filterByCurrentPhoto;
+                        return InkWell(
+                          onTap: () {
+                            setState(() {
+                              _filterByCurrentPhoto = false;
+                            });
+                          },
+                          borderRadius: BorderRadius.circular(8),
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+                            decoration: BoxDecoration(
+                              color: isAllSel ? Colors.purpleAccent : const Color(0xFF1E293B),
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(
+                                color: isAllSel ? Colors.purpleAccent : AppColors.border,
+                                width: isAllSel ? 1.4 : 1.0,
+                              ),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.dashboard_rounded,
+                                  size: 15,
+                                  color: isAllSel ? Colors.black : Colors.purpleAccent,
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  'All Parchas (${_items.length})',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: isAllSel ? Colors.black : Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }),
+                    ],
+                  ),
+                ),
+              ),
 
             // 2. Main Content Split View
             Expanded(
@@ -367,65 +1104,148 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                           color: AppColors.surfaceContainer,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              // Row 1: Photo title + Prev/Next page navigation
                               Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                 children: [
-                                  const Icon(Icons.photo_size_select_actual_outlined, size: 16, color: AppColors.primary),
-                                  const SizedBox(width: 6),
-                                  Text(
-                                    widget.allImageBytes != null && widget.allImageBytes!.length > 1
-                                        ? 'Photo ${_currentImageIndex + 1} of ${widget.allImageBytes!.length}'
-                                        : 'Original Photo / Slip',
-                                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.photo_size_select_actual_outlined, size: 15, color: AppColors.primary),
+                                      const SizedBox(width: 5),
+                                      Text(
+                                        _allImageBytesList.length > 1
+                                            ? 'Photo ${_currentImageIndex + 1} of ${_allImageBytesList.length}'
+                                            : 'Original Photo / Slip',
+                                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12),
+                                      ),
+                                    ],
+                                  ),
+                                  if (_allImageBytesList.length > 1)
+                                    Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        InkWell(
+                                          onTap: _currentImageIndex > 0
+                                              ? () => setState(() => _currentImageIndex--)
+                                              : null,
+                                          borderRadius: BorderRadius.circular(4),
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                            child: Icon(
+                                              Icons.arrow_back_ios_rounded,
+                                              size: 13,
+                                              color: _currentImageIndex > 0 ? Colors.white : Colors.white24,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 2),
+                                        Text(
+                                          '${_currentImageIndex + 1}/${_allImageBytesList.length}',
+                                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.cyanAccent),
+                                        ),
+                                        const SizedBox(width: 2),
+                                        InkWell(
+                                          onTap: _currentImageIndex < _allImageBytesList.length - 1
+                                              ? () => setState(() => _currentImageIndex++)
+                                              : null,
+                                          borderRadius: BorderRadius.circular(4),
+                                          child: Padding(
+                                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                                            child: Icon(
+                                              Icons.arrow_forward_ios_rounded,
+                                              size: 13,
+                                              color: _currentImageIndex < _allImageBytesList.length - 1
+                                                  ? Colors.white
+                                                  : Colors.white24,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              // Row 2: Filter Toggle + Reject Photo Button
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  if (_allImageBytesList.length > 1)
+                                    InkWell(
+                                      onTap: () => setState(() => _filterByCurrentPhoto = !_filterByCurrentPhoto),
+                                      borderRadius: BorderRadius.circular(6),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                        decoration: BoxDecoration(
+                                          color: _filterByCurrentPhoto
+                                              ? AppColors.primary.withValues(alpha: 0.2)
+                                              : const Color(0xFF1E293B),
+                                          borderRadius: BorderRadius.circular(6),
+                                          border: Border.all(
+                                            color: _filterByCurrentPhoto ? AppColors.primary : AppColors.border,
+                                            width: 1,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              _filterByCurrentPhoto ? Icons.filter_alt_rounded : Icons.all_inclusive_rounded,
+                                              size: 12,
+                                              color: _filterByCurrentPhoto ? AppColors.primary : Colors.grey,
+                                            ),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              _filterByCurrentPhoto
+                                                  ? 'Photo ${_currentImageIndex + 1} (${_items.where((it) => it.photoIndex == _currentImageIndex).length})'
+                                                  : 'All (${_items.length})',
+                                              style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.bold,
+                                                color: _filterByCurrentPhoto ? AppColors.primary : Colors.grey,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    )
+                                  else
+                                    const SizedBox.shrink(),
+                                  // 🗑️ REJECT CURRENT PHOTO BUTTON
+                                  InkWell(
+                                    onTap: _isSaving ? null : _confirmRejectCurrentPhoto,
+                                    borderRadius: BorderRadius.circular(6),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                                      decoration: BoxDecoration(
+                                        color: Colors.redAccent.withValues(alpha: 0.2),
+                                        borderRadius: BorderRadius.circular(6),
+                                        border: Border.all(color: Colors.redAccent.withValues(alpha: 0.7), width: 1),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(Icons.delete_forever_rounded, size: 12, color: Colors.redAccent),
+                                          const SizedBox(width: 4),
+                                          Text(
+                                            _allImageBytesList.length > 1 ? 'Reject P${_currentImageIndex + 1}' : 'Reject Photo',
+                                            style: const TextStyle(
+                                              fontSize: 10,
+                                              fontWeight: FontWeight.bold,
+                                              color: Colors.redAccent,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
-                              if (widget.allImageBytes != null && widget.allImageBytes!.length > 1)
-                                Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    InkWell(
-                                      onTap: _currentImageIndex > 0
-                                          ? () => setState(() => _currentImageIndex--)
-                                          : null,
-                                      borderRadius: BorderRadius.circular(4),
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(3.0),
-                                        child: Icon(
-                                          Icons.arrow_back_ios_rounded,
-                                          size: 13,
-                                          color: _currentImageIndex > 0 ? Colors.white : Colors.white24,
-                                        ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      '${_currentImageIndex + 1}/${widget.allImageBytes!.length}',
-                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 11, color: Colors.cyanAccent),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    InkWell(
-                                      onTap: _currentImageIndex < widget.allImageBytes!.length - 1
-                                          ? () => setState(() => _currentImageIndex++)
-                                          : null,
-                                      borderRadius: BorderRadius.circular(4),
-                                      child: Padding(
-                                        padding: const EdgeInsets.all(3.0),
-                                        child: Icon(
-                                          Icons.arrow_forward_ios_rounded,
-                                          size: 13,
-                                          color: _currentImageIndex < widget.allImageBytes!.length - 1
-                                              ? Colors.white
-                                              : Colors.white24,
-                                        ),
-                                      ),
-                                    ),
-                                  ],
-                                ),
                             ],
                           ),
                         ),
@@ -642,9 +1462,10 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                                       Expanded(
                                         child: TextField(
                                           controller: _searchCtrl,
+                                          focusNode: _searchFocusNode,
                                           style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
                                           decoration: InputDecoration(
-                                            hintText: 'Search Ticket / Series (e.g. 53487, 24)...',
+                                            hintText: 'Search Ticket / Series (e.g. 53487, 24) [Ctrl+F]...',
                                             hintStyle: TextStyle(
                                               fontSize: 11,
                                               color: AppColors.textSecondary.withValues(alpha: 0.7),
@@ -692,10 +1513,246 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
                                 ),
                                 icon: const Icon(Icons.add, size: 15),
-                                label: const Text('+ Add Row', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                                label: const Text('+ Add Row (Alt+N)', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
                                 onPressed: _addNewRow,
                               ),
                             ],
+                          ),
+                        ),
+
+                        // ⚡ BATCH SERIES & SELECTION CONTROL BAR
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 8),
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1E293B),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: _selectedItems.isNotEmpty ? AppColors.primary : AppColors.border,
+                              width: _selectedItems.isNotEmpty ? 1.4 : 1.0,
+                            ),
+                          ),
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                // 1. Select All Checkbox & Count
+                                InkWell(
+                                  onTap: _toggleSelectAll,
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      color: _selectedItems.isNotEmpty
+                                          ? AppColors.primary.withAlpha(40)
+                                          : Colors.transparent,
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          _selectedItems.isNotEmpty && _selectedItems.length == _displayedItems.length
+                                              ? Icons.check_box_rounded
+                                              : (_selectedItems.isNotEmpty
+                                                  ? Icons.indeterminate_check_box_rounded
+                                                  : Icons.check_box_outline_blank_rounded),
+                                          size: 16,
+                                          color: _selectedItems.isNotEmpty ? AppColors.primary : Colors.grey,
+                                        ),
+                                        const SizedBox(width: 5),
+                                        Text(
+                                           _selectedItems.isEmpty
+                                               ? 'Select All (Alt+A)'
+                                               : '${_selectedItems.length}/${_displayedItems.length} Selected',
+                                           style: TextStyle(
+                                             fontSize: 11,
+                                             fontWeight: FontWeight.bold,
+                                             color: _selectedItems.isNotEmpty ? AppColors.primary : Colors.white70,
+                                           ),
+                                         ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                Container(width: 1, height: 18, color: AppColors.border),
+                                const SizedBox(width: 8),
+
+                                // 2. "Set Series" Label
+                                Text(
+                                  _selectedItems.isEmpty ? 'Set Series (All):' : 'Set Series (${_selectedItems.length}):',
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                    color: _selectedItems.isNotEmpty ? AppColors.primary : Colors.grey.shade400,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+
+                                // Quick Series Chips with F1-F7 indicators
+                                 ...[
+                                   {'ser': '12', 'key': 'F1'},
+                                   {'ser': '20', 'key': 'F2'},
+                                   {'ser': '24', 'key': 'F3'},
+                                   {'ser': '36', 'key': 'F4'},
+                                   {'ser': '40', 'key': 'F5'},
+                                   {'ser': '60', 'key': 'F6'},
+                                   {'ser': '100', 'key': 'F7'},
+                                 ].map((info) {
+                                   final s = info['ser']!;
+                                   final shortcut = info['key']!;
+                                   return Padding(
+                                     padding: const EdgeInsets.only(right: 4),
+                                     child: Tooltip(
+                                       message: 'Apply Series $s ($shortcut or Alt+${shortcut[1]})',
+                                       child: InkWell(
+                                         onTap: () => _applySeries(s),
+                                         borderRadius: BorderRadius.circular(4),
+                                         child: Container(
+                                           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                           decoration: BoxDecoration(
+                                             color: const Color(0xFF0F172A),
+                                             borderRadius: BorderRadius.circular(4),
+                                             border: Border.all(color: const Color(0xFF38BDF8).withAlpha(90)),
+                                           ),
+                                           child: Row(
+                                             mainAxisSize: MainAxisSize.min,
+                                             children: [
+                                               Text(
+                                                 'S$s',
+                                                 style: const TextStyle(
+                                                   color: Color(0xFF38BDF8),
+                                                   fontSize: 11,
+                                                   fontWeight: FontWeight.bold,
+                                                 ),
+                                               ),
+                                               const SizedBox(width: 3),
+                                               Container(
+                                                 padding: const EdgeInsets.symmetric(horizontal: 2.5, vertical: 0.5),
+                                                 decoration: BoxDecoration(
+                                                   color: const Color(0xFF38BDF8).withAlpha(35),
+                                                   borderRadius: BorderRadius.circular(3),
+                                                 ),
+                                                 child: Text(
+                                                   shortcut,
+                                                   style: const TextStyle(
+                                                     fontSize: 8,
+                                                     fontWeight: FontWeight.w800,
+                                                     color: Color(0xFF7DD3FC),
+                                                   ),
+                                                 ),
+                                               ),
+                                             ],
+                                           ),
+                                         ),
+                                       ),
+                                     ),
+                                   );
+                                 }),
+
+                                // Custom Series Input
+                                Container(
+                                  width: 65,
+                                  height: 26,
+                                  margin: const EdgeInsets.only(left: 2, right: 4),
+                                  child: TextField(
+                                    controller: _customSeriesCtrl,
+                                    style: const TextStyle(fontSize: 11, fontWeight: FontWeight.bold),
+                                    decoration: InputDecoration(
+                                      hintText: 'Custom',
+                                      hintStyle: const TextStyle(fontSize: 10, color: Colors.grey),
+                                      isDense: true,
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                                      fillColor: const Color(0xFF0F172A),
+                                      filled: true,
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: const BorderSide(color: AppColors.border)),
+                                      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(4), borderSide: const BorderSide(color: AppColors.border)),
+                                    ),
+                                    onSubmitted: (val) {
+                                      if (val.trim().isNotEmpty) {
+                                        _applySeries(val.trim());
+                                        _customSeriesCtrl.clear();
+                                      }
+                                    },
+                                  ),
+                                ),
+                                InkWell(
+                                  onTap: () {
+                                    if (_customSeriesCtrl.text.trim().isNotEmpty) {
+                                      _applySeries(_customSeriesCtrl.text.trim());
+                                      _customSeriesCtrl.clear();
+                                    }
+                                  },
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: AppColors.primary,
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: const Text('Apply', style: TextStyle(color: Colors.black, fontSize: 10.5, fontWeight: FontWeight.bold)),
+                                  ),
+                                ),
+
+                                const SizedBox(width: 10),
+                                Container(width: 1, height: 18, color: AppColors.border),
+                                const SizedBox(width: 10),
+
+                                // 3. "+ Add / Duplicate Series" Button (Multiple series add kar sake ek baar me)
+                                InkWell(
+                                  onTap: _showAddMultipleSeriesDialog,
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: Colors.purple.shade900.withAlpha(160),
+                                      borderRadius: BorderRadius.circular(4),
+                                      border: Border.all(color: Colors.purpleAccent, width: 0.8),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.copy_rounded, size: 12, color: Colors.purpleAccent),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          _selectedItems.isEmpty ? '+ Add Series (All)' : '+ Add Series (${_selectedItems.length})',
+                                          style: const TextStyle(color: Colors.purpleAccent, fontSize: 10.5, fontWeight: FontWeight.bold),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+
+                                // 4. Delete Selected (if any selected)
+                                if (_selectedItems.isNotEmpty) ...[
+                                  const SizedBox(width: 8),
+                                  InkWell(
+                                    onTap: _deleteSelectedItems,
+                                    borderRadius: BorderRadius.circular(4),
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                                      decoration: BoxDecoration(
+                                        color: Colors.red.shade900.withAlpha(160),
+                                        borderRadius: BorderRadius.circular(4),
+                                        border: Border.all(color: Colors.redAccent, width: 0.8),
+                                      ),
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(Icons.delete_outline, size: 12, color: Colors.redAccent),
+                                          const SizedBox(width: 3),
+                                          Text(
+                                            'Del (${_selectedItems.length})',
+                                            style: const TextStyle(color: Colors.redAccent, fontSize: 10.5, fontWeight: FontWeight.bold),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
                         ),
                         Expanded(
@@ -753,90 +1810,123 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
       const Divider(color: AppColors.border, height: 1),
       const SizedBox(height: 14),
 
-            // 3. Bottom Summary & Actions Footer
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                // Summary Badges
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: AppColors.primary.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
-                      ),
-                      child: Text(
-                        'Total Numbers: ${_items.length}',
-                        style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 13),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    ValueListenableBuilder<double>(
-                      valueListenable: _totalAmountNotifier,
-                      builder: (context, total, _) {
-                        return Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: AppColors.success.withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(8),
-                            border: Border.all(color: AppColors.success.withValues(alpha: 0.5)),
-                          ),
-                          child: Text(
-                            'Total Amount: ₹${total.toStringAsFixed(0)}',
-                            style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.success, fontSize: 13),
-                          ),
-                        );
-                      },
-                    ),
-                  ],
-                ),
-
-                // Action Buttons
-                Row(
-                  children: [
-                    if (widget.pendingPhotoId != null) ...[
-                      OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: AppColors.error,
-                          side: const BorderSide(color: AppColors.error),
-                          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            // 3. Bottom Summary & Actions Footer (wrapped with LayoutBuilder & SingleChildScrollView to eliminate any overflow)
+            LayoutBuilder(
+              builder: (context, footerConstraints) {
+                return SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: footerConstraints.maxWidth),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        // Summary Badges
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                              decoration: BoxDecoration(
+                                color: AppColors.primary.withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(color: AppColors.primary.withValues(alpha: 0.5)),
+                              ),
+                              child: Text(
+                                'Total Numbers: ${_items.length}',
+                                style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.primary, fontSize: 13),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            ValueListenableBuilder<double>(
+                              valueListenable: _totalAmountNotifier,
+                              builder: (context, total, _) {
+                                return Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.success.withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: AppColors.success.withValues(alpha: 0.5)),
+                                  ),
+                                  child: Text(
+                                    'Total Amount: ₹${total.toStringAsFixed(0)}',
+                                    style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.success, fontSize: 13),
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
                         ),
-                        icon: const Icon(Icons.cancel_outlined, size: 16),
-                        label: const Text('Reject Photo', style: TextStyle(fontWeight: FontWeight.bold)),
-                        onPressed: _isSaving ? null : _rejectPendingPhoto,
-                      ),
-                      const SizedBox(width: 12),
-                    ],
-                    TextButton(
-                      onPressed: () => Navigator.pop(context, false),
-                      child: const Text('Close', style: TextStyle(color: AppColors.textSecondary)),
+
+                        const SizedBox(width: 16),
+
+                        // Action Buttons
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // 🗑️ Reject Current Photo / Parcha Button
+                            OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: AppColors.error,
+                                side: const BorderSide(color: AppColors.error),
+                                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                              icon: const Icon(Icons.delete_outline_rounded, size: 16),
+                              label: Text(
+                                _allImageBytesList.length > 1
+                                    ? 'Reject Parcha ${_currentImageIndex + 1}'
+                                    : 'Reject Photo',
+                                style: const TextStyle(fontWeight: FontWeight.bold),
+                              ),
+                              onPressed: _isSaving ? null : _confirmRejectCurrentPhoto,
+                            ),
+                            if (_allImageBytesList.length > 1) ...[
+                              const SizedBox(width: 8),
+                              OutlinedButton.icon(
+                                style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.red.shade300,
+                                  side: BorderSide(color: Colors.red.shade700),
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                ),
+                                icon: const Icon(Icons.delete_sweep_rounded, size: 15),
+                                label: const Text('Reject All', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
+                                onPressed: _isSaving ? null : _confirmRejectAllPhotos,
+                              ),
+                            ],
+                            const SizedBox(width: 10),
+                            TextButton(
+                              onPressed: () => Navigator.pop(context, false),
+                              child: const Text('Close', style: TextStyle(color: AppColors.textSecondary)),
+                            ),
+                            const SizedBox(width: 10),
+                            ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: AppColors.success,
+                                foregroundColor: Colors.black,
+                                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                              ),
+                              icon: _isSaving
+                                  ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
+                                  : const Icon(Icons.check_circle_outline_rounded, size: 18),
+                              label: Text(
+                                _isSaving ? 'Saving...' : 'Confirm & Book All (${_items.length}) [Ctrl+Enter]',
+                                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                              ),
+                              onPressed: _isSaving ? null : _saveAllConfirmedTickets,
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 12),
-                    ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppColors.success,
-                        foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                      ),
-                      icon: _isSaving
-                          ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
-                          : const Icon(Icons.check_circle_outline_rounded, size: 18),
-                      label: Text(
-                        _isSaving ? 'Saving...' : 'Confirm & Book All (${_items.length}) Numbers',
-                        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                      ),
-                      onPressed: _isSaving ? null : _saveAllConfirmedTickets,
-                    ),
-                  ],
-                ),
-              ],
+                  ),
+                );
+              },
             ),
           ],
         ),
+      ),
       ),
     );
   }
@@ -879,18 +1969,71 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
 
   Widget _buildFullListRow(GeminiScannedItem item, int idx) {
     final isMissing = item.series == '?' || item.series.isEmpty;
+    final isSelected = _selectedItems.contains(item);
+    final ctrls = _getControllers(item);
     return Container(
       key: ValueKey('full_row_${item.hashCode}'),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      color: isMissing ? Colors.amber.withValues(alpha: 0.12) : null,
+      color: isSelected
+          ? AppColors.primary.withAlpha(35)
+          : (isMissing ? Colors.amber.withValues(alpha: 0.12) : null),
       child: Row(
         children: [
-          // Index
+          // Selection Checkbox
+          InkWell(
+            onTap: () => _toggleItemSelection(item),
+            child: Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Icon(
+                isSelected ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                size: 16,
+                color: isSelected ? AppColors.primary : Colors.grey.shade600,
+              ),
+            ),
+          ),
+          // Index & Photo Tag
           SizedBox(
-            width: 28,
-            child: Text(
-              '${idx + 1}',
-              style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.textSecondary, fontSize: 12),
+            width: _allImageBytesList.length > 1 ? 62 : 28,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  '${idx + 1}',
+                  style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.textSecondary, fontSize: 12),
+                ),
+                if (_allImageBytesList.length > 1) ...[
+                  const SizedBox(width: 4),
+                  InkWell(
+                    onTap: () {
+                      if (_currentImageIndex != item.photoIndex) {
+                        setState(() => _currentImageIndex = item.photoIndex);
+                      }
+                    },
+                    borderRadius: BorderRadius.circular(4),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: item.photoIndex == _currentImageIndex
+                            ? AppColors.primary.withValues(alpha: 0.25)
+                            : const Color(0xFF1E293B),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(
+                          color: item.photoIndex == _currentImageIndex ? AppColors.primary : Colors.transparent,
+                          width: 0.8,
+                        ),
+                      ),
+                      child: Text(
+                        'P${item.photoIndex + 1}',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          color: item.photoIndex == _currentImageIndex ? AppColors.primary : Colors.white70,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
             ),
           ),
           const SizedBox(width: 8),
@@ -898,9 +2041,10 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
           // Series Input
           SizedBox(
             width: 90,
-            child: TextFormField(
-              key: ValueKey('ser_${item.hashCode}_${item.series}'),
-              initialValue: item.series == '?' ? '' : item.series,
+            child: TextField(
+              key: ValueKey('full_ser_${item.hashCode}'),
+              controller: ctrls.seriesCtrl,
+              focusNode: ctrls.seriesFocus,
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 13,
@@ -931,15 +2075,16 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 ),
               ),
               onChanged: (val) {
-                setState(() {
-                  item.series = val.trim().toUpperCase();
-                  final p = _getPriceForSeries(item.series);
-                  if (p > 0) {
-                    item.amount = p;
-                  }
-                  _totalAmountNotifier.value = _totalAmount;
-                });
+                final clean = val.trim().toUpperCase();
+                item.series = clean;
+                final p = _getPriceForSeries(clean);
+                if (p > 0) {
+                  item.amount = p;
+                  ctrls.amountCtrl.text = p % 1 == 0 ? p.toInt().toString() : p.toStringAsFixed(2);
+                }
+                _totalAmountNotifier.value = _totalAmount;
               },
+              onSubmitted: (_) => ctrls.ticketFocus.requestFocus(),
             ),
           ),
           const SizedBox(width: 8),
@@ -947,9 +2092,10 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
           // 5-Digit Ticket No Input
           Expanded(
             flex: 2,
-            child: TextFormField(
-              key: ValueKey('tkt_${item.hashCode}_${item.ticketNo}'),
-              initialValue: item.ticketNo,
+            child: TextField(
+              key: ValueKey('full_tkt_${item.hashCode}'),
+              controller: ctrls.ticketCtrl,
+              focusNode: ctrls.ticketFocus,
               maxLength: 5,
               style: const TextStyle(fontFamily: 'monospace', fontWeight: FontWeight.bold, fontSize: 14),
               decoration: InputDecoration(
@@ -961,6 +2107,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
               ),
               onChanged: (val) => item.ticketNo = val.trim(),
+              onSubmitted: (_) => _moveToNextRow(idx),
             ),
           ),
           const SizedBox(width: 8),
@@ -968,9 +2115,10 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
           // Rate / Amount Input
           SizedBox(
             width: 85,
-            child: TextFormField(
-              key: ValueKey('amt_${item.hashCode}_${item.amount}'),
-              initialValue: item.amount > 0 ? (item.amount % 1 == 0 ? item.amount.toInt().toString() : item.amount.toStringAsFixed(2)) : '',
+            child: TextField(
+              key: ValueKey('full_amt_${item.hashCode}'),
+              controller: ctrls.amountCtrl,
+              focusNode: ctrls.amountFocus,
               keyboardType: TextInputType.number,
               style: const TextStyle(fontWeight: FontWeight.bold, color: AppColors.success, fontSize: 13),
               decoration: InputDecoration(
@@ -983,6 +2131,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 item.amount = double.tryParse(val.trim()) ?? 0.0;
                 _totalAmountNotifier.value = _totalAmount;
               },
+              onSubmitted: (_) => ctrls.sellerFocus.requestFocus(),
             ),
           ),
           const SizedBox(width: 8),
@@ -990,9 +2139,10 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
           // Seller / Customer Input
           Expanded(
             flex: 2,
-            child: TextFormField(
-              key: ValueKey('seller_${item.hashCode}_${item.sellerName}'),
-              initialValue: item.sellerName,
+            child: TextField(
+              key: ValueKey('full_seller_${item.hashCode}'),
+              controller: ctrls.sellerCtrl,
+              focusNode: ctrls.sellerFocus,
               style: const TextStyle(fontSize: 12),
               decoration: InputDecoration(
                 labelText: 'Seller / Customer',
@@ -1001,6 +2151,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
               ),
               onChanged: (val) => item.sellerName = val.trim(),
+              onSubmitted: (_) => _moveToNextRow(idx),
             ),
           ),
           const SizedBox(width: 4),
@@ -1018,43 +2169,99 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
 
   Widget _buildCompactGridCard(GeminiScannedItem item, int idx) {
     final isMissing = item.series == '?' || item.series.isEmpty;
+    final isSelected = _selectedItems.contains(item);
+    final ctrls = _getControllers(item);
     return Container(
       key: ValueKey('compact_card_${item.hashCode}'),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: isMissing ? Colors.amber.withValues(alpha: 0.14) : AppColors.surfaceContainerLowest,
+        color: isSelected
+            ? AppColors.primary.withAlpha(35)
+            : (isMissing ? Colors.amber.withValues(alpha: 0.14) : AppColors.surfaceContainerLowest),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: isMissing ? Colors.amber.shade600 : AppColors.border,
-          width: isMissing ? 1.5 : 1.0,
+          color: isSelected
+              ? AppColors.primary
+              : (isMissing ? Colors.amber.shade600 : AppColors.border),
+          width: isSelected ? 1.6 : (isMissing ? 1.5 : 1.0),
         ),
       ),
       child: Row(
         children: [
-          // Index Badge
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
-            decoration: BoxDecoration(
-              color: isMissing ? Colors.amber.shade800 : AppColors.surfaceContainerHigh,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Text(
-              '#${idx + 1}',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 10,
-                color: isMissing ? Colors.black : AppColors.textSecondary,
+          // Selection Checkbox
+          InkWell(
+            onTap: () => _toggleItemSelection(item),
+            child: Padding(
+              padding: const EdgeInsets.only(right: 5),
+              child: Icon(
+                isSelected ? Icons.check_box_rounded : Icons.check_box_outline_blank_rounded,
+                size: 16,
+                color: isSelected ? AppColors.primary : Colors.grey.shade600,
               ),
             ),
+          ),
+          // Index Badge & Photo Tag
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isMissing ? Colors.amber.shade800 : AppColors.surfaceContainerHigh,
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(
+                  '#${idx + 1}',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 10,
+                    color: isMissing ? Colors.black : AppColors.textSecondary,
+                  ),
+                ),
+              ),
+              if (_allImageBytesList.length > 1) ...[
+                const SizedBox(width: 3),
+                InkWell(
+                  onTap: () {
+                    if (_currentImageIndex != item.photoIndex) {
+                      setState(() => _currentImageIndex = item.photoIndex);
+                    }
+                  },
+                  borderRadius: BorderRadius.circular(4),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: item.photoIndex == _currentImageIndex
+                          ? AppColors.primary.withValues(alpha: 0.25)
+                          : const Color(0xFF1E293B),
+                      borderRadius: BorderRadius.circular(4),
+                      border: Border.all(
+                        color: item.photoIndex == _currentImageIndex ? AppColors.primary : Colors.transparent,
+                        width: 0.8,
+                      ),
+                    ),
+                    child: Text(
+                      'P${item.photoIndex + 1}',
+                      style: TextStyle(
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
+                        color: item.photoIndex == _currentImageIndex ? AppColors.primary : Colors.white70,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ],
           ),
           const SizedBox(width: 6),
 
           // Compact Series Input
           SizedBox(
             width: 58,
-            child: TextFormField(
-              key: ValueKey('c_ser_${item.hashCode}_${item.series}'),
-              initialValue: item.series == '?' ? '' : item.series,
+            child: TextField(
+              key: ValueKey('compact_ser_${item.hashCode}'),
+              controller: ctrls.seriesCtrl,
+              focusNode: ctrls.seriesFocus,
               style: TextStyle(
                 fontWeight: FontWeight.bold,
                 fontSize: 12,
@@ -1073,24 +2280,26 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
               ),
               onChanged: (val) {
-                setState(() {
-                  item.series = val.trim().toUpperCase();
-                  final p = _getPriceForSeries(item.series);
-                  if (p > 0) {
-                    item.amount = p;
-                  }
-                  _totalAmountNotifier.value = _totalAmount;
-                });
+                final clean = val.trim().toUpperCase();
+                item.series = clean;
+                final p = _getPriceForSeries(clean);
+                if (p > 0) {
+                  item.amount = p;
+                  ctrls.amountCtrl.text = p % 1 == 0 ? p.toInt().toString() : p.toStringAsFixed(1);
+                }
+                _totalAmountNotifier.value = _totalAmount;
               },
+              onSubmitted: (_) => ctrls.ticketFocus.requestFocus(),
             ),
           ),
           const SizedBox(width: 6),
 
           // 5-Digit Ticket Input
           Expanded(
-            child: TextFormField(
-              key: ValueKey('c_tkt_${item.hashCode}_${item.ticketNo}'),
-              initialValue: item.ticketNo,
+            child: TextField(
+              key: ValueKey('compact_tkt_${item.hashCode}'),
+              controller: ctrls.ticketCtrl,
+              focusNode: ctrls.ticketFocus,
               maxLength: 5,
               style: const TextStyle(
                 fontFamily: 'monospace',
@@ -1108,6 +2317,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(4)),
               ),
               onChanged: (val) => item.ticketNo = val.trim(),
+              onSubmitted: (_) => _moveToNextRow(idx),
             ),
           ),
           const SizedBox(width: 6),
@@ -1115,9 +2325,10 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
           // Rate (₹) Input
           SizedBox(
             width: 52,
-            child: TextFormField(
-              key: ValueKey('c_amt_${item.hashCode}_${item.amount}'),
-              initialValue: item.amount > 0 ? (item.amount % 1 == 0 ? item.amount.toInt().toString() : item.amount.toStringAsFixed(1)) : '',
+            child: TextField(
+              key: ValueKey('compact_amt_${item.hashCode}'),
+              controller: ctrls.amountCtrl,
+              focusNode: ctrls.amountFocus,
               keyboardType: TextInputType.number,
               style: const TextStyle(
                 fontWeight: FontWeight.bold,
@@ -1135,6 +2346,7 @@ class _AiPhotoReviewDialogState extends ConsumerState<AiPhotoReviewDialog> {
                 item.amount = double.tryParse(val.trim()) ?? 0.0;
                 _totalAmountNotifier.value = _totalAmount;
               },
+              onSubmitted: (_) => _moveToNextRow(idx),
             ),
           ),
 

@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../../core/constants/app_constants.dart';
+import '../viewmodels/auth_viewmodel.dart';
 
 class SplashScreen extends ConsumerStatefulWidget {
   const SplashScreen({super.key});
@@ -83,7 +84,19 @@ class _SplashScreenState extends ConsumerState<SplashScreen> with SingleTickerPr
   void _navigateToNextScreen() async {
     await Future.delayed(const Duration(milliseconds: 100));
     if (!mounted) return;
-    context.go(AppConstants.routeDashboard);
+
+    try {
+      await ref.read(authControllerProvider).checkInitialAuth();
+    } catch (_) {}
+
+    if (!mounted) return;
+
+    final currentUser = ref.read(currentUserProvider);
+    if (currentUser != null) {
+      context.go(AppConstants.routeDashboard);
+    } else {
+      context.go(AppConstants.routeLogin);
+    }
   }
 
   @override

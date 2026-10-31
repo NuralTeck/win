@@ -3,11 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import '../../shared/models/draw_model.dart';
 import '../../shared/models/metric_model.dart';
-import '../../shared/models/ticket_sale_model.dart';
 import '../../../core/database/database_service.dart';
 import '../../operations/models/winning_claim_model.dart';
-import '../../operations/models/lottery_sambad_result_model.dart';
-import '../../operations/utils/winner_verification_engine.dart';
 
 class DashboardState {
   final bool isLoading;
@@ -63,39 +60,43 @@ class DashboardViewModel extends StateNotifier<DashboardState> {
   Future<void> loadDashboardData() async {
     if (!mounted) return;
     try {
-      final allSales = await DatabaseService.instance.getTicketSales();
-      final sellers = await DatabaseService.instance.getSellerCustomers();
-
       final now = DateTime.now();
-      final todayStr = DateFormat('yyyy-MM-dd').format(now);
+      final targetDate = state.dateFilter == 'Today' ? now : null;
 
-      List<TicketSaleModel> filteredSales = allSales;
-      if (state.dateFilter == 'Today') {
-        filteredSales = allSales.where((s) {
-          final sDate = DateFormat('yyyy-MM-dd').format(s.saleDate);
-          return sDate == todayStr;
-        }).toList();
-      }
+      final results = await Future.wait([
+        DatabaseService.instance.getDashboardMetrics(targetDate: targetDate),
+        DatabaseService.instance.getDrawHisabSummary(targetDate: targetDate),
+        DatabaseService.instance.getSellerCustomers(),
+        DatabaseService.instance.getTotalInamiPayout(targetDate: targetDate),
+      ]);
 
-      final totalRev = filteredSales.fold(0.0, (sum, s) => sum + s.totalAmount);
-      final totalTkts = filteredSales.fold(0, (sum, s) => sum + s.quantity);
-      final activeSellersCount = sellers.where((s) => s.isActive).length;
+      if (!mounted) return;
 
-      // Calculate real active draw stats from sales
+      final metrics = results[0] as Map<String, dynamic>;
+      final drawSummary = results[1] as List<Map<String, dynamic>>;
+      final sellers = results[2] as List<dynamic>;
+      final totalWinningPayout = results[3] as double;
+
+      final totalRev = (metrics['totalCollection'] as num?)?.toDouble() ?? 0.0;
+      final totalTkts = (metrics['totalTickets'] as num?)?.toInt() ?? 0;
+      final activeSellersCount = sellers.where((s) => s.isActive == true).length;
+
       int count1PM = 0, count6PM = 0, count8PM = 0;
       double rev1PM = 0.0, rev6PM = 0.0, rev8PM = 0.0;
 
-      for (var sale in filteredSales) {
-        final lower = sale.drawName.toLowerCase();
+      for (var d in drawSummary) {
+        final lower = (d['drawName'] ?? '').toString().toLowerCase();
+        final qty = (d['tickets'] as num?)?.toInt() ?? 0;
+        final col = (d['collection'] as num?)?.toDouble() ?? 0.0;
         if (lower.contains('1 pm') || lower.contains('1pm') || lower.contains('morning')) {
-          count1PM += sale.quantity;
-          rev1PM += sale.totalAmount;
+          count1PM += qty;
+          rev1PM += col;
         } else if (lower.contains('6 pm') || lower.contains('6pm') || lower.contains('day')) {
-          count6PM += sale.quantity;
-          rev6PM += sale.totalAmount;
+          count6PM += qty;
+          rev6PM += col;
         } else if (lower.contains('8 pm') || lower.contains('8pm') || lower.contains('night')) {
-          count8PM += sale.quantity;
-          rev8PM += sale.totalAmount;
+          count8PM += qty;
+          rev8PM += col;
         }
       }
 
@@ -150,46 +151,13 @@ class DashboardViewModel extends StateNotifier<DashboardState> {
         ),
       ];
 
-      // Calculate verified winners & itemized prize/bonus/incentive metrics
-      final List<WinningClaimModel> verifiedWinners = [];
-      try {
-        final rawResults = await DatabaseService.instance.getLotteryResults();
-        for (final raw in rawResults) {
-          final drawTimeStr = raw['drawTimeStr']?.toString() ?? '';
-          final firstP = raw['firstPrize']?.toString() ?? '';
-          List<String> splitNums(String key) {
-            final v = raw[key]?.toString();
-            return (v != null && v.isNotEmpty) ? v.split(',') : [];
-          }
-
-          final resModel = LotterySambadResultModel(
-            drawId: raw['id']?.toString() ?? '',
-            drawName: raw['drawName']?.toString() ?? 'Lottery Draw',
-            drawDateStr: raw['drawDateStr']?.toString() ?? '',
-            drawTimeStr: drawTimeStr,
-            firstPrize: firstP,
-            consolationPrize: firstP.contains(' ') ? firstP.split(' ').last : (firstP.length >= 5 ? firstP.substring(firstP.length - 5) : firstP),
-            secondPrizeNumbers: splitNums('secondPrizeNumbers'),
-            thirdPrizeNumbers: splitNums('thirdPrizeNumbers'),
-            fourthPrizeNumbers: splitNums('fourthPrizeNumbers'),
-            fifthPrizeNumbers: splitNums('fifthPrizeNumbers'),
-            publishedAt: DateTime.tryParse(raw['publishedAt']?.toString() ?? '') ?? DateTime.now(),
-          );
-
-          final claims = WinnerVerificationEngine.verifyWinners(soldTickets: filteredSales, result: resModel);
-          verifiedWinners.addAll(claims);
-        }
-      } catch (_) {}
-
-      final totalWinningPayout = verifiedWinners.fold(0.0, (sum, c) => sum + c.prizeAmount);
-
       final liveKpis = [
         KpiMetricModel(
           title: 'Total Inami Payout (${state.dateFilter})',
           value: 'Rs. ${NumberFormat('#,##,##0', 'en_IN').format(totalWinningPayout)}',
           changePercentage: 0.0,
           isPositive: true,
-          subtitle: '${verifiedWinners.length} Winning Claims',
+          subtitle: 'Winning Payout',
           icon: Icons.emoji_events_rounded,
           iconColor: const Color(0xFFFFD700),
         ),
@@ -226,7 +194,7 @@ class DashboardViewModel extends StateNotifier<DashboardState> {
       state = state.copyWith(
         isLoading: false,
         recentDraws: realDraws,
-        winningClaims: verifiedWinners,
+        winningClaims: const [],
         totalWinningPayout: totalWinningPayout,
         kpis: liveKpis,
       );

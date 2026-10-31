@@ -44,6 +44,11 @@ class SideNavBar extends StatelessWidget {
       routePath: AppConstants.routeBookings,
     ),
     SideNavBarItem(
+      label: 'WhatsApp Booking',
+      icon: Icons.mark_chat_unread_outlined,
+      routePath: AppConstants.routeWhatsAppBooking,
+    ),
+    SideNavBarItem(
       label: 'Result Entry',
       icon: Icons.emoji_events_outlined,
       routePath: AppConstants.routeResultEntry,
@@ -52,6 +57,11 @@ class SideNavBar extends StatelessWidget {
       label: 'Generated Hisab',
       icon: Icons.receipt_long_outlined,
       routePath: AppConstants.routeGeneratedHisab,
+    ),
+    SideNavBarItem(
+      label: 'Stock Vouchers',
+      icon: Icons.confirmation_number_outlined,
+      routePath: AppConstants.routeVouchers,
     ),
     SideNavBarItem(
       label: 'Number Unsold',
@@ -169,11 +179,15 @@ class SideNavBar extends StatelessWidget {
                   onTap: () {
                     if (navigationShell != null &&
                         index < navigationShell!.route.branches.length) {
+                      if (index == navigationShell!.currentIndex) {
+                        return; // ⚡ Already active! Instant response with zero re-rendering
+                      }
                       navigationShell!.goBranch(
                         index,
-                        initialLocation: index == navigationShell!.currentIndex,
+                        initialLocation: false,
                       );
                     } else {
+                      if (currentRoute == item.routePath) return;
                       context.go(item.routePath);
                     }
                   },

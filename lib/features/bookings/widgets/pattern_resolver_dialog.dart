@@ -2,6 +2,140 @@ import 'package:flutter/material.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../../core/services/pattern_matcher_service.dart';
 
+/// Visual Syntax Highlighting Controller for Pattern Resolver & Review Queue
+class _PatternSyntaxHighlightingController extends TextEditingController {
+  _PatternSyntaxHighlightingController();
+
+  @override
+  TextSpan buildTextSpan({
+    required BuildContext context,
+    TextStyle? style,
+    required bool withComposing,
+  }) {
+    final rawText = text;
+    if (rawText.isEmpty) {
+      return TextSpan(style: style, text: '');
+    }
+
+    final List<TextSpan> spans = [];
+    final lines = rawText.split('\n');
+
+    const purpleStyle = TextStyle(
+      color: Color(0xFFC084FC),
+      backgroundColor: Color(0x706B21A8),
+      fontWeight: FontWeight.bold,
+    );
+    const greenStyle = TextStyle(
+      color: Color(0xFF4ADE80),
+      backgroundColor: Color(0x7014532D),
+      fontWeight: FontWeight.bold,
+    );
+    const cyanStyle = TextStyle(
+      color: Color(0xFF38BDF8),
+      backgroundColor: Color(0x600369A1),
+      fontWeight: FontWeight.bold,
+    );
+    const dateStyle = TextStyle(
+      color: Color(0xFF818CF8),
+      backgroundColor: Color(0x603730A3),
+      fontWeight: FontWeight.bold,
+    );
+    const greyStyle = TextStyle(
+      color: Color(0xFF94A3B8),
+      fontStyle: FontStyle.italic,
+    );
+
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final isLastLine = i == lines.length - 1;
+      final lineEnding = isLastLine ? '' : '\n';
+
+      if (line.trim().isEmpty) {
+        spans.add(TextSpan(text: line + lineEnding, style: style));
+        continue;
+      }
+
+      final trimmed = line.trim();
+
+      // 1. Shift Tag e.g. "1pm", "6pm", "8pm", "morning"
+      if (RegExp(r'(?:=|\b)(?:dear\s*)?[168](?::00|\.00|\.)?\s*(?:pm|am|qm|gm|baje)\b|^\s*(?:morning|day|night|evening)\b', caseSensitive: false).hasMatch(trimmed) &&
+          !RegExp(r'\b\d{5}\b').hasMatch(trimmed)) {
+        spans.add(TextSpan(
+          text: line + lineEnding,
+          style: (style ?? const TextStyle()).merge(cyanStyle),
+        ));
+        continue;
+      }
+
+      // 2. Date Tag e.g. "8/6/2026", "08/06/26"
+      if (RegExp(r'\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b').hasMatch(trimmed) &&
+          !RegExp(r'\b\d{5}\b').hasMatch(trimmed)) {
+        spans.add(TextSpan(
+          text: line + lineEnding,
+          style: (style ?? const TextStyle()).merge(dateStyle),
+        ));
+        continue;
+      }
+
+      // 3. Standalone Series line e.g. "5", "6", "12", "24", "12c", "(24)"
+      if (RegExp(r'^(?:(?:\(|\[)\s*([0-9]{1,3}[A-Za-z]?)\s*(?:\)|\])|(?:series\s*[:=-]?\s*)?([0-9]{1,3}[A-Za-z]?)\s*(?:c|s|sirij|series)?)$', caseSensitive: false).hasMatch(trimmed) &&
+          !RegExp(r'\b\d{5}\b').hasMatch(trimmed)) {
+        spans.add(TextSpan(
+          text: line + lineEnding,
+          style: (style ?? const TextStyle()).merge(purpleStyle),
+        ));
+        continue;
+      }
+
+      // 4. Check for 5-digit tickets on line
+      final fiveDigitMatches = RegExp(r'\b\d{5}\b').allMatches(line).toList();
+      if (fiveDigitMatches.isNotEmpty) {
+        final List<TextSpan> lineSpans = [];
+        int lastIndex = 0;
+
+        for (final m in fiveDigitMatches) {
+          if (m.start > lastIndex) {
+            final before = line.substring(lastIndex, m.start);
+            if (RegExp(r'[0-9]{1,3}[A-Za-z]?\s*[:=/.\-~*#@+]+|[\(\[][0-9]{1,3}[A-Za-z]?[\)\]]').hasMatch(before)) {
+              lineSpans.add(TextSpan(text: before, style: (style ?? const TextStyle()).merge(purpleStyle)));
+            } else {
+              lineSpans.add(TextSpan(text: before, style: style));
+            }
+          }
+
+          lineSpans.add(TextSpan(
+            text: line.substring(m.start, m.end),
+            style: (style ?? const TextStyle()).merge(greenStyle),
+          ));
+
+          lastIndex = m.end;
+        }
+
+        if (lastIndex < line.length) {
+          final after = line.substring(lastIndex);
+          if (RegExp(r'[:=/.\-~*#@+]+\s*[0-9]{1,3}[A-Za-z]?').hasMatch(after)) {
+            lineSpans.add(TextSpan(text: after, style: (style ?? const TextStyle()).merge(purpleStyle)));
+          } else {
+            lineSpans.add(TextSpan(text: after, style: style));
+          }
+        }
+
+        lineSpans.add(TextSpan(text: lineEnding, style: style));
+        spans.add(TextSpan(children: lineSpans));
+        continue;
+      }
+
+      // 5. Header / Ignored noise lines e.g. "Updated", "S.k.bookin", "Ajmal"
+      spans.add(TextSpan(
+        text: line + lineEnding,
+        style: (style ?? const TextStyle()).merge(greyStyle),
+      ));
+    }
+
+    return TextSpan(children: spans);
+  }
+}
+
 class PatternResolverDialog extends StatefulWidget {
   final Function(List<ParsedTicketItem> tickets, String sender, String? senderName)? onTicketsResolved;
 
@@ -19,10 +153,13 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
   UnparsedMessage? _selectedMessage;
   bool _isLoading = true;
 
+  // Visual text size controller (default 14px)
+  double _rawTextFontSize = 14.0;
+
   // Pattern Resolver Inputs
   final TextEditingController _patternNameCtrl = TextEditingController(text: 'Custom Learned Pattern');
   final TextEditingController _regexCtrl = TextEditingController();
-  final TextEditingController _sampleCtrl = TextEditingController();
+  final TextEditingController _sampleCtrl = _PatternSyntaxHighlightingController();
 
   int _seriesGroup = 1;
   int _ticketGroup = 2;
@@ -69,10 +206,52 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
     return isPureDate || isPureShift || isPureName;
   }
 
+  String? _detectSeriesFromText(String text) {
+    final lines = text.split(RegExp(r'[\r\n]+')).map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+    // 1. Standalone series line at top or bottom (e.g. "5", "6", "18", "24", "40", "12c", "(24)")
+    for (final l in lines) {
+      if (RegExp(r'\d{5}').hasMatch(l)) continue;
+      if (RegExp(r'\d{1,2}[\/\.-]\d{1,2}').hasMatch(l)) continue;
+      if (RegExp(r'\b(?:dear\s*)?[168](?::00|\.00|\.)?\s*(?:pm|am|qm|gm|baje)\b', caseSensitive: false).hasMatch(l)) continue;
+
+      final m = RegExp(r'^(?:(?:\(|\[)\s*([0-9]{1,4}[A-Za-z]?)\s*(?:\)|\])|(?:series\s*[:=-]?\s*)?([0-9]{1,4}[A-Za-z]?)\s*(?:c|s|sirij|series)?)$', caseSensitive: false).firstMatch(l);
+      if (m != null) {
+        final raw = m.group(1) ?? m.group(2);
+        if (raw != null && raw.isNotEmpty) {
+          final clean = PatternMatcherService.instance.cleanSeriesNumber(raw);
+          final numVal = int.tryParse(clean);
+          if (numVal != null && numVal > 0 && numVal <= 5000) {
+            return clean;
+          }
+        }
+      }
+    }
+
+    // 2. Inline series in ticket lines (e.g. "5=36460", "24/81192", "(24)79159", "12454....40")
+    for (final l in lines) {
+      if (!RegExp(r'\d{5}').hasMatch(l)) continue;
+      final preMatch = RegExp(r'^(?:[\(\[]\s*([0-9]{1,4}[cs]?)\s*[\)\]]|([0-9]{1,4}[cs]?)\s*[:=/.\-~*#@+]+)\s*\d{5}', caseSensitive: false).firstMatch(l);
+      if (preMatch != null) {
+        final raw = preMatch.group(1) ?? preMatch.group(2);
+        if (raw != null && raw.isNotEmpty) return PatternMatcherService.instance.cleanSeriesNumber(raw);
+      }
+      final sufMatch = RegExp(r'^\d{5}\s*[:=/.\-~*#@+]+\s*([0-9]{1,4}[cs]?)', caseSensitive: false).firstMatch(l);
+      if (sufMatch != null) {
+        final raw = sufMatch.group(1);
+        if (raw != null && raw.isNotEmpty) return PatternMatcherService.instance.cleanSeriesNumber(raw);
+      }
+    }
+    return null;
+  }
+
   void _selectMessage(UnparsedMessage msg) {
     setState(() {
       _selectedMessage = msg;
       _sampleCtrl.text = msg.rawText;
+      final detected = _detectSeriesFromText(msg.rawText);
+      if (detected != null && detected.isNotEmpty) {
+        _selectedSeriesOverride = detected;
+      }
       _autoGenerateSuggestedRegex(msg.rawText);
       _runTestParse();
     });
@@ -88,7 +267,7 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
 
     // Case 1: Combined Shift Tag + Series + 5-Digit Ticket e.g. "8gm12c62393", "8pm12c62393", "8gm 12c 62393"
     if (RegExp(r'(?:[168]\s*(?:gm|pm|am|g|p))?[\s-_=]*([0-9]{1,3}[A-Za-z]?)\s*[-:,\/=\s]*(\d{5})', caseSensitive: false).hasMatch(firstLine)) {
-      _regexCtrl.text = r'(?:[168]\s*(?:gm|pm|am|g|p))?[\s-_=]*([0-9]{1,3}[A-Za-z]?)\s*[-:,\/=\s]*(\d{5})(?:\s*[-*=xX]\s*(\d+))?';
+      _regexCtrl.text = r'(?:[168]\s*(?:gm|pm|am|g|p))?[\s-_=]*([0-9]{1,3}[A-Za-z]?)\s*[-:,\/=\s]*(\d{5})(?:\s*[*xX]\s*(\d+))?';
       _seriesGroup = 1;
       _ticketGroup = 2;
       _qtyGroup = 3;
@@ -97,7 +276,7 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
 
     // Case 2: Bracket series e.g. "(40) 12345"
     if (RegExp(r'[\(\[]\s*([0-9]{1,3}[A-Za-z]?)\s*[\)\]]\s*[-:,\/=\s]*(\d{5})').hasMatch(firstLine)) {
-      _regexCtrl.text = r'[\(\[]\s*([0-9]{1,3}[A-Za-z]?)\s*[\)\]]\s*[-:,\/=\s]*(\d{5})(?:\s*[-*=xX]\s*(\d+))?';
+      _regexCtrl.text = r'[\(\[]\s*([0-9]{1,3}[A-Za-z]?)\s*[\)\]]\s*[-:,\/=\s]*(\d{5})(?:\s*[*xX]\s*(\d+))?';
       _seriesGroup = 1;
       _ticketGroup = 2;
       _qtyGroup = 3;
@@ -106,25 +285,30 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
 
     // Case 3: Inverted e.g. "12345=12"
     if (RegExp(r'(\d{5})\s*[-:,\/=]\s*([0-9]{1,3}[A-Za-z]?)').hasMatch(firstLine)) {
-      _regexCtrl.text = r'(\d{5})\s*[-:,\/=]\s*([0-9]{1,3}[A-Za-z]?)(?:\s*[-*=xX]\s*(\d+))?';
+      _regexCtrl.text = r'(\d{5})\s*[-:,\/=]\s*([0-9]{1,3}[A-Za-z]?)(?:\s*[*xX]\s*(\d+))?';
       _ticketGroup = 1;
       _seriesGroup = 2;
       _qtyGroup = 3;
       return;
     }
 
-    // Default universal fallback template
-    _regexCtrl.text = r'([0-9]{1,3}[A-Za-z]?)\s*[-:,\/=\s]+\s*(\d{5})(?:\s*[-*=xX]\s*(\d+))?';
+    // Default universal fallback template (Strict: Multipliers are ONLY * or x/X, NEVER hyphen -)
+    _regexCtrl.text = r'([0-9]{1,3}[A-Za-z]?)\s*[-:,\/=\s]+\s*(\d{5})(?:\s*[*xX]\s*(\d+))?';
     _seriesGroup = 1;
     _ticketGroup = 2;
     _qtyGroup = 3;
+  }
+
+  /// Expands ticket ranges like "72170-71" into ["72170", "72171"]
+  List<String>? _expandTicketRange(String startTkt, String endPart) {
+    return PatternMatcherService.instance.expandTicketRange(startTkt, endPart);
   }
 
   void _runTestParse() {
     final pattern = _regexCtrl.text.trim();
     final text = _sampleCtrl.text.trim();
 
-    if (pattern.isEmpty || text.isEmpty) {
+    if (text.isEmpty) {
       setState(() {
         _testPreviewTickets = [];
         _testError = null;
@@ -133,56 +317,178 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
     }
 
     try {
-      final regex = RegExp(pattern, caseSensitive: false, multiLine: true);
       final items = <ParsedTicketItem>[];
       final lines = text.split(RegExp(r'[\r\n]+'));
+
+      // 1. Initial Series: Auto-detect from text or fallback to override
+      String currentSeries = _selectedSeriesOverride;
+      final detected = _detectSeriesFromText(text);
+      if (detected != null && detected.isNotEmpty) {
+        currentSeries = detected;
+        _selectedSeriesOverride = detected;
+      }
+
+      RegExp? regex;
+      if (pattern.isNotEmpty) {
+        try {
+          regex = RegExp(pattern, caseSensitive: false, multiLine: true);
+        } catch (_) {}
+      }
 
       for (final line in lines) {
         final l = line.trim();
         if (l.isEmpty) continue;
 
-        final match = regex.firstMatch(l);
-        if (match != null) {
-          String s = '12';
-          if (_seriesGroup > 0 && match.groupCount >= _seriesGroup) {
-            final rawS = match.group(_seriesGroup);
-            if (rawS != null && rawS.isNotEmpty) {
-              s = PatternMatcherService.instance.cleanSeriesNumber(rawS);
-            }
-          }
-
-          String tNo = '';
-          if (_ticketGroup > 0 && match.groupCount >= _ticketGroup) {
-            tNo = match.group(_ticketGroup) ?? '';
-          }
-
-          int qty = 1;
-          if (_qtyGroup > 0 && match.groupCount >= _qtyGroup) {
-            final rawQty = match.group(_qtyGroup);
-            if (rawQty != null) {
-              qty = int.tryParse(rawQty) ?? 1;
-            }
-          }
-
-          if (tNo.length == 5) {
-            items.add(ParsedTicketItem(
-              series: s.isNotEmpty && s != '?' ? s : _selectedSeriesOverride,
-              ticketNo: tNo,
-              quantity: qty > 0 ? qty : 1,
-            ));
+        // Skip non-ticket header lines e.g. "8/6/26.  Sk. 1:00 pm"
+        if (!RegExp(r'\d{5}').hasMatch(l)) {
+          final isHeaderOrDateOrShift = RegExp(r'\b\d{1,2}[\/\.-]\d{1,2}(?:[\/\.-]\d{2,4})?\b').hasMatch(l) ||
+              RegExp(r'\b(?:dear\s*)?[168](?::00|\.00|\.)?\s*(?:pm|am|qm|gm|baje)\b', caseSensitive: false).hasMatch(l) ||
+              RegExp(r'^(?:forwarded|fwd|booking|boakg|note|total)\b', caseSensitive: false).hasMatch(l);
+          if (isHeaderOrDateOrShift && !RegExp(r'\b\d{1,3}\b').hasMatch(l)) {
+            continue;
           }
         }
-      }
 
-      // Auto Fallback: If regex didn't extract tickets or missed some, extract all 5-digit numbers from raw text!
-      if (items.isEmpty) {
-        final all5s = RegExp(r'\b\d{5}\b').allMatches(text);
-        for (final m in all5s) {
-          items.add(ParsedTicketItem(
-            series: _selectedSeriesOverride,
-            ticketNo: m.group(0)!,
-            quantity: 1,
-          ));
+        // Header / Standalone Series line (e.g. "5", "6", "18", "24", "12c")
+        if (!RegExp(r'\d{5}').hasMatch(l) &&
+            !RegExp(r'\d{1,2}[\/\.-]\d{1,2}').hasMatch(l) &&
+            !RegExp(r'\b(?:dear\s*)?[168](?::00|\.00|\.)?\s*(?:pm|am|qm|gm|baje)\b', caseSensitive: false).hasMatch(l)) {
+          final serMatch = RegExp(r'^(?:(?:\(|\[)\s*([0-9]{1,3}[A-Za-z]?)\s*(?:\)|\])|(?:series\s*[:=-]?\s*)?([0-9]{1,3}[A-Za-z]?)\s*(?:c|s|sirij|series)?)$', caseSensitive: false).firstMatch(l);
+          if (serMatch != null) {
+            final raw = serMatch.group(1) ?? serMatch.group(2);
+            if (raw != null && raw.isNotEmpty) {
+              currentSeries = PatternMatcherService.instance.cleanSeriesNumber(raw);
+              continue;
+            }
+          }
+        }
+
+        // 🌟 PRIORITY 1: TICKET RANGE EXPANSION ("khol karke save karna hai")
+        // Case A: Triplet Range e.g. "5 = 62759-83-25" or "40280-289-10" or "43300-309=10 pcs"
+        final tripletMatch = RegExp(
+          r'^(?:([0-9]{1,3}[A-Za-z]?)\s*[:=/.\-~*#@+]+)?\s*(\d{5})\s*[-~to]+\s*(\d{1,5})\s*[-=x*,\s]+\s*(\d+)(?:\s*(?:pcs?|go|p))?$',
+          caseSensitive: false,
+        ).firstMatch(l);
+        if (tripletMatch != null) {
+          final rawS = tripletMatch.group(1);
+          final s = rawS != null ? PatternMatcherService.instance.cleanSeriesNumber(rawS) : currentSeries;
+          final startNum = int.tryParse(tripletMatch.group(2)!);
+          final count = int.tryParse(tripletMatch.group(4)!);
+          if (startNum != null && count != null && count > 0 && count <= 200) {
+            for (int k = 0; k < count; k++) {
+              items.add(ParsedTicketItem(
+                series: s,
+                ticketNo: (startNum + k).toString().padLeft(5, '0'),
+                quantity: 1,
+              ));
+            }
+            continue;
+          }
+        }
+
+        // Case B: Comma range or double-dot range e.g. "40350,,59" or "5 = 72170..71"
+        final commaMatch = RegExp(
+          r'^(?:([0-9]{1,3}[A-Za-z]?)\s*[:=/.\-~*#@+]+)?\s*(\d{5})\s*(?:,,+|\.\.+|___+)\s*(\d{1,3})',
+          caseSensitive: false,
+        ).firstMatch(l);
+        if (commaMatch != null) {
+          final rawS = commaMatch.group(1);
+          final s = rawS != null ? PatternMatcherService.instance.cleanSeriesNumber(rawS) : currentSeries;
+          final expanded = _expandTicketRange(commaMatch.group(2)!, commaMatch.group(3)!);
+          if (expanded != null && expanded.isNotEmpty) {
+            for (final tNo in expanded) {
+              items.add(ParsedTicketItem(series: s, ticketNo: tNo, quantity: 1));
+            }
+            continue;
+          }
+        }
+
+        // Case C: Hyphen / "to" / "se" range e.g. "5 = 72170-71", "12- 31112-20", "72170 to 72175"
+        final hyphenMatch = RegExp(
+          r'^(?:([0-9]{1,3}[A-Za-z]?)\s*[:=/.\-~*#@+]+)?\s*(\d{5})\s*[-~/\s]*(?:to|se|-|\/)\s*(\d{1,5})$',
+          caseSensitive: false,
+        ).firstMatch(l);
+        if (hyphenMatch != null) {
+          final rawS = hyphenMatch.group(1);
+          final s = rawS != null ? PatternMatcherService.instance.cleanSeriesNumber(rawS) : currentSeries;
+          final expanded = _expandTicketRange(hyphenMatch.group(2)!, hyphenMatch.group(3)!);
+          if (expanded != null && expanded.isNotEmpty) {
+            for (final tNo in expanded) {
+              items.add(ParsedTicketItem(series: s, ticketNo: tNo, quantity: 1));
+            }
+            continue;
+          }
+        }
+
+        // Try regex match
+        bool matchedWithRegex = false;
+        if (regex != null) {
+          final match = regex.firstMatch(l);
+          if (match != null) {
+            String s = currentSeries;
+            if (_seriesGroup > 0 && match.groupCount >= _seriesGroup) {
+              final rawS = match.group(_seriesGroup);
+              if (rawS != null && rawS.isNotEmpty) {
+                final clean = PatternMatcherService.instance.cleanSeriesNumber(rawS);
+                if (clean.isNotEmpty && clean != '?') {
+                  s = clean;
+                }
+              }
+            }
+
+            String tNo = '';
+            if (_ticketGroup > 0 && match.groupCount >= _ticketGroup) {
+              tNo = match.group(_ticketGroup) ?? '';
+            }
+
+            int qty = 1;
+            if (_qtyGroup > 0 && match.groupCount >= _qtyGroup) {
+              final rawQty = match.group(_qtyGroup);
+              if (rawQty != null) {
+                qty = int.tryParse(rawQty) ?? 1;
+              }
+            }
+
+            if (tNo.length == 5) {
+              items.add(ParsedTicketItem(
+                series: s,
+                ticketNo: tNo,
+                quantity: qty > 0 ? qty : 1,
+              ));
+              matchedWithRegex = true;
+            }
+          }
+        }
+
+        // Fallback for this line if regex didn't extract
+        if (!matchedWithRegex) {
+          // Inline prefix e.g. 5=36460, 24/81192, (24)79159, 12..44189
+          final preMatch = RegExp(r'^(?:[\(\[]\s*([0-9]{1,3}[cs]?)\s*[\)\]]|([0-9]{1,3}[cs]?)\s*[:=/.\-~*#@+]+)\s*(\d{5})', caseSensitive: false).firstMatch(l);
+          if (preMatch != null) {
+            final rawS = preMatch.group(1) ?? preMatch.group(2);
+            final s = rawS != null ? PatternMatcherService.instance.cleanSeriesNumber(rawS) : currentSeries;
+            items.add(ParsedTicketItem(series: s, ticketNo: preMatch.group(3)!, quantity: 1));
+            continue;
+          }
+
+          // Inline suffix e.g. 36460=5, 12454....40
+          final sufMatch = RegExp(r'^(\d{5})\s*[:=/.\-~*#@+]+\s*([0-9]{1,3}[cs]?)', caseSensitive: false).firstMatch(l);
+          if (sufMatch != null) {
+            final rawS = sufMatch.group(2);
+            final s = rawS != null ? PatternMatcherService.instance.cleanSeriesNumber(rawS) : currentSeries;
+            items.add(ParsedTicketItem(series: s, ticketNo: sufMatch.group(1)!, quantity: 1));
+            continue;
+          }
+
+          // Pure 5-digit number(s) on line e.g. "36460"
+          final all5s = RegExp(r'\b\d{5}\b').allMatches(l);
+          for (final m in all5s) {
+            items.add(ParsedTicketItem(
+              series: currentSeries,
+              ticketNo: m.group(0)!,
+              quantity: 1,
+            ));
+          }
         }
       }
 
@@ -191,17 +497,9 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
         _testError = items.isEmpty ? 'No 5-digit tickets found in this message.' : null;
       });
     } catch (e) {
-      // If regex failed, still extract raw 5-digit tickets!
-      final all5s = RegExp(r'\b\d{5}\b').allMatches(text);
-      final items = all5s.map((m) => ParsedTicketItem(
-        series: _selectedSeriesOverride,
-        ticketNo: m.group(0)!,
-        quantity: 1,
-      )).toList();
-
       setState(() {
-        _testPreviewTickets = items;
-        _testError = items.isEmpty ? 'Invalid Regex: $e' : null;
+        _testPreviewTickets = [];
+        _testError = 'Parse Error: $e';
       });
     }
   }
@@ -248,15 +546,16 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
     }
 
     if (mounted) {
+      final bookedCount = _testPreviewTickets.length;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('✅ Bot Learned New Pattern! ${_testPreviewTickets.length} ticket(s) pushed to booking table.'),
+          content: Text('✅ Bot Learned Pattern! $bookedCount ticket(s) pushed to booking table.'),
           backgroundColor: AppColors.success,
+          duration: const Duration(seconds: 2),
         ),
       );
-      if (Navigator.of(context, rootNavigator: true).canPop()) {
-        Navigator.of(context, rootNavigator: true).pop();
-      }
+      // Keep popup open so user can review the next pending message!
+      await _loadUnparsedMessages();
     }
   }
 
@@ -397,39 +696,42 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
                                         final isSelected = _selectedMessage?.id == msg.id;
                                         final isConfig = _isDateOrShiftText(msg.rawText);
 
-                                        return ListTile(
-                                          dense: true,
-                                          selected: isSelected,
-                                          selectedTileColor: AppColors.primary.withValues(alpha: 0.15),
-                                          title: Row(
-                                            children: [
-                                              if (isConfig)
-                                                const Padding(
-                                                  padding: EdgeInsets.only(right: 6),
-                                                  child: Icon(Icons.calendar_month, size: 13, color: Colors.lightBlueAccent),
-                                                ),
-                                              Expanded(
-                                                child: Text(
-                                                  msg.senderName ?? msg.senderPhone,
-                                                  overflow: TextOverflow.ellipsis,
-                                                  style: TextStyle(
-                                                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                                                    color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                                        return Material(
+                                          color: Colors.transparent,
+                                          child: ListTile(
+                                            dense: true,
+                                            selected: isSelected,
+                                            selectedTileColor: AppColors.primary.withValues(alpha: 0.15),
+                                            title: Row(
+                                              children: [
+                                                if (isConfig)
+                                                  const Padding(
+                                                    padding: EdgeInsets.only(right: 6),
+                                                    child: Icon(Icons.calendar_month, size: 13, color: Colors.lightBlueAccent),
+                                                  ),
+                                                Expanded(
+                                                  child: Text(
+                                                    msg.senderName ?? msg.senderPhone,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: TextStyle(
+                                                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                                                      color: isSelected ? AppColors.primary : AppColors.textPrimary,
+                                                    ),
                                                   ),
                                                 ),
-                                              ),
-                                            ],
-                                          ),
-                                          subtitle: Text(
-                                            msg.rawText.replaceAll('\n', ' '),
-                                            maxLines: 1,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              fontSize: 11,
-                                              color: isConfig ? Colors.lightBlueAccent.withAlpha(200) : AppColors.textSecondary,
+                                              ],
                                             ),
+                                            subtitle: Text(
+                                              msg.rawText.replaceAll('\n', ' '),
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                fontSize: 11,
+                                                color: isConfig ? Colors.lightBlueAccent.withAlpha(200) : AppColors.textSecondary,
+                                              ),
+                                            ),
+                                            onTap: () => _selectMessage(msg),
                                           ),
-                                          onTap: () => _selectMessage(msg),
                                         );
                                       },
                                     ),
@@ -442,7 +744,37 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
                             // Right Mapping & Training Editor
                             Expanded(
                               child: _selectedMessage == null
-                                  ? const SizedBox.shrink()
+                                  ? Center(
+                                      child: Column(
+                                        mainAxisAlignment: MainAxisAlignment.center,
+                                        children: [
+                                          const Icon(Icons.task_alt_rounded, size: 54, color: AppColors.success),
+                                          const SizedBox(height: 14),
+                                          const Text(
+                                            'All Pending Messages Resolved!',
+                                            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16, color: Colors.white),
+                                          ),
+                                          const SizedBox(height: 6),
+                                          const Text(
+                                            'There are no more unrecognized messages in the review queue.',
+                                            style: TextStyle(color: Colors.grey, fontSize: 12),
+                                          ),
+                                          const SizedBox(height: 20),
+                                          ElevatedButton(
+                                            style: ElevatedButton.styleFrom(
+                                              backgroundColor: AppColors.surfaceContainerHigh,
+                                              foregroundColor: Colors.white,
+                                            ),
+                                            onPressed: () {
+                                              if (Navigator.of(context, rootNavigator: true).canPop()) {
+                                                Navigator.of(context, rootNavigator: true).pop();
+                                              }
+                                            },
+                                            child: const Text('Close'),
+                                          ),
+                                        ],
+                                      ),
+                                    )
                                   : SingleChildScrollView(
                                       child: Column(
                                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -483,70 +815,93 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
                                               ),
                                             ),
 
-                                          // Raw Message Box
-                                          const Text('Raw Incoming Text:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                                          const SizedBox(height: 6),
-                                          TextField(
-                                            controller: _sampleCtrl,
-                                            maxLines: 3,
-                                            style: const TextStyle(fontFamily: 'monospace', fontSize: 12),
-                                            decoration: InputDecoration(
-                                              filled: true,
-                                              fillColor: AppColors.surfaceContainerHigh,
-                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                                              contentPadding: const EdgeInsets.all(10),
-                                            ),
-                                            onChanged: (_) => _runTestParse(),
-                                          ),
-                                          const SizedBox(height: 14),
-
-                                          // Regex Rule Pattern
-                                          const Text('Generated Dynamic Regex Pattern:', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 12)),
-                                          const SizedBox(height: 6),
-                                          TextField(
-                                            controller: _regexCtrl,
-                                            style: const TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppColors.tertiary),
-                                            decoration: InputDecoration(
-                                              filled: true,
-                                              fillColor: AppColors.surfaceContainerHigh,
-                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
-                                              contentPadding: const EdgeInsets.all(10),
-                                              suffixIcon: IconButton(
-                                                icon: const Icon(Icons.play_arrow_rounded, color: AppColors.primary),
-                                                tooltip: 'Test Regex',
-                                                onPressed: _runTestParse,
-                                              ),
-                                            ),
-                                            onChanged: (_) => _runTestParse(),
-                                          ),
-                                          const SizedBox(height: 14),
-
-                                          // Group Captures
+                                          // Raw Message Box Header with Zoom / Text Size Controller & Legend
                                           Row(
+                                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
                                             children: [
-                                              Expanded(
-                                                child: _buildGroupSelector('Series Group #', _seriesGroup, (val) {
-                                                  setState(() => _seriesGroup = val);
-                                                  _runTestParse();
-                                                }),
+                                              Row(
+                                                children: [
+                                                  const Text(
+                                                    'Raw Incoming Text:',
+                                                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.white),
+                                                  ),
+                                                  const SizedBox(width: 10),
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(0xFF6B21A8).withAlpha(120),
+                                                      borderRadius: BorderRadius.circular(4),
+                                                      border: Border.all(color: const Color(0xFFC084FC).withAlpha(150)),
+                                                    ),
+                                                    child: const Text('Series (Purple)', style: TextStyle(color: Color(0xFFC084FC), fontSize: 10, fontWeight: FontWeight.bold)),
+                                                  ),
+                                                  const SizedBox(width: 6),
+                                                  Container(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                                    decoration: BoxDecoration(
+                                                      color: const Color(0xFF14532D).withAlpha(150),
+                                                      borderRadius: BorderRadius.circular(4),
+                                                      border: Border.all(color: const Color(0xFF4ADE80).withAlpha(150)),
+                                                    ),
+                                                    child: const Text('Tickets (Green)', style: TextStyle(color: Color(0xFF4ADE80), fontSize: 10, fontWeight: FontWeight.bold)),
+                                                  ),
+                                                ],
                                               ),
-                                              const SizedBox(width: 12),
-                                              Expanded(
-                                                child: _buildGroupSelector('5-Digit Ticket Group #', _ticketGroup, (val) {
-                                                  setState(() => _ticketGroup = val);
-                                                  _runTestParse();
-                                                }),
-                                              ),
-                                              const SizedBox(width: 12),
-                                              Expanded(
-                                                child: _buildGroupSelector('Quantity Group #', _qtyGroup, (val) {
-                                                  setState(() => _qtyGroup = val);
-                                                  _runTestParse();
-                                                }),
+                                              // Text Size Zoom Controller
+                                              Row(
+                                                children: [
+                                                  const Text('Text Size:', style: TextStyle(fontSize: 11, color: Colors.grey)),
+                                                  const SizedBox(width: 4),
+                                                  IconButton(
+                                                    icon: const Icon(Icons.remove_circle_outline, size: 18, color: Colors.white70),
+                                                    tooltip: 'Decrease text size',
+                                                    visualDensity: VisualDensity.compact,
+                                                    padding: EdgeInsets.zero,
+                                                    constraints: const BoxConstraints(),
+                                                    onPressed: _rawTextFontSize > 11.0
+                                                        ? () => setState(() => _rawTextFontSize -= 1.0)
+                                                        : null,
+                                                  ),
+                                                  Padding(
+                                                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                                                    child: Text(
+                                                      '${_rawTextFontSize.toInt()}px',
+                                                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 12, color: Colors.amberAccent),
+                                                    ),
+                                                  ),
+                                                  IconButton(
+                                                    icon: const Icon(Icons.add_circle_outline, size: 18, color: Colors.white70),
+                                                    tooltip: 'Increase text size',
+                                                    visualDensity: VisualDensity.compact,
+                                                    padding: EdgeInsets.zero,
+                                                    constraints: const BoxConstraints(),
+                                                    onPressed: _rawTextFontSize < 24.0
+                                                        ? () => setState(() => _rawTextFontSize += 1.0)
+                                                        : null,
+                                                  ),
+                                                ],
                                               ),
                                             ],
                                           ),
-                                          const SizedBox(height: 16),
+                                          const SizedBox(height: 8),
+                                          TextField(
+                                            controller: _sampleCtrl,
+                                            minLines: 4,
+                                            maxLines: 10,
+                                            style: TextStyle(
+                                              fontFamily: 'monospace',
+                                              fontSize: _rawTextFontSize,
+                                              height: 1.4,
+                                            ),
+                                            decoration: InputDecoration(
+                                              filled: true,
+                                              fillColor: AppColors.surfaceContainerHigh,
+                                              border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                                              contentPadding: const EdgeInsets.all(12),
+                                            ),
+                                            onChanged: (_) => _runTestParse(),
+                                          ),
+                                          const SizedBox(height: 14),
 
                                           // Quick Series Fix / Override Bar
                                           Container(
@@ -569,7 +924,10 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
                                                   child: Wrap(
                                                     spacing: 6,
                                                     runSpacing: 4,
-                                                    children: ['12', '24', '36', '40', '60', '100'].map((s) {
+                                                    children: {
+                                                      '5', '6', '10', '12', '18', '20', '24', '36', '40', '50', '60', '100',
+                                                      if (_selectedSeriesOverride.isNotEmpty) _selectedSeriesOverride,
+                                                    }.toList().map((s) {
                                                       final isSel = _selectedSeriesOverride == s;
                                                       return InkWell(
                                                         onTap: () => _applySeriesToAll(s),
@@ -719,40 +1077,6 @@ class _PatternResolverDialogState extends State<PatternResolverDialog> {
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildGroupSelector(String label, int currentVal, ValueChanged<int> onChanged) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(label, style: const TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-        const SizedBox(height: 4),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
-            color: AppColors.surfaceContainerHigh,
-            borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: AppColors.border),
-          ),
-          child: DropdownButtonHideUnderline(
-            child: DropdownButton<int>(
-              value: currentVal,
-              isExpanded: true,
-              dropdownColor: AppColors.surfaceContainerHigh,
-              items: [1, 2, 3, 4, 5].map((i) {
-                return DropdownMenuItem<int>(
-                  value: i,
-                  child: Text('Group #$i', style: const TextStyle(fontSize: 12)),
-                );
-              }).toList(),
-              onChanged: (v) {
-                if (v != null) onChanged(v);
-              },
-            ),
-          ),
-        ),
-      ],
     );
   }
 

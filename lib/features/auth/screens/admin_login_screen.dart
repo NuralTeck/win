@@ -7,6 +7,7 @@ import '../../../core/theme/app_typography.dart';
 import '../../../core/theme/app_decorations.dart';
 import '../../../core/widgets/glass_card.dart';
 import '../../../core/constants/app_constants.dart';
+import '../../../core/services/anti_theft_security_service.dart';
 import '../viewmodels/auth_viewmodel.dart';
 
 // Retain legacy provider for backwards compatibility
@@ -20,13 +21,34 @@ class AdminLoginScreen extends ConsumerStatefulWidget {
 }
 
 class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
-  final _loginEmailCtrl = TextEditingController(text: 'admin@opscore.com');
-  final _loginPassCtrl = TextEditingController(text: 'admin123');
+  final _loginEmailCtrl = TextEditingController();
+  final _loginPassCtrl = TextEditingController();
   bool _loginObscure = true;
 
   bool _isLoading = false;
+  bool _isWipingOut = false;
+  int _failedAttempts = 0;
   String? _errorMessage;
   String? _successMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _initSecurityGuard();
+  }
+
+  Future<void> _initSecurityGuard() async {
+    final attempts = await AntiTheftSecurityService.instance.init();
+    if (!mounted) return;
+    setState(() {
+      _failedAttempts = attempts;
+      if (_failedAttempts == 2) {
+        _errorMessage = '🚨 CRITICAL SECURITY ALERT: 2 of 3 attempts used!\n1 more unauthorized attempt will PERMANENTLY WIPE OUT local company data and shut down software.';
+      } else if (_failedAttempts == 1) {
+        _errorMessage = '⚠️ Security Notice: 1 unauthorized attempt recorded (1 of 3).';
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -36,6 +58,16 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
   }
 
   Future<void> _handleSignIn() async {
+    if (_isWipingOut) return;
+
+    if (AntiTheftSecurityService.instance.isLockedOut) {
+      final mins = AntiTheftSecurityService.instance.remainingLockoutDuration.inMinutes + 1;
+      setState(() {
+        _errorMessage = '🔒 ACCESS TEMPORARILY LOCKED: Too many failed login attempts.\nPlease wait $mins minute(s) before trying again.';
+      });
+      return;
+    }
+
     final email = _loginEmailCtrl.text.trim();
     final pass = _loginPassCtrl.text.trim();
 
@@ -56,9 +88,17 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
     );
 
     if (!mounted) return;
-    setState(() => _isLoading = false);
 
     if (res['success'] == true) {
+      // Reset security attempts on verified login
+      await AntiTheftSecurityService.instance.resetAttempts();
+      if (!mounted) return;
+
+      setState(() {
+        _isLoading = false;
+        _failedAttempts = 0;
+      });
+
       ref.read(isAdminAuthenticatedProvider.notifier).state = true;
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -80,9 +120,48 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
 
       context.go(AppConstants.routeDashboard);
     } else {
+      final isBlocked = res['isBlocked'] == true;
+      final rawMsg = res['message']?.toString() ?? 'Invalid credentials.';
+
+      // Register failed trial
+      final newCount = await AntiTheftSecurityService.instance.registerFailedAttempt(
+        email: email,
+        reason: isBlocked
+            ? 'Unauthorized login attempt on BLOCKED account'
+            : 'Invalid password credentials attempt',
+      );
+
+      if (!mounted) return;
+
       setState(() {
-        _errorMessage = res['message']?.toString() ?? 'Invalid cloud credentials.';
+        _isLoading = false;
+        _failedAttempts = newCount;
       });
+
+      if (newCount >= AntiTheftSecurityService.maxBruteForceThreshold) {
+        // 🚨 MAXIMUM BRUTE FORCE THRESHOLD EXCEEDED: INITIATE EMERGENCY WIPEOUT & CRASH
+        setState(() => _isWipingOut = true);
+        await Future.delayed(const Duration(milliseconds: 2200));
+        await AntiTheftSecurityService.instance.executeEmergencyWipeoutAndCrash(
+          email: email,
+          reason: isBlocked
+              ? 'Blocked account attempted brute force access $newCount times'
+              : '$newCount consecutive failed password login attempts',
+        );
+      } else if (AntiTheftSecurityService.instance.isLockedOut) {
+        final mins = AntiTheftSecurityService.instance.remainingLockoutDuration.inMinutes + 1;
+        setState(() {
+          _errorMessage = '$rawMsg\n\n🔒 ACCOUNT LOCKED: $newCount failed attempts recorded.\nCooldown active: Access locked for $mins minute(s) to protect database.';
+        });
+      } else if (newCount == 2) {
+        setState(() {
+          _errorMessage = '$rawMsg\n\n⚠️ Security Notice: Attempt 2 of 3 used before account cooldown lockout.';
+        });
+      } else {
+        setState(() {
+          _errorMessage = '$rawMsg\n\n⚠️ Security Notice: Attempt 1 used. Repeated failed attempts will trigger a security cooldown lockout.';
+        });
+      }
     }
   }
 
@@ -183,7 +262,7 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                               ),
                             ),
                             Text(
-                              'SUPABASE CLOUD AUTHENTICATION',
+                              'ENTERPRISE MANAGEMENT',
                               style: AppTypography.labelSm.copyWith(
                                 color: const Color(0xFF43E97B),
                                 fontWeight: FontWeight.bold,
@@ -195,33 +274,7 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 28),
-
-                    // Security Protection Notice Badge
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF0072FF).withValues(alpha: 0.12),
-                        borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: const Color(0xFF0072FF).withValues(alpha: 0.4)),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.lock_outline_rounded, size: 14, color: Color(0xFF00C6FF)),
-                          SizedBox(width: 8),
-                          Text(
-                            'Authorized Access Only  •  Managed by Owner in Supabase',
-                            style: TextStyle(
-                              color: Color(0xFF00C6FF),
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 20),
+                    const SizedBox(height: 32),
 
                     // Main Glassmorphism Login Container
                     GlassCard(
@@ -231,18 +284,18 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           const Text(
-                            'Owner & Admin Sign In',
+                            'Sign In',
                             style: TextStyle(
-                              fontSize: 20,
+                              fontSize: 22,
                               fontWeight: FontWeight.bold,
                               color: Colors.white,
                             ),
                           ),
-                          const SizedBox(height: 4),
+                          const SizedBox(height: 6),
                           const Text(
-                            'Enter your registered Supabase Cloud Email & Password to unlock the system.',
+                            'Enter your email and password to access the system.',
                             style: TextStyle(
-                              fontSize: 12,
+                              fontSize: 13,
                               color: AppColors.textSecondary,
                             ),
                           ),
@@ -314,8 +367,8 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                             textInputAction: TextInputAction.next,
                             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                             decoration: InputDecoration(
-                              labelText: 'Supabase Registered Email *',
-                              hintText: 'e.g. admin@opscore.com',
+                              labelText: 'Email Address *',
+                              hintText: 'Enter your email',
                               prefixIcon: const Icon(Icons.email_outlined, color: AppColors.primary),
                               filled: true,
                               fillColor: AppColors.surfaceContainerLow,
@@ -344,6 +397,7 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                             style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                             decoration: InputDecoration(
                               labelText: 'Password *',
+                              hintText: 'Enter your password',
                               prefixIcon: const Icon(Icons.lock_outline, color: AppColors.primary),
                               suffixIcon: IconButton(
                                 icon: Icon(
@@ -399,7 +453,7 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                                         Icon(Icons.lock_open_rounded, size: 18),
                                         SizedBox(width: 10),
                                         Text(
-                                          'AUTHENTICATE & ENTER',
+                                          'SIGN IN',
                                           style: TextStyle(
                                             fontWeight: FontWeight.bold,
                                             letterSpacing: 1.1,
@@ -410,19 +464,65 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
                                     ),
                             ),
                           ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 24),
 
-                    // Anti-Piracy Security Footer
-                    const Text(
-                      '🔒 Proprietary Software  •  Single-Tenant Cloud Secured  •  Unauthorized Resale Prohibited',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        color: AppColors.textSecondary,
-                        fontSize: 10.5,
-                        letterSpacing: 0.5,
+                          // Security Trials Badge
+                          if (_failedAttempts > 0) ...[
+                            const SizedBox(height: 16),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: _failedAttempts >= 2
+                                    ? const Color(0xFFEF4444).withValues(alpha: 0.15)
+                                    : Colors.amber.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: _failedAttempts >= 2
+                                      ? const Color(0xFFEF4444).withValues(alpha: 0.4)
+                                      : Colors.amber.withValues(alpha: 0.3),
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  Icon(
+                                    _failedAttempts >= 2 ? Icons.warning_rounded : Icons.shield_outlined,
+                                    size: 16,
+                                    color: _failedAttempts >= 2 ? const Color(0xFFEF4444) : Colors.amber,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  Text(
+                                    'Anti-Theft Guard: $_failedAttempts of 3 trials used (${3 - _failedAttempts} remaining)',
+                                    style: TextStyle(
+                                      color: _failedAttempts >= 2 ? const Color(0xFFFCA5A5) : Colors.amber.shade200,
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+
+                          // Admin-Only Password Policy Notice
+                          const SizedBox(height: 16),
+                          const Center(
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Icon(Icons.admin_panel_settings_outlined, size: 14, color: Color(0xFF64748B)),
+                                SizedBox(width: 6),
+                                Text(
+                                  'Password resets are strictly controlled by System Admin',
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: Color(0xFF64748B),
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ],
@@ -430,6 +530,131 @@ class _AdminLoginScreenState extends ConsumerState<AdminLoginScreen> {
               ),
             ),
           ),
+
+          // 3. Full-Screen Emergency Anti-Theft Wipeout Barrier
+          if (_isWipingOut)
+            Positioned.fill(
+              child: Container(
+                color: const Color(0xF50A0000),
+                padding: const EdgeInsets.all(24),
+                child: Center(
+                  child: Container(
+                    constraints: const BoxConstraints(maxWidth: 500),
+                    padding: const EdgeInsets.all(32),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E0808),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(color: const Color(0xFFEF4444), width: 2.5),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFEF4444).withValues(alpha: 0.4),
+                          blurRadius: 40,
+                          spreadRadius: 4,
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 76,
+                          height: 76,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFEF4444).withValues(alpha: 0.2),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: const Color(0xFFEF4444), width: 2.5),
+                          ),
+                          child: const Icon(
+                            Icons.gpp_bad_rounded,
+                            size: 42,
+                            color: Color(0xFFEF4444),
+                          ),
+                        ),
+                        const SizedBox(height: 20),
+                        const Text(
+                          'ANTI-THEFT WIPEOUT ENGAGED',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Color(0xFFEF4444),
+                            fontSize: 20,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1.2,
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        const Text(
+                          '3 UNAUTHORIZED / BLOCKED ATTEMPTS EXCEEDED',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 0.8,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          padding: const EdgeInsets.all(14),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.4),
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: const Color(0xFFEF4444).withValues(alpha: 0.3)),
+                          ),
+                          child: const Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Company Data Protection Protocol:',
+                                style: TextStyle(
+                                  color: Color(0xFFFCA5A5),
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 12,
+                                ),
+                              ),
+                              SizedBox(height: 6),
+                              Text(
+                                '• Purging local database (opscore_pro.db)\n'
+                                '• Sanitizing all ticket & party ledgers\n'
+                                '• Force crashing terminal to prevent data theft\n'
+                                '• Re-opening will require new Owner credentials',
+                                style: TextStyle(
+                                  color: Color(0xFFE2E8F0),
+                                  fontSize: 12,
+                                  height: 1.5,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 24),
+                        const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                                color: Color(0xFFEF4444),
+                              ),
+                            ),
+                            SizedBox(width: 14),
+                            Text(
+                              'Destroying local files & crashing terminal...',
+                              style: TextStyle(
+                                color: Color(0xFFFCA5A5),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );

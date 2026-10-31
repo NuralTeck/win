@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpsCore Cloud — Cloud Database & SQL Setup</title>
+  
+  <!-- Modern Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
+  
+  <!-- Supabase CDN Client -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  
+  <!-- Luxury Glassmorphism Stylesheet -->
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Ambient Glassmorphism Radiant Glowing Orbs -->
+  <div class="ambient-glow glow-1"></div>
+  <div class="ambient-glow glow-2"></div>
+  <div class="ambient-glow glow-3"></div>
+
+  <div class="app-layout">
+    <!-- Top Global Header -->
+    <header class="app-header">
+      <div class="header-left">
+        <div class="brand-logo">
+          <div class="logo-icon">🛡️</div>
+          <div class="brand-meta">
+            <h1>OPSCORE COMMAND CENTER</h1>
+            <span class="brand-sub">CLOUD ANTI-PIRACY & MASTER ADMIN CONSOLE</span>
+          </div>
+        </div>
+        <div class="live-pill" id="cloudStatusPill">
+          <div class="pulsing-dot"></div>
+          <span id="cloudStatusText">Connecting to Cloud...</span>
+        </div>
+      </div>
+
+      <div class="header-right">
+        <div class="system-clock" id="systemClock">--:--:-- --</div>
+        <button class="btn-refresh" id="btnManualRefresh" title="Click to refresh live data now">
+          <span class="icon">🔄</span>
+          <span>Refresh</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Glassmorphic Multi-Page Navigation Bar -->
+    <nav class="nav-tabs-bar">
+      <a href="index.html" class="tab-btn">
+        <span class="tab-icon">🖥️</span>
+        <span>Live Software Logins</span>
+        <span class="tab-counter" id="activeBadgeCount">0</span>
+      </a>
+      <a href="users.html" class="tab-btn">
+        <span class="tab-icon">👥</span>
+        <span>Users & Remote Licenses</span>
+        <span class="tab-counter" id="licensesBadgeCount">0</span>
+      </a>
+      <a href="hisab.html" class="tab-btn">
+        <span class="tab-icon">📊</span>
+        <span>Remote Party Hisab</span>
+        <span class="tab-counter" id="partyBadgeCount">0</span>
+      </a>
+      <a href="logs.html" class="tab-btn">
+        <span class="tab-icon">📜</span>
+        <span>Login Audit Trail</span>
+      </a>
+      <a href="settings.html" class="tab-btn active">
+        <span class="tab-icon">⚙️</span>
+        <span>Cloud Setup & SQL</span>
+      </a>
+    </nav>
+
+    <!-- Main Content: Cloud Database & SQL Setup -->
+    <main class="views-container">
+      <section class="tab-view active">
+        <div class="section-toolbar">
+          <div class="toolbar-title-group">
+            <h2>⚙️ Cloud Database & Anti-Piracy Architecture</h2>
+            <p>Supabase connection parameters, active security policies, and 1-click SQL setup script.</p>
+          </div>
+          <div class="toolbar-actions">
+            <button class="btn-primary" id="btnCopySql">
+              <span class="icon">📋</span>
+              <span>Copy Complete SQL Script</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Architecture Info Cards -->
+        <div class="info-cards-grid">
+          <div class="info-card">
+            <div class="info-card-icon">🔒</div>
+            <div class="info-card-content">
+              <h4>Anti-Piracy & Remote Kill Switch</h4>
+              <p>When an admin blocks a user or session, the desktop software receives the signal via WebSocket in under 1 second (or 5s heartbeat fallback) and immediately freezes with a permanent lockdown barrier.</p>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="info-card-icon">⚡</div>
+            <div class="info-card-content">
+              <h4>Live Heartbeat & Device Tracking</h4>
+              <p>Every active PC pings cloud every 5–10s, updating device hostname, OS, and total active session time. Inactive sessions are automatically marked offline.</p>
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="info-card-icon">🛡️</div>
+            <div class="info-card-content">
+              <h4>100% Local Privacy Guarantee</h4>
+              <p>17,000+ raw tickets, winner prize calculations, WhatsApp chats, and local vouchers stay strictly on the client's local SQLite database. Only Auth & net party balances are stored in cloud.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- SQL Script Viewer Card -->
+        <div class="card sql-viewer-card">
+          <div class="card-header">
+            <div class="card-header-icon bg-purple">📜</div>
+            <div>
+              <h3>Supabase Cloud Schema (SQL)</h3>
+              <span class="card-subtitle">Run this script in your Supabase SQL Editor to setup all tables & real-time replication</span>
+            </div>
+          </div>
+          <pre class="sql-code"><code id="sqlCodeBlock">-- =========================================================================
+-- SUPABASE CLOUD SCHEMA: ANTI-PIRACY LICENSE & MASTER ADMIN PANEL
+-- =========================================================================
+
+-- 1. PARTY HISAB TABLE (Party Name & Net Hisab Balance)
+CREATE TABLE IF NOT EXISTS party_hisab (
+    party_name TEXT PRIMARY KEY,
+    dealer_name TEXT,
+    total_tickets BIGINT DEFAULT 0,
+    total_sales NUMERIC DEFAULT 0,
+    total_prize NUMERIC DEFAULT 0,
+    net_hisab NUMERIC DEFAULT 0,
+    category TEXT DEFAULT 'Party Hisab',
+    last_active_date TEXT,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    synced_by TEXT
+);
+
+-- 2. APP SESSIONS & ACTIVITY LOGS (Who logged in, when, device, online time)
+CREATE TABLE IF NOT EXISTS app_sessions (
+    session_id TEXT PRIMARY KEY,
+    user_email TEXT NOT NULL,
+    user_name TEXT,
+    device_name TEXT,
+    os_info TEXT,
+    login_time TIMESTAMPTZ DEFAULT NOW(),
+    last_heartbeat TIMESTAMPTZ DEFAULT NOW(),
+    logout_time TIMESTAMPTZ,
+    is_online BOOLEAN DEFAULT TRUE,
+    is_blocked BOOLEAN DEFAULT FALSE,
+    total_online_seconds INTEGER DEFAULT 0,
+    app_version TEXT DEFAULT '2.0.0',
+    status TEXT DEFAULT 'Online'
+);
+
+-- 3. USER LICENSES & REMOTE KILL SWITCH (Create user, block/unblock, license validity)
+CREATE TABLE IF NOT EXISTS app_licenses (
+    id TEXT PRIMARY KEY,
+    user_email TEXT NOT NULL UNIQUE,
+    full_name TEXT,
+    license_status TEXT DEFAULT 'Active',
+    is_blocked BOOLEAN DEFAULT FALSE,
+    valid_until TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    notes TEXT
+);
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE party_hisab ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE app_licenses ENABLE ROW LEVEL SECURITY;
+
+-- Allow authenticated users full read & write access
+DROP POLICY IF EXISTS "Allow authenticated users full access to party_hisab" ON party_hisab;
+CREATE POLICY "Allow authenticated users full access to party_hisab"
+ON party_hisab FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow authenticated users full access to app_sessions" ON app_sessions;
+CREATE POLICY "Allow authenticated users full access to app_sessions"
+ON app_sessions FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow authenticated users full access to app_licenses" ON app_licenses;
+CREATE POLICY "Allow authenticated users full access to app_licenses"
+ON app_licenses FOR ALL TO authenticated USING (true) WITH CHECK (true);
+
+-- Allow anon key access for client desktop apps and master admin web panel
+DROP POLICY IF EXISTS "Allow anon access to party_hisab" ON party_hisab;
+CREATE POLICY "Allow anon access to party_hisab"
+ON party_hisab FOR ALL TO anon USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow anon access to app_sessions" ON app_sessions;
+CREATE POLICY "Allow anon access to app_sessions"
+ON app_sessions FOR ALL TO anon USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow anon access to app_licenses" ON app_licenses;
+CREATE POLICY "Allow anon access to app_licenses"
+ON app_licenses FOR ALL TO anon USING (true) WITH CHECK (true);
+
+-- Enable Supabase Realtime safely (only adds if not already added)
+DO $$ 
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'app_sessions'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE app_sessions;
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables 
+    WHERE pubname = 'supabase_realtime' AND tablename = 'app_licenses'
+  ) THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE app_licenses;
+  END IF;
+END $$;
+
+-- Auto-confirm all new user accounts (No email confirmation required)
+CREATE OR REPLACE FUNCTION public.auto_confirm_new_user()
+RETURNS trigger AS $$
+BEGIN
+  NEW.email_confirmed_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  BEFORE INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.auto_confirm_new_user();
+
+-- Auto-confirm any existing accounts
+UPDATE auth.users SET email_confirmed_at = NOW() WHERE email_confirmed_at IS NULL;
+
+-- 6. ADMIN-ONLY PASSWORD RESET RPC
+CREATE OR REPLACE FUNCTION public.admin_reset_user_password(target_email text, new_password text)
+RETURNS boolean LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE rows_updated integer;
+BEGIN
+  BEGIN
+    UPDATE auth.users SET encrypted_password = extensions.crypt(new_password, extensions.gen_salt('bf')), updated_at = NOW()
+    WHERE LOWER(email) = LOWER(TRIM(target_email));
+    GET DIAGNOSTICS rows_updated = ROW_COUNT;
+  EXCEPTION WHEN OTHERS THEN
+    UPDATE auth.users SET encrypted_password = crypt(new_password, gen_salt('bf')), updated_at = NOW()
+    WHERE LOWER(email) = LOWER(TRIM(target_email));
+    GET DIAGNOSTICS rows_updated = ROW_COUNT;
+  END;
+  RETURN rows_updated > 0;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public.admin_reset_user_password(text, text) TO anon, authenticated, service_role;</code></pre>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Footer -->
+    <footer class="app-footer">
+      <div class="footer-left">
+        <span>🔒 OpsCore Cloud Command Center • Remote License Management & Anti-Piracy Protection</span>
+      </div>
+      <div class="footer-right">
+        <span>Supabase Project: <code id="lblProjectRef">wagslwsfhbrcyakazibv</code></span>
+      </div>
+    </footer>
+  </div>
+
+  <!-- Notification Toast -->
+  <div class="toast" id="toast">Message notification</div>
+
+  <!-- Master Controller Script -->
+  <script src="app.js"></script>
+</body>
+</html>

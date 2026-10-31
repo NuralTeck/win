@@ -195,7 +195,45 @@ class PatternMatcherService {
     if (digits.isNotEmpty && digits.length <= 4) {
       return digits;
     }
-    return digits.isNotEmpty ? digits.substring(0, 3) : fallback;
+    return digits.isNotEmpty ? digits.substring(0, 4) : fallback;
+  }
+
+  /// Expands ticket range string into full 5-digit list e.g. ("72170", "71") -> ["72170", "72171"]
+  List<String>? expandTicketRange(String startTkt, String endPart) {
+    if (startTkt.length != 5) return null;
+
+    final startFull = int.tryParse(startTkt);
+    if (startFull == null) return null;
+
+    int? endFull;
+    if (endPart.length == 1) {
+      final prefix = startTkt.substring(0, 4);
+      final lastDigit = int.tryParse(endPart);
+      if (lastDigit == null) return null;
+      endFull = int.tryParse('$prefix$lastDigit');
+    } else if (endPart.length == 2) {
+      final prefix = startTkt.substring(0, 3);
+      final last2 = int.tryParse(endPart);
+      if (last2 == null) return null;
+      endFull = int.tryParse('$prefix$endPart');
+    } else if (endPart.length == 3) {
+      final prefix = startTkt.substring(0, 2);
+      final last3 = int.tryParse(endPart);
+      if (last3 == null) return null;
+      endFull = int.tryParse('$prefix$endPart');
+    } else if (endPart.length == 4 || endPart.length == 5) {
+      endFull = int.tryParse(endPart.padLeft(5, '0'));
+    }
+
+    if (endFull == null || endFull < startFull || (endFull - startFull) > 200) {
+      return null;
+    }
+
+    final List<String> result = [];
+    for (int i = startFull; i <= endFull; i++) {
+      result.add(i.toString().padLeft(5, '0'));
+    }
+    return result;
   }
 
   /// Test or parse text using learned dynamic patterns
@@ -209,6 +247,20 @@ class PatternMatcherService {
         for (final line in lines) {
           final l = line.trim();
           if (l.isEmpty) continue;
+
+          // Check for range on line before single ticket matching
+          final rangeMatch = RegExp(r'^(?:([0-9]{1,3}[A-Za-z]?)\s*[:=/.\-~*#@+]+)?\s*(\d{5})\s*[-~/\s]*(?:to|se|-|\/)\s*(\d{1,5})$', caseSensitive: false).firstMatch(l);
+          if (rangeMatch != null) {
+            final rawS = rangeMatch.group(1);
+            final s = rawS != null ? cleanSeriesNumber(rawS, fallback: defaultSeries) : defaultSeries;
+            final expanded = expandTicketRange(rangeMatch.group(2)!, rangeMatch.group(3)!);
+            if (expanded != null && expanded.isNotEmpty) {
+              for (final tNo in expanded) {
+                items.add(ParsedTicketItem(series: s, ticketNo: tNo, quantity: 1));
+              }
+              continue;
+            }
+          }
 
           final match = regex.firstMatch(l);
           if (match != null) {

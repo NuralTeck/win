@@ -21,11 +21,7 @@ class LotteryResultParser {
             !content.contains('ProcSet') &&
             !content.contains('MediaBox') &&
             !content.contains('Encoding') &&
-            !content.startsWith('D:20') &&
-            content != '2024' &&
-            content != '2025' &&
-            content != '2026' &&
-            content != '2027') {
+            !content.startsWith('D:20')) {
           extractedChunks.add(content);
         }
       }
@@ -57,17 +53,47 @@ class LotteryResultParser {
         sliced = sliced.substring(0, endMatch.start);
       }
     }
-    // Strip explicit currency noise like ₹500/-, 500/-, ₹250/-, 250/-, ₹120/-, 120/-
-    sliced = sliced.replaceAll(RegExp(r'(?:₹|RS\.?|INR)?\s*[0-9]+(?:\,000)?\s*\/\-', caseSensitive: false), ' ');
-    sliced = sliced.replaceAll(RegExp(r'for\s+Seller\s+₹?\s*[0-9]+', caseSensitive: false), ' ');
-    sliced = sliced.replaceAll(RegExp(r'Winner\s+Amount\s+₹?\s*[0-9]+', caseSensitive: false), ' ');
+    // Strip explicit currency noise like ₹500/-, 500/-, ₹250/-, 250/-, ₹120/-, 120/- (horizontal whitespace only!)
+    sliced = sliced.replaceAll(RegExp(r'(?:₹|RS\.?|INR)?[ \t]*[0-9]+(?:\,000)?[ \t]*\/\-', caseSensitive: false), ' ');
+    sliced = sliced.replaceAll(RegExp(r'for[ \t]+Seller[ \t]*(?:₹|Rs\.?)?[ \t]*[0-9]+(?:\/\-)?', caseSensitive: false), ' ');
+    sliced = sliced.replaceAll(RegExp(r'Winner[ \t]+Amount[ \t]*(?:₹|Rs\.?)?[ \t]*[0-9]+(?:\/\-)?', caseSensitive: false), ' ');
 
     final reg = isFiveDigit ? RegExp(r'\b[0-9]{5}\b') : RegExp(r'\b[0-9]{4}\b');
     return reg
         .allMatches(sliced)
         .map((m) => m.group(0)!)
+        .where((n) {
+          if (isFiveDigit) return true;
+          // Filter common prize amount or postal noise, but preserve genuine winning numbers (including 2024, 2025, 2026)
+          if (n == '0250' || n == '0500' || n == '0120' || n == '0450' || n == '1000' || n == '9000' || n == '7001') return false;
+          return true;
+        })
         .take(count)
         .toList();
+  }
+
+  /// 🛡️ Structural Ad Cutter: Completely strips ANY advertisement banner located
+  /// between 4th Prize and 5th Prize, regardless of how the ad text/dates change throughout the year!
+  static String stripMiddleAdvertisement(String text) {
+    final m4 = RegExp(r'4th[ \t]*(?:Prize|Amount)?', caseSensitive: false).firstMatch(text);
+    final m5 = RegExp(r'5th[ \t]*(?:Prize|Amount)?', caseSensitive: false).firstMatch(text);
+    if (m4 != null && m5 != null && m5.start > m4.end) {
+      final between = text.substring(m4.end, m5.start);
+      final cleanBetween = between
+          .replaceAll(RegExp(r'(?:₹|RS\.?|INR)?[ \t]*[0-9]+(?:\,000)?[ \t]*\/\-', caseSensitive: false), ' ')
+          .replaceAll(RegExp(r'for[ \t]+Seller[ \t]*(?:₹|Rs\.?)?[ \t]*[0-9]+(?:\/\-)?', caseSensitive: false), ' ');
+
+      final fourDigitMatches = RegExp(r'\b[0-9]{4}\b').allMatches(cleanBetween).toList();
+      if (fourDigitMatches.length >= 10) {
+        final tenthNum = fourDigitMatches[9].group(0)!;
+        final idxTenth = between.indexOf(tenthNum, fourDigitMatches[9].start);
+        if (idxTenth != -1) {
+          final cutPoint = m4.end + idxTenth + tenthNum.length;
+          return '${text.substring(0, cutPoint)}\n\n${text.substring(m5.start)}';
+        }
+      }
+    }
+    return text;
   }
 
   /// Parses raw text extracted from PDF or pasted official Sambad result sheet
@@ -76,7 +102,7 @@ class LotteryResultParser {
     String drawId = '',
     String drawName = 'DEAR MORNING 1 PM',
   }) {
-    String text = rawText.replaceAll('\r\n', '\n');
+    String text = stripMiddleAdvertisement(rawText.replaceAll('\r\n', '\n'));
 
     // 1st Prize extraction (Series + 5-digit number, e.g., 82D 41997 or 67L 55118)
     String firstPrize = '';
@@ -127,9 +153,18 @@ class LotteryResultParser {
         .where((n) => n != consolation && n.length == 5)
         .toList();
 
+    // Clean explicit currency noise, bumper ads, and header date labels before extraction
+    final cleanText = text
+        .replaceAll(RegExp(r'(?:₹|RS\.?|INR)?[ \t]*[0-9]+(?:\,000)?[ \t]*\/\-', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'for[ \t]+Seller[ \t]*(?:₹|Rs\.?)?[ \t]*[0-9]+(?:\/\-)?', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'(?:DEAR[ \t]+)?(?:BUMPER|PUJA|DIWALI|NEW[ \t]*YEAR|HOLI|SUMMER|WINTER|MONSOON|BAISAKHI|SUPER)[^\n]*(?:LOTTERY|20\d{2})?', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'\bDRAW[ \t]+ON[ \t]+[^\n]+', caseSensitive: false), ' ')
+        .replaceAll(RegExp(r'\b[0-3]?\d[\/\-\.][0-1]?\d[\/\-\.](?:20\d{2}|\d{2})\b'), ' ')
+        .replaceAll(RegExp(r'\b(?:DATE|DRAW|ON|YEAR|BUMPER|LOTTERY|SAMBAD)[^\n]*?(?:202[0-9]|203[0-9])\b', caseSensitive: false), ' ');
+
     // 2nd Prize numbers (10 5-digit numbers following 2nd Prize / Winner ₹ 10,000 header)
     List<String> secondPrize = _extractNumbersBetweenKeywords(
-      text,
+      cleanText,
       r'2nd(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*10\,?000|Winner\s*₹?\s*9\,?000',
       r'3rd(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*500',
       10,
@@ -141,7 +176,7 @@ class LotteryResultParser {
 
     // 3rd Prize numbers (10 4-digit numbers following 3rd Prize / Winner ₹ 500 header)
     List<String> thirdPrize = _extractNumbersBetweenKeywords(
-      text,
+      cleanText,
       r'3rd(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*500(?!\s*LAKH)',
       r'4th(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*250',
       10,
@@ -150,7 +185,7 @@ class LotteryResultParser {
 
     // 4th Prize numbers (10 4-digit numbers following 4th Prize / Winner ₹ 250 header)
     List<String> fourthPrize = _extractNumbersBetweenKeywords(
-      text,
+      cleanText,
       r'4th(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*250',
       r'5th(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*120',
       10,
@@ -159,7 +194,7 @@ class LotteryResultParser {
 
     // 5th Prize numbers (100 4-digit numbers following 5th Prize / Winner ₹ 120 header, excluding 3rd & 4th prize)
     List<String> fifthPrizeRaw = _extractNumbersBetweenKeywords(
-      text,
+      cleanText,
       r'5th(?:\s*Prize|\s*Amount)?|Winner\s*₹?\s*120',
       null,
       120,
@@ -168,17 +203,12 @@ class LotteryResultParser {
     final topAssigned = {...thirdPrize, ...fourthPrize};
     List<String> fifthPrize = fifthPrizeRaw.where((n) => !topAssigned.contains(n)).take(100).toList();
 
-    // Clean explicit currency noise before fallback
-    final cleanText = text
-        .replaceAll(RegExp(r'(?:₹|RS\.?|INR)?\s*[0-9]+(?:\,000)?\s*\/\-', caseSensitive: false), ' ')
-        .replaceAll(RegExp(r'for\s+Seller\s+₹?\s*[0-9]+', caseSensitive: false), ' ');
-
     if (thirdPrize.length < 10 || fourthPrize.length < 10 || fifthPrize.length < 100) {
       final assigned = {...thirdPrize, ...fourthPrize, ...fifthPrize};
       final unassignedFours = RegExp(r'\b[0-9]{4}\b')
           .allMatches(cleanText)
           .map((m) => m.group(0)!)
-          .where((n) => !assigned.contains(n))
+          .where((n) => !assigned.contains(n) && n != '0250' && n != '0500' && n != '0120' && n != '1000' && n != '9000' && n != '7001')
           .toList();
 
       int offset = 0;
@@ -198,11 +228,38 @@ class LotteryResultParser {
       }
     }
 
+    // Detect Draw Date strictly as Indian standard DD/MM/YYYY (Day first, Month second, Year third)
+    String detectedDate = '';
+    final dateMatch = RegExp(r'\b([0-3]?\d)[\/\-\.]([0-1]?\d)[\/\-\.](20\d{2}|\d{2})\b').firstMatch(text);
+    if (dateMatch != null) {
+      final d = dateMatch.group(1)!.padLeft(2, '0');
+      final m = dateMatch.group(2)!.padLeft(2, '0');
+      var y = dateMatch.group(3)!;
+      if (y.length == 2) y = '20$y';
+      detectedDate = '$d/$m/$y';
+    } else {
+      final now = DateTime.now();
+      detectedDate = '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year}';
+    }
+
+    // Detect Shift (1 PM / 6 PM / 8 PM)
+    String detectedShift = 'Dear 1 PM';
+    final lower = text.toLowerCase();
+    if (lower.contains('8 pm') || lower.contains('8:00 pm') || lower.contains('night') || lower.contains('evening')) {
+      detectedShift = 'Dear 8 PM';
+    } else if (lower.contains('6 pm') || lower.contains('6:00 pm') || lower.contains('day')) {
+      detectedShift = 'Dear 6 PM';
+    } else if (lower.contains('1 pm') || lower.contains('1:00 pm') || lower.contains('morning')) {
+      detectedShift = 'Dear 1 PM';
+    }
+
+    final finalDrawName = drawName.isNotEmpty ? drawName : detectedShift;
+
     return LotterySambadResultModel(
       drawId: drawId,
-      drawName: drawName.isNotEmpty ? drawName : 'DEAR LOTTERY SAMBAD',
-      drawDateStr: DateTime.now().toString().split(' ').first,
-      drawTimeStr: '01:00 PM',
+      drawName: finalDrawName,
+      drawDateStr: detectedDate,
+      drawTimeStr: detectedShift,
       firstPrize: firstPrize,
       consolationPrize: consolation,
       secondPrizeNumbers: secondPrize,

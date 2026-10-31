@@ -1,4 +1,6 @@
 import 'dart:convert';
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +19,7 @@ import '../viewmodels/settings_viewmodel.dart';
 import 'price_setup_screen.dart';
 import '../../operations/screens/whatsapp_engine_screen.dart';
 import '../../sellers/screens/customer_setup_screen.dart';
+import 'legal_terms_privacy_screen.dart';
 
 class SettingsScreen extends ConsumerWidget {
   const SettingsScreen({super.key});
@@ -26,7 +29,8 @@ class SettingsScreen extends ConsumerWidget {
     '👑 Dealers & Sellers Setup',
     'WhatsApp Connect & Bot',
     'API Credentials',
-    '🧹 Master Data Reset (0)',
+    '🗄️ Database & Optimization',
+    '⚖️ Terms & Privacy Policy',
   ];
 
   Future<void> _showMasterWipeDialog(BuildContext context, WidgetRef ref) async {
@@ -243,6 +247,10 @@ class SettingsScreen extends ConsumerWidget {
               const WhatsAppEngineScreen(),
               const _ApiCredentialsTab(),
               const _DatabaseResetTab(),
+              const SizedBox(
+                height: 750,
+                child: LegalTermsPrivacyScreen(),
+              ),
             ],
           ),
         ],
@@ -262,7 +270,10 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
   final _geminiKeyCtrl = TextEditingController();
   bool _obscureKey = true;
   bool _isSaving = false;
+  bool _isTesting = false;
   bool _isConfigured = false;
+  String? _testResult;
+  bool? _testSuccess;
 
   @override
   void initState() {
@@ -276,12 +287,22 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
     super.dispose();
   }
 
+  int get _configuredKeyCount {
+    final raw = _geminiKeyCtrl.text.trim();
+    if (raw.isEmpty) return 0;
+    return raw
+        .split(RegExp(r'[\r\n,;]+'))
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty && !k.startsWith('#'))
+        .length;
+  }
+
   Future<void> _loadCurrentApiKey() async {
-    final key = await DatabaseService.instance.getGeminiApiKey();
+    final keys = await DatabaseService.instance.getGeminiApiKeys();
     if (mounted) {
       setState(() {
-        if (key != null && key.isNotEmpty) {
-          _geminiKeyCtrl.text = key;
+        if (keys.isNotEmpty) {
+          _geminiKeyCtrl.text = keys.join('\n');
           _isConfigured = true;
         } else {
           _isConfigured = false;
@@ -291,12 +312,18 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
   }
 
   Future<void> _saveGeminiApiKey() async {
-    final key = _geminiKeyCtrl.text.trim();
-    if (key.isEmpty) {
+    final raw = _geminiKeyCtrl.text.trim();
+    final keys = raw
+        .split(RegExp(r'[\r\n,;]+'))
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty && !k.startsWith('#'))
+        .toList();
+
+    if (keys.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           backgroundColor: AppColors.warning,
-          content: Text('⚠️ Please enter a valid Gemini API Key.'),
+          content: Text('⚠️ Please enter at least one valid Gemini API Key.'),
         ),
       );
       return;
@@ -304,15 +331,16 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
 
     setState(() => _isSaving = true);
     try {
-      // 1. Save in local SQLite
-      await DatabaseService.instance.saveGeminiApiKey(key);
+      // 1. Save in local SQLite (joined with newlines for multi-key support)
+      final savedText = keys.join('\n');
+      await DatabaseService.instance.saveGeminiApiKey(savedText);
 
       // 2. Notify WhatsApp Bot Engine REST API
       try {
         await http.post(
           Uri.parse('http://127.0.0.1:4000/api/settings/ai'),
           headers: {'Content-Type': 'application/json'},
-          body: jsonEncode({'apiKey': key}),
+          body: jsonEncode({'apiKey': keys.first, 'allKeys': keys}),
         );
       } catch (_) {}
 
@@ -321,13 +349,13 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
           _isConfigured = true;
         });
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
+          SnackBar(
             backgroundColor: AppColors.success,
             content: Row(
               children: [
-                Icon(Icons.check_circle_rounded, color: Colors.white),
-                SizedBox(width: 10),
-                Text('✅ Gemini Vision AI Key saved and activated successfully!'),
+                const Icon(Icons.check_circle_rounded, color: Colors.white),
+                const SizedBox(width: 10),
+                Text('✅ Activated ${keys.length} Gemini API Key(s) with Round-Robin & Auto-Failover!'),
               ],
             ),
           ),
@@ -344,6 +372,108 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);
+    }
+  }
+
+  Future<void> _testGeminiApiKey() async {
+    final raw = _geminiKeyCtrl.text.trim();
+    final keys = raw
+        .split(RegExp(r'[\r\n,;]+'))
+        .map((k) => k.trim())
+        .where((k) => k.isNotEmpty && !k.startsWith('#'))
+        .toList();
+
+    if (keys.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          backgroundColor: AppColors.warning,
+          content: Text('⚠️ Please enter an API key to test.'),
+        ),
+      );
+      return;
+    }
+
+    setState(() {
+      _isTesting = true;
+      _testResult = null;
+      _testSuccess = null;
+    });
+
+    final testKey = keys.first;
+    final testModels = [
+      'gemini-2.5-flash',
+      'gemini-1.5-flash',
+      'gemini-2.0-flash',
+      'gemini-3.5-flash',
+      'gemini-flash-latest',
+    ];
+
+    String lastErrReason = '';
+    int lastStatusCode = 0;
+    bool connected = false;
+    String connectedModel = '';
+
+    for (final model in testModels) {
+      try {
+        final url = Uri.parse(
+          'https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent?key=$testKey',
+        );
+        final response = await http
+            .post(
+              url,
+              headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': testKey,
+              },
+              body: jsonEncode({
+                'contents': [
+                  {
+                    'parts': [
+                      {'text': 'Say OK in one word.'}
+                    ]
+                  }
+                ]
+              }),
+            )
+            .timeout(const Duration(seconds: 12));
+
+        if (response.statusCode == 200) {
+          connected = true;
+          connectedModel = model;
+          break;
+        } else {
+          lastStatusCode = response.statusCode;
+          final errBody = response.body;
+          lastErrReason = 'HTTP ${response.statusCode}';
+          try {
+            final errJson = jsonDecode(errBody);
+            if (errJson['error']?['message'] != null) {
+              lastErrReason = errJson['error']['message'];
+            }
+          } catch (_) {}
+          // If this specific model hit quota (429), try next model
+          if (response.statusCode == 429) {
+            continue;
+          }
+        }
+      } catch (e) {
+        lastErrReason = e.toString();
+      }
+    }
+
+    if (connected) {
+      setState(() {
+        _testSuccess = true;
+        _testResult = '✅ Google Gemini Connected ($connectedModel)! API Key is 100% active, valid, and working.';
+      });
+    } else {
+      setState(() {
+        _testSuccess = false;
+        _testResult = '❌ Google API Status ($lastStatusCode): $lastErrReason';
+      });
+    }
+    if (mounted) {
+      setState(() => _isTesting = false);
     }
   }
 
@@ -448,15 +578,53 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Google Gemini API Key *',
-                        style: AppTypography.labelMd.copyWith(fontWeight: FontWeight.bold, color: AppColors.textPrimary),
+                      Row(
+                        children: [
+                          Text(
+                            'Google Gemini API Key(s) *',
+                            style: AppTypography.labelMd.copyWith(fontWeight: FontWeight.bold, color: AppColors.textPrimary),
+                          ),
+                          const SizedBox(width: 10),
+                          if (_configuredKeyCount > 0)
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: _configuredKeyCount > 1 ? const Color(0xFF059669).withAlpha(40) : AppColors.primary.withAlpha(40),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(
+                                  color: _configuredKeyCount > 1 ? const Color(0xFF34D399) : AppColors.primary,
+                                  width: 1,
+                                ),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(_configuredKeyCount > 1 ? Icons.bolt_rounded : Icons.check_circle_outline,
+                                      size: 13, color: _configuredKeyCount > 1 ? const Color(0xFF34D399) : AppColors.primary),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    _configuredKeyCount > 1
+                                        ? '⚡ $_configuredKeyCount Keys in Pool (Round-Robin & Auto-Failover)'
+                                        : '1 Key Active',
+                                    style: TextStyle(
+                                      color: _configuredKeyCount > 1 ? const Color(0xFF34D399) : AppColors.primary,
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
                       ),
                       TextButton.icon(
                         style: TextButton.styleFrom(visualDensity: VisualDensity.compact),
                         icon: const Icon(Icons.paste_rounded, size: 14, color: AppColors.primary),
-                        label: const Text('Paste Key', style: TextStyle(fontSize: 12, color: AppColors.primary)),
-                        onPressed: _pasteFromClipboard,
+                        label: const Text('Paste Key(s)', style: TextStyle(fontSize: 12, color: AppColors.primary)),
+                        onPressed: () async {
+                          await _pasteFromClipboard();
+                          setState(() {});
+                        },
                       ),
                     ],
                   ),
@@ -464,9 +632,12 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
                   TextField(
                     controller: _geminiKeyCtrl,
                     obscureText: _obscureKey,
+                    maxLines: _obscureKey ? 1 : 5,
+                    minLines: _obscureKey ? 1 : 2,
+                    onChanged: (_) => setState(() {}),
                     style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                     decoration: InputDecoration(
-                      hintText: 'AIzaSy...',
+                      hintText: 'AIzaSy... (Enter multiple keys separated by comma or new line for automatic load balancing & failover)',
                       filled: true,
                       fillColor: AppColors.surfaceContainerLowest,
                       prefixIcon: const Icon(Icons.key_rounded, size: 18, color: AppColors.primary),
@@ -486,22 +657,23 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
                     ),
                   ),
                   const SizedBox(height: 10),
-                  // Quota / Switch API Key Tip
+                  // Multi-Key Load Balancing Tip
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                     decoration: BoxDecoration(
-                      color: AppColors.info.withValues(alpha: 0.1),
+                      color: const Color(0xFF065F46).withAlpha(35),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: AppColors.info.withValues(alpha: 0.3)),
+                      border: Border.all(color: const Color(0xFF10B981).withAlpha(80)),
                     ),
                     child: const Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Icon(Icons.info_outline_rounded, size: 16, color: AppColors.info),
+                        Icon(Icons.bolt_rounded, size: 18, color: Color(0xFF34D399)),
                         SizedBox(width: 10),
                         Expanded(
                           child: Text(
-                            '💡 Note: Agar kisi API Key par rate limit / daily quota lag jaye, to aap yahan nayi Gemini API Key daal kar save kar sakte hain. System bina kisi downtime ke turant nayi key use karne lagega.',
-                            style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+                            '⚡ Multi-Key Load Balancer & Auto-Failover: Aap yahan ek se zyada Gemini API Keys daal sakte hain (har line me ek key, ya comma se alag karke). System har scan request ko baari-baari (Round-Robin) keys par distribute karega, aur agar kisi key par quota limit (429) ya server delay (503) aaye to turant bina kisi downtime ke dusri key par failover kar dega!',
+                            style: TextStyle(fontSize: 12, color: Color(0xFFA7F3D0), height: 1.4),
                           ),
                         ),
                       ],
@@ -509,8 +681,10 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
                   ),
                   const SizedBox(height: 16),
 
-                  // Save Button
-                  Row(
+                  // Save & Test Buttons
+                  Wrap(
+                    spacing: 12,
+                    runSpacing: 10,
                     children: [
                       ElevatedButton.icon(
                         style: ElevatedButton.styleFrom(
@@ -523,13 +697,69 @@ class _ApiCredentialsTabState extends State<_ApiCredentialsTab> {
                             ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black))
                             : const Icon(Icons.save_rounded, size: 18),
                         label: Text(
-                          _isSaving ? 'Saving & Activating...' : 'Save & Activate Gemini AI Key',
+                          _isSaving
+                              ? 'Saving & Activating...'
+                              : (_configuredKeyCount > 1
+                                  ? 'Save & Activate $_configuredKeyCount Gemini Keys (Load Balanced)'
+                                  : 'Save & Activate Gemini AI Key'),
                           style: const TextStyle(fontWeight: FontWeight.bold),
                         ),
                         onPressed: _isSaving ? null : _saveGeminiApiKey,
                       ),
+                      OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.cyanAccent,
+                          side: const BorderSide(color: Colors.cyanAccent, width: 1.2),
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        icon: _isTesting
+                            ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.cyanAccent))
+                            : const Icon(Icons.network_check_rounded, size: 18),
+                        label: Text(
+                          _isTesting ? 'Testing Connection...' : '⚡ Test API Key Connection',
+                          style: const TextStyle(fontWeight: FontWeight.bold),
+                        ),
+                        onPressed: (_isSaving || _isTesting) ? null : _testGeminiApiKey,
+                      ),
                     ],
                   ),
+                  if (_testResult != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: _testSuccess == true
+                            ? Colors.green.withValues(alpha: 0.15)
+                            : Colors.red.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: _testSuccess == true ? Colors.green : Colors.redAccent,
+                          width: 1.2,
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            _testSuccess == true ? Icons.check_circle_rounded : Icons.error_outline_rounded,
+                            color: _testSuccess == true ? Colors.greenAccent : Colors.redAccent,
+                            size: 20,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _testResult!,
+                              style: TextStyle(
+                                color: _testSuccess == true ? Colors.greenAccent : Colors.redAccent,
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ],
@@ -596,13 +826,142 @@ class _DatabaseResetTab extends ConsumerStatefulWidget {
 
 class _DatabaseResetTabState extends ConsumerState<_DatabaseResetTab> {
   bool _isWiping = false;
+  bool _isCompacting = false;
+  bool _isBackingUp = false;
+
+  Future<void> _compactDatabase() async {
+    setState(() => _isCompacting = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final res = await DatabaseService.instance.compactDatabase();
+      if (!mounted) return;
+      if (res.containsKey('error')) {
+        messenger.showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.red.shade800,
+            content: Text('❌ Compaction failed: ${res['error']}'),
+          ),
+        );
+      } else {
+        final saved = res['savedMb'] ?? '0.00';
+        final finalMb = res['finalMb'] ?? '0.00';
+        messenger.showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.teal.shade800,
+            content: Row(
+              children: [
+                const Icon(Icons.speed_rounded, color: Colors.white),
+                const SizedBox(width: 10),
+                Text('⚡ Database Compacted! Current: $finalMb MB (Reclaimed: $saved MB space)'),
+              ],
+            ),
+            duration: const Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(backgroundColor: Colors.red, content: Text('Error: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isCompacting = false);
+    }
+  }
+
+  Future<void> _exportCompressedBackup() async {
+    setState(() => _isBackingUp = true);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final dateStr = DateFormat('yyyyMMdd_HHmm').format(DateTime.now());
+      final defaultName = 'opscore_pro_backup_$dateStr.db.gz';
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: 'Save Compressed Database Backup',
+        fileName: defaultName,
+        type: FileType.custom,
+        allowedExtensions: ['gz', 'db'],
+      );
+      if (path != null && path.isNotEmpty) {
+        final file = await DatabaseService.instance.createCompressedBackup(path);
+        if (!mounted) return;
+        final sizeKb = (await file.length()) / 1024;
+        messenger.showSnackBar(
+          SnackBar(
+            backgroundColor: Colors.green.shade800,
+            content: Row(
+              children: [
+                const Icon(Icons.check_circle_rounded, color: Colors.white),
+                const SizedBox(width: 10),
+                Text('📦 Compressed Backup Created (${sizeKb.toStringAsFixed(1)} KB) at ${file.path}'),
+              ],
+            ),
+            duration: const Duration(seconds: 5),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(backgroundColor: Colors.red, content: Text('Backup failed: $e')));
+      }
+    } finally {
+      if (mounted) setState(() => _isBackingUp = false);
+    }
+  }
+
+  Future<void> _restoreCompressedBackup() async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final res = await FilePicker.platform.pickFiles(
+        dialogTitle: 'Select Compressed Backup File (.db.gz or .db)',
+        type: FileType.custom,
+        allowedExtensions: ['gz', 'db'],
+      );
+      if (res != null && res.files.single.path != null) {
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: const Color(0xFF1E293B),
+            title: const Text('Restore Database?', style: TextStyle(color: Colors.amberAccent)),
+            content: Text(
+              'Restoring will REPLACE all current data with the selected backup:\n\n${res.files.single.path}\n\nDo you want to proceed?',
+              style: const TextStyle(color: Colors.white70),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.amber.shade800),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('Confirm Restore', style: TextStyle(color: Colors.white)),
+              ),
+            ],
+          ),
+        );
+        if (confirmed == true && mounted) {
+          final file = File(res.files.single.path!);
+          await DatabaseService.instance.restoreCompressedBackup(file);
+          await ref.read(ticketSalesViewModelProvider.notifier).loadSales();
+          if (mounted) {
+            messenger.showSnackBar(
+              SnackBar(
+                backgroundColor: Colors.green.shade800,
+                content: const Text('🔄 Database Restored Successfully! All records reloaded.'),
+              ),
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(SnackBar(backgroundColor: Colors.red, content: Text('Restore failed: $e')));
+      }
+    }
+  }
 
   Future<void> _showConfirmWipeDialog(BuildContext context, {required bool wipeSalesOnly}) async {
     final messenger = ScaffoldMessenger.of(context);
     final title = wipeSalesOnly ? 'Wipe All Ticket Sales Data' : 'Wipe All System Data (0)';
     final content = wipeSalesOnly
-        ? 'Are you sure you want to permanently DELETE all ticket bookings from Local SQLite & Cloud?\n\nThis will reset ticket sales back to 0. This action CANNOT be undone!'
-        : '⚠️ DANGER: ARE YOU SURE?\n\nThis will completely WIPE & RESET:\n• All Ticket Bookings (0)\n• WhatsApp Photos & Parchas (0)\n• Lottery Draw Results (0)\n• Collector Payments & Ledgers (0)\n\nAll data will be reset to a clean blank state (0)!';
+        ? 'Are you sure you want to permanently DELETE all ticket bookings from Local SQLite Database?\n\nThis will reset ticket sales back to 0. This action CANNOT be undone!'
+        : '⚠️ DANGER: ARE YOU SURE?\n\nThis will completely WIPE & RESET:\n• All Ticket Bookings (0)\n• WhatsApp Photos & Parchas (0)\n• Lottery Draw Results (0)\n• Collector Payments & Ledgers (0)\n\nAll data will be reset to a clean blank state (0) in Local Database!';
 
     final confirmed = await showDialog<bool>(
       context: context,

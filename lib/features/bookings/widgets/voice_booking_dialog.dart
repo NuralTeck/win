@@ -77,14 +77,9 @@ class _VoiceBookingDialogState extends ConsumerState<VoiceBookingDialog> with Si
   }
 
   double _getPriceForSeries(String series) {
-    if (series.isEmpty || series == '?') return 45.0;
+    if (series.isEmpty || series == '?') return 0.0;
     final seriesState = ref.read(seriesPriceViewModelProvider);
-    double price = seriesState.getPriceForSeries(series);
-    if (price > 0) return price;
-
-    final digits = series.replaceAll(RegExp(r'\D'), '');
-    final numVal = double.tryParse(digits) ?? 12.0;
-    return numVal * 3.75;
+    return seriesState.getPriceForSeries(series);
   }
 
   double get _totalAmount {
@@ -516,11 +511,13 @@ class _VoiceBookingDialogState extends ConsumerState<VoiceBookingDialog> with Si
                               // Date Picker
                               InkWell(
                                 onTap: () async {
+                                  final first = _selectedDate.isBefore(DateTime(2020)) ? _selectedDate : DateTime(2020);
+                                  final last = _selectedDate.isAfter(DateTime(2035)) ? _selectedDate : DateTime(2035);
                                   final d = await showDatePicker(
                                     context: context,
                                     initialDate: _selectedDate,
-                                    firstDate: DateTime(2025),
-                                    lastDate: DateTime(2030),
+                                    firstDate: first,
+                                    lastDate: last,
                                   );
                                   if (d != null) setState(() => _selectedDate = d);
                                 },

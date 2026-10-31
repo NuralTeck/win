@@ -21,6 +21,21 @@ class PartySeriesHisab {
   double get grossAmount => voucherQty * rate;
   double get unsoldCredit => unsoldQty * rate;
   double get netAmount => netSoldQty * rate;
+
+  /// Numeric series factor (e.g. "20" -> 20, "100" -> 100)
+  int get seriesNumber {
+    final digits = series.replaceAll(RegExp(r'\D'), '');
+    return int.tryParse(digits) ?? (series.toLowerCase().contains('100') ? 100 : 12);
+  }
+
+  /// Total series units for Vouchers (Qty x Series, e.g. 10 tickets of Ser 20 = 200 Sem)
+  int get voucherSeriesSum => voucherQty * seriesNumber;
+
+  /// Total series units for Unsold Returns (Qty x Series)
+  int get unsoldSeriesSum => unsoldQty * seriesNumber;
+
+  /// Total series units for Net Sold (Net Qty x Series)
+  int get netSeriesSum => netSoldQty * seriesNumber;
 }
 
 class ShiftHisabBreakdown {
@@ -37,6 +52,8 @@ class ShiftHisabBreakdown {
   final double totalNetAmount;
   final List<WinningClaimModel> customerWins;
   final bool hasEntry;
+  final String? drawResultFirstPrize;
+  final LotterySambadResultModel? drawResult;
 
   ShiftHisabBreakdown({
     required this.shift,
@@ -52,10 +69,15 @@ class ShiftHisabBreakdown {
     required this.totalNetAmount,
     required this.customerWins,
     required this.hasEntry,
+    this.drawResultFirstPrize,
+    this.drawResult,
   });
 
   double get totalCustomerWinAmount => customerWins.fold(0.0, (s, w) => s + w.prizeAmount);
   double get finalNetPayable => totalNetAmount - totalCustomerWinAmount;
+  int get totalVoucherSeriesSum => seriesHisabList.fold(0, (s, item) => s + item.voucherSeriesSum);
+  int get totalUnsoldSeriesSum => seriesHisabList.fold(0, (s, item) => s + item.unsoldSeriesSum);
+  int get totalNetSeriesSum => seriesHisabList.fold(0, (s, item) => s + item.netSeriesSum);
 }
 
 class DateHisabBreakdown {
@@ -158,28 +180,43 @@ class PartyHisabSummary {
   double get totalCustomerWinAmount => customerWins.fold(0.0, (s, w) => s + w.prizeAmount);
   double get totalUnsoldWinAmount => unsoldWins.fold(0.0, (s, w) => s + w.prizeAmount);
   double get finalNetPayable => totalNetAmount - totalCustomerWinAmount;
+
+  /// Total series units for Vouchers (Σ Qty x Series)
+  int get totalVoucherSeriesSum => seriesHisabList.fold(0, (s, item) => s + item.voucherSeriesSum);
+
+  /// Total series units for Unsold returns (Σ Qty x Series)
+  int get totalUnsoldSeriesSum => seriesHisabList.fold(0, (s, item) => s + item.unsoldSeriesSum);
+
+  /// Total series units for Net Sold (Σ Net Qty x Series)
+  int get totalNetSeriesSum => seriesHisabList.fold(0, (s, item) => s + item.netSeriesSum);
+
+  /// Effective rate per unit (e.g. 3.75) for quick audit multiplier cross-check
+  double get effectivePerUnitRate {
+    if (totalNetSeriesSum > 0) {
+      return totalNetAmount / totalNetSeriesSum;
+    }
+    if (totalVoucherSeriesSum > 0) {
+      return totalVoucherAmount / totalVoucherSeriesSum;
+    }
+    return 3.75;
+  }
 }
 
 class PartyHisabSettlementEngine {
-  static double getRateForSeries(String series) {
-    switch (series.trim()) {
-      case '5':  return 1.88;
-      case '6':  return 2.25;
-      case '12': return 4.50;
-      case '20': return 7.50;
-      case '24': return 9.00;
-      case '36': return 13.50;
-      case '40': return 15.00;
-      case '50': return 18.75;
-      case '60': return 22.50;
-      case '84': return 31.50;
-      case '100': return 37.50;
-      default: return 4.50;
+  static double Function(String series)? customRateLookup;
+
+  static double getRateForSeries(String series, {double? customPerUnitRate}) {
+    if (customRateLookup != null) {
+      return customRateLookup!(series);
     }
+    final digits = series.replaceAll(RegExp(r'\D'), '');
+    final numVal = double.tryParse(digits) ?? 12.0;
+    final perUnit = customPerUnitRate ?? 3.75;
+    return numVal * perUnit;
   }
 
   static String normalizeDate(String d) {
-    final clean = d.trim().replaceAll('/', '-');
+    final clean = d.trim().replaceAll('/', '-').replaceAll('.', '-');
     final parts = clean.split('-');
     if (parts.length == 3) {
       if (parts[0].length == 4) {
@@ -191,13 +228,13 @@ class PartyHisabSettlementEngine {
     return clean;
   }
 
-  static String _canonicalShift(String raw) {
-    final lower = raw.toLowerCase().trim();
-    if (lower.contains('1 pm') || lower.contains('1pm') || lower.contains('1:00') || lower.contains('morning')) {
+  static String _canonicalShift(String raw, [String? secondary]) {
+    final lower = '$raw ${secondary ?? ""}'.toLowerCase().trim();
+    if (lower.contains('1 pm') || lower.contains('1pm') || lower.contains('1:00') || lower.contains('morning') || lower == '1') {
       return '1PM';
-    } else if (lower.contains('6 pm') || lower.contains('6pm') || lower.contains('6:00') || lower.contains('day')) {
+    } else if (lower.contains('6 pm') || lower.contains('6pm') || lower.contains('6:00') || lower.contains('day') || lower == '6') {
       return '6PM';
-    } else if (lower.contains('8 pm') || lower.contains('8pm') || lower.contains('8:00') || lower.contains('night') || lower.contains('evening')) {
+    } else if (lower.contains('8 pm') || lower.contains('8pm') || lower.contains('8:00') || lower.contains('night') || lower.contains('evening') || lower == '8') {
       return '8PM';
     }
     return lower;
@@ -311,20 +348,25 @@ class PartyHisabSettlementEngine {
       List<WinningClaimModel> customerWins = [];
       const List<WinningClaimModel> unsoldWins = [];
 
+      // Group vouchers and unsold by exact date & canonical shift in a single O(N) pass!
+      final Map<String, List<VoucherModel>> shiftDateVouchers = {};
+      final Map<String, List<UnsoldModel>> shiftDateUnsold = {};
+      final Set<String> partyDatesWithData = {};
+
+      for (final v in pVouchers) {
+        final dNorm = normalizeDate(v.date);
+        final k = '${dNorm}_${_canonicalShift(v.drawShift)}';
+        shiftDateVouchers.putIfAbsent(k, () => []).add(v);
+        partyDatesWithData.add(dNorm);
+      }
+      for (final u in pUnsold) {
+        final dNorm = normalizeDate(u.date);
+        final k = '${dNorm}_${_canonicalShift(u.drawShift)}';
+        shiftDateUnsold.putIfAbsent(k, () => []).add(u);
+        partyDatesWithData.add(dNorm);
+      }
+
       if (allResults != null && allResults.isNotEmpty) {
-        // Group vouchers and unsold by exact date & shift so 1 PM vouchers only match 1 PM results, etc.
-        final Map<String, List<VoucherModel>> shiftDateVouchers = {};
-        final Map<String, List<UnsoldModel>> shiftDateUnsold = {};
-
-        for (final v in pVouchers) {
-          final k = '${normalizeDate(v.date)}_${_canonicalShift(v.drawShift)}';
-          shiftDateVouchers.putIfAbsent(k, () => []).add(v);
-        }
-        for (final u in pUnsold) {
-          final k = '${normalizeDate(u.date)}_${_canonicalShift(u.drawShift)}';
-          shiftDateUnsold.putIfAbsent(k, () => []).add(u);
-        }
-
         final allKeys = {...shiftDateVouchers.keys, ...shiftDateUnsold.keys};
         for (final k in allKeys) {
           final parts = k.split('_');
@@ -336,7 +378,7 @@ class PartyHisabSettlementEngine {
           if (index == null) {
             final res = allResults.where((r) {
               final rDate = normalizeDate(r.drawDateStr);
-              final rShift = _canonicalShift(r.drawName);
+              final rShift = _canonicalShift(r.drawName, r.drawTimeStr);
               return rDate == tDate && rShift == tShift;
             }).firstOrNull;
 
@@ -349,8 +391,8 @@ class PartyHisabSettlementEngine {
           if (index != null) {
             final wins = _matchPartyWinsFast(
               winningIndex: index,
-              vouchers: shiftDateVouchers[k] ?? [],
-              unsoldList: shiftDateUnsold[k] ?? [],
+              vouchers: shiftDateVouchers[k] ?? const [],
+              unsoldList: shiftDateUnsold[k] ?? const [],
               partyName: partyDisplayName,
               prizeConfig: prizeConfig,
             );
@@ -377,24 +419,27 @@ class PartyHisabSettlementEngine {
         );
       }
 
-      // Build Date & Shift Breakdowns (for Shift == ALL and Custom Date Ranges)
+      // Pre-group customer wins by date and shift for instant O(1) lookup!
+      final Map<String, List<WinningClaimModel>> shiftDateWins = {};
+      for (final w in customerWins) {
+        final wShift = _canonicalShift(w.drawName);
+        for (final d in partyDatesWithData) {
+          if (w.drawId.contains(d) || w.drawName.contains(d)) {
+            shiftDateWins.putIfAbsent('${d}_$wShift', () => []).add(w);
+            break;
+          }
+        }
+      }
+
+      // Build Date & Shift Breakdowns (High Performance O(1) Lookups)
       final List<DateHisabBreakdown> dateBreakdowns = [];
 
-      final List<String> datesToProcess = [];
+      final List<String> datesToProcess;
       if (hasRange) {
-        try {
-          final sDate = DateTime.parse(startDate);
-          final eDate = DateTime.parse(endDate);
-          var curr = sDate;
-          while (!curr.isAfter(eDate)) {
-            datesToProcess.add('${curr.year}-${curr.month.toString().padLeft(2, '0')}-${curr.day.toString().padLeft(2, '0')}');
-            curr = curr.add(const Duration(days: 1));
-          }
-        } catch (_) {
-          datesToProcess.add(normalizeDate(selectedDate));
-        }
+        // In date range mode, ONLY process dates that actually have vouchers/unsold!
+        datesToProcess = partyDatesWithData.toList()..sort();
       } else {
-        datesToProcess.add(normalizeDate(selectedDate));
+        datesToProcess = [normalizeDate(selectedDate)];
       }
 
       final shiftsToProcess = selectedShift == 'ALL'
@@ -422,14 +467,10 @@ class PartyHisabSettlementEngine {
 
         for (final sh in shiftsToProcess) {
           final shCanonical = _canonicalShift(sh);
+          final lookupKey = '${dStr}_$shCanonical';
 
-          final shVouchers = pVouchers.where((v) {
-            return normalizeDate(v.date) == dStr && _canonicalShift(v.drawShift) == shCanonical;
-          }).toList();
-
-          final shUnsold = pUnsold.where((u) {
-            return normalizeDate(u.date) == dStr && _canonicalShift(u.drawShift) == shCanonical;
-          }).toList();
+          final shVouchers = shiftDateVouchers[lookupKey] ?? const [];
+          final shUnsold = shiftDateUnsold[lookupKey] ?? const [];
 
           final Map<String, PartySeriesHisab> shSeriesMap = {};
           for (final v in shVouchers) {
@@ -455,15 +496,23 @@ class PartyHisabSettlementEngine {
           final shTotUAmt = shSeriesList.fold(0.0, (sum, s) => sum + s.unsoldCredit);
           final shTotNetAmt = shSeriesList.fold(0.0, (sum, s) => sum + s.netAmount);
 
-          final shWins = customerWins.where((w) {
-            final wShift = _canonicalShift(w.drawName);
-            final wDrawId = w.drawId;
-            final matchesDraw = wDrawId.contains(dStr) || w.drawName.contains(dStr);
-            return (datesToProcess.length > 1 ? matchesDraw : true) && wShift == shCanonical;
-          }).toList();
+          final shWins = shiftDateWins[lookupKey] ??
+              customerWins.where((w) {
+                final wShift = _canonicalShift(w.drawName);
+                final matchesDraw = w.drawId.contains(dStr) || w.drawName.contains(dStr);
+                return (datesToProcess.length > 1 ? matchesDraw : true) && wShift == shCanonical;
+              }).toList();
 
           final bool hasEntry = shVouchers.isNotEmpty || shUnsold.isNotEmpty || shWins.isNotEmpty;
           if (hasEntry) dateHasEntry = true;
+
+          final matchingDrawResult = (allResults ?? (lotteryResult != null ? [lotteryResult] : null))?.where((r) {
+            final rDate = normalizeDate(r.drawDateStr);
+            final rShift = _canonicalShift(r.drawName, r.drawTimeStr);
+            final dNorm = normalizeDate(dStr);
+            final matchesDate = rDate == dNorm || dNorm.contains(rDate) || rDate.contains(dNorm);
+            return matchesDate && rShift == shCanonical;
+          }).firstOrNull;
 
           final sb = ShiftHisabBreakdown(
             shift: sh,
@@ -479,6 +528,8 @@ class PartyHisabSettlementEngine {
             totalNetAmount: shTotNetAmt,
             customerWins: shWins,
             hasEntry: hasEntry,
+            drawResultFirstPrize: matchingDrawResult?.firstPrize,
+            drawResult: matchingDrawResult,
           );
 
           shiftBreakdowns.add(sb);
@@ -491,20 +542,22 @@ class PartyHisabSettlementEngine {
           dTotWinAmt += sb.totalCustomerWinAmount;
         }
 
-        dateBreakdowns.add(DateHisabBreakdown(
-          date: dStr,
-          formattedDate: formattedDate,
-          shifts: shiftBreakdowns,
-          totalVouchers: dTotV,
-          totalUnsold: dTotU,
-          totalNetSold: dTotNet,
-          totalVoucherAmount: dTotVAmt,
-          totalUnsoldAmount: dTotUAmt,
-          totalNetAmount: dTotNetAmt,
-          totalWinAmount: dTotWinAmt,
-          finalNetPayable: dTotNetAmt - dTotWinAmt,
-          hasEntry: dateHasEntry,
-        ));
+        if (dateHasEntry || !hasRange) {
+          dateBreakdowns.add(DateHisabBreakdown(
+            date: dStr,
+            formattedDate: formattedDate,
+            shifts: shiftBreakdowns,
+            totalVouchers: dTotV,
+            totalUnsold: dTotU,
+            totalNetSold: dTotNet,
+            totalVoucherAmount: dTotVAmt,
+            totalUnsoldAmount: dTotUAmt,
+            totalNetAmount: dTotNetAmt,
+            totalWinAmount: dTotWinAmt,
+            finalNetPayable: dTotNetAmt - dTotWinAmt,
+            hasEntry: dateHasEntry,
+          ));
+        }
       }
 
       // Compute Sub-Seller breakdowns if grouped by Dealer
@@ -719,6 +772,8 @@ class PartyHisabSettlementEngine {
               id: 'win_${now.microsecondsSinceEpoch}_${claims.length}',
               drawId: winningIndex.result.drawId,
               drawName: winningIndex.result.drawName,
+              drawDate: winningIndex.result.drawDateStr,
+              drawTime: winningIndex.result.drawTimeStr,
               prizeTier: info.tier,
               winningNumber: '${info.winningNumberStr} (#$tkt5Str)',
               prizeAmount: payout,

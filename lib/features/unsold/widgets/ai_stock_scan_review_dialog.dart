@@ -11,6 +11,8 @@ import '../models/voucher_model.dart';
 import '../models/unsold_model.dart';
 import '../viewmodels/voucher_viewmodel.dart';
 import '../viewmodels/unsold_viewmodel.dart';
+import '../../sellers/viewmodels/seller_customer_viewmodel.dart';
+import 'searchable_dealer_picker_dialog.dart';
 
 class _FastVoucher {
   final String partyLower;
@@ -74,6 +76,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
   bool _isSaving = false;
   bool _isImageMinimized = false;
   int _currentImageIndex = 0;
+  bool _filterByCurrentPhoto = true; // 📸 Strictly show only active slip's numbers by default
   List<Uint8List> get _imagesList {
     if (widget.allImageBytes != null && widget.allImageBytes!.isNotEmpty) {
       return widget.allImageBytes!;
@@ -162,24 +165,42 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     _loadDealersAndSellers();
   }
 
-  Future<void> _loadDealersAndSellers() async {
-    final list = await DatabaseService.instance.getSellerCustomers();
+  void _loadDealersAndSellers() {
+    final list = ref.read(sellerCustomerViewModelProvider).sellers;
+    if (list.isEmpty) {
+      ref.read(sellerCustomerViewModelProvider.notifier).loadSellers();
+      return;
+    }
     final dealers = <String>[];
     final map = <String, List<String>>{};
 
     for (final s in list) {
+      final name = s.name.trim();
+      if (name.isEmpty) continue;
       if (s.isDealer) {
-        if (!dealers.contains(s.name)) dealers.add(s.name);
-        map.putIfAbsent(s.name, () => []);
+        dealers.add(name);
+        map[name] = [];
+        map[name.toLowerCase()] = [];
       }
     }
+    dealers.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+
     for (final s in list) {
-      if (!s.isDealer && s.parentDealer != null && s.parentDealer!.isNotEmpty) {
-        map.putIfAbsent(s.parentDealer!, () => []);
-        if (!map[s.parentDealer!]!.contains(s.name)) {
-          map[s.parentDealer!]!.add(s.name);
+      final name = s.name.trim();
+      if (name.isEmpty || s.isDealer) continue;
+      final parent = (s.parentDealer ?? '').trim();
+      if (parent.isNotEmpty) {
+        if (map.containsKey(parent)) {
+          map[parent]!.add(name);
+        }
+        final pLower = parent.toLowerCase();
+        if (map.containsKey(pLower) && pLower != parent) {
+          map[pLower]!.add(name);
         }
       }
+    }
+    for (final l in map.values) {
+      l.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
     }
 
     if (mounted) {
@@ -217,7 +238,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
       list.add(_FastVoucher(
         partyLower: v.partyName.trim().toLowerCase(),
         dealerLower: v.effectiveDealer.trim().toLowerCase(),
-        dateClean: v.date.replaceAll('/', '-').trim(),
+        dateClean: v.date.replaceAll('/', '-').replaceAll('.', '-').trim(),
         shiftLower: v.drawShift.trim().toLowerCase(),
         seriesUpper: ser,
         seriesNum: ser.replaceAll(RegExp(r'\D'), ''),
@@ -229,6 +250,49 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     _fastVouchers = list;
   }
 
+  // 🛡️ Robust Date & Shift Normalization Helpers
+  static String _normalizeDateToYmd(String d) {
+    final clean = d.replaceAll('/', '-').replaceAll('.', '-').trim();
+    final parts = clean.split('-');
+    if (parts.length >= 3) {
+      if (parts[0].length == 4) {
+        final y = parts[0];
+        final m = parts[1].padLeft(2, '0');
+        final day = parts[2].padLeft(2, '0');
+        return '$y-$m-$day';
+      } else {
+        final day = parts[0].padLeft(2, '0');
+        final m = parts[1].padLeft(2, '0');
+        var y = parts[2];
+        if (y.length == 2) y = '20$y';
+        return '$y-$m-$day';
+      }
+    }
+    return clean;
+  }
+
+  static String _extractMonthDay(String d) {
+    final clean = d.replaceAll('/', '-').replaceAll('.', '-').trim();
+    final parts = clean.split('-');
+    if (parts.length >= 3) {
+      if (parts[0].length == 4) {
+        return '${parts[1].padLeft(2, '0')}-${parts[2].padLeft(2, '0')}';
+      } else {
+        return '${parts[1].padLeft(2, '0')}-${parts[0].padLeft(2, '0')}';
+      }
+    }
+    return clean;
+  }
+
+  static String _canonicalShift(String s) {
+    final lower = s.toLowerCase().trim();
+    if (lower == 'all') return 'all';
+    if (lower.contains('mor') || lower.contains('1')) return '1';
+    if (lower.contains('day') || lower.contains('6')) return '6';
+    if (lower.contains('eve') || lower.contains('nig') || lower.contains('8') || lower.contains('night')) return '8';
+    return lower.replaceAll(RegExp(r'[^a-z0-9]'), '');
+  }
+
   void _refreshValidationCache() {
     _validationCache.clear();
     int unmatch = 0;
@@ -237,16 +301,57 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     int valid = 0;
     int doubts = 0;
 
+    // Track internal duplicates within the current reviewed batch
+    final seenRanges = <String, GeminiScannedItem>{};
+
     for (final item in _items) {
       if (item.aiDoubt != null && item.aiDoubt!.isNotEmpty) {
         doubts++;
       }
-      final status = _computeItemValidationStatus(item);
+
+      final from = item.fromTicket.trim();
+      final to = item.toTicket.trim();
+      final startI = int.tryParse(from);
+      final endI = int.tryParse(to);
+      final cleanSer = item.series.trim().toUpperCase();
+      final dateStr = DateFormat('yyyy-MM-dd').format(_activeDate);
+      final rawItemDate = (item.targetDate != null && item.targetDate!.isNotEmpty) ? item.targetDate! : dateStr;
+      final normItemDate = _normalizeDateToYmd(rawItemDate);
+      final rawItemShift = (item.drawShift != null && item.drawShift!.isNotEmpty) ? item.drawShift! : _selectedShift;
+      final itemCanonicalShift = _canonicalShift(rawItemShift);
+
+      bool isBatchDuplicate = false;
+      if (startI != null && endI != null) {
+        for (final entry in seenRanges.entries) {
+          final parts = entry.key.split('_');
+          if (parts.length >= 3 && parts[0] == normItemDate && parts[1] == itemCanonicalShift && parts[2] == cleanSer) {
+            final prevFrom = int.tryParse(entry.value.fromTicket) ?? 0;
+            final prevTo = int.tryParse(entry.value.toTicket) ?? prevFrom;
+            if (startI <= prevTo && endI >= prevFrom) {
+              isBatchDuplicate = true;
+              break;
+            }
+          }
+        }
+      }
+
+      String? status;
+      if (isBatchDuplicate) {
+        status = 'Duplicate in Scan';
+      } else {
+        status = _computeItemValidationStatus(item);
+      }
+
       _validationCache[item] = status;
+
+      if (startI != null && endI != null && !isBatchDuplicate) {
+        seenRanges['${normItemDate}_${itemCanonicalShift}_$cleanSer'] = item;
+      }
+
       if (status != null) {
         unmatch++;
-        if (status.contains('Not in Voucher')) notInVouch++;
-        if (status.contains('Already')) already++;
+        if (status.contains('Not in Voucher') || status.contains('Issued to')) notInVouch++;
+        if (status.contains('Already') || status.contains('Duplicate')) already++;
       } else {
         valid++;
       }
@@ -497,8 +602,8 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     final picked = await showDatePicker(
       context: context,
       initialDate: _activeDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2035),
+      firstDate: DateTime(1970),
+      lastDate: DateTime(2999),
       builder: (context, child) => Theme(
         data: Theme.of(context).copyWith(
           colorScheme: ColorScheme.dark(
@@ -550,12 +655,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     for (final item in _items) {
       if (item.series.isNotEmpty && item.series != '?') {
         final p = seriesState.getPriceForSeries(item.series);
-        if (p > 0) {
-          item.amount = p * (item.quantity > 0 ? item.quantity : 1);
-        } else {
-          final numVal = double.tryParse(item.series.replaceAll(RegExp(r'\D'), '')) ?? 12.0;
-          item.amount = (numVal * 3.75) * (item.quantity > 0 ? item.quantity : 1);
-        }
+        item.amount = p * (item.quantity > 0 ? item.quantity : 1);
       }
     }
   }
@@ -563,10 +663,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
   double _getPriceForSeries(String series) {
     if (series.isEmpty || series == '?') return 0.0;
     final seriesState = ref.read(seriesPriceViewModelProvider);
-    final p = seriesState.getPriceForSeries(series);
-    if (p > 0) return p;
-    final numVal = double.tryParse(series.replaceAll(RegExp(r'\D'), '')) ?? 12.0;
-    return numVal * 3.75;
+    return seriesState.getPriceForSeries(series);
   }
 
   double get _totalAmount => _items.fold(0.0, (sum, i) => sum + i.amount);
@@ -648,6 +745,10 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
   List<GeminiScannedItem> get _displayedItems {
     var filtered = _items;
+    // 📸 Strictly filter by current photo/slip if multiple slips uploaded
+    if (_imagesList.length > 1 && _filterByCurrentPhoto) {
+      filtered = filtered.where((it) => it == _activeEditingItem || it.photoIndex == _currentImageIndex).toList();
+    }
     if (_selectedSeriesFilter != 'ALL') {
       if (_selectedSeriesFilter == '?') {
         filtered = filtered.where((it) => it == _activeEditingItem || it.series == '?' || it.series.trim().isEmpty).toList();
@@ -760,8 +861,8 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     final picked = await showDatePicker(
       context: context,
       initialDate: widget.activeDate,
-      firstDate: widget.activeDate.subtract(const Duration(days: 30)),
-      lastDate: widget.activeDate.add(const Duration(days: 30)),
+      firstDate: DateTime(1970),
+      lastDate: DateTime(2999),
       builder: (context, child) => Theme(
         data: Theme.of(context).copyWith(
           colorScheme: const ColorScheme.dark(
@@ -1492,21 +1593,12 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
     final cleanP2 = partyLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
 
     final dateStr = DateFormat('yyyy-MM-dd').format(_activeDate);
-    final itemDate = (item.targetDate != null && item.targetDate!.isNotEmpty ? item.targetDate! : dateStr).replaceAll('/', '-').trim();
-    final itemShift = (item.drawShift != null && item.drawShift!.isNotEmpty) ? item.drawShift! : _selectedShift;
-    final shiftClean = itemShift.toLowerCase().trim();
-    final cleanS2 = shiftClean.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
+    final rawItemDate = (item.targetDate != null && item.targetDate!.isNotEmpty) ? item.targetDate! : dateStr;
+    final itemDate = _normalizeDateToYmd(rawItemDate);
+    final itemMd = _extractMonthDay(rawItemDate);
 
-    // Helper to extract MM-DD to prevent year mismatch (e.g. 2021-08-31 vs 2026-08-31)
-    String toMd(String d) {
-      final parts = d.replaceAll('/', '-').split('-');
-      if (parts.length >= 3) {
-        if (parts[0].length == 4) return '${parts[1].padLeft(2, '0')}-${parts[2].padLeft(2, '0')}';
-        return '${parts[1].padLeft(2, '0')}-${parts[0].padLeft(2, '0')}';
-      }
-      return d;
-    }
-    final itemMd = toMd(itemDate);
+    final rawItemShift = (item.drawShift != null && item.drawShift!.isNotEmpty) ? item.drawShift! : _selectedShift;
+    final itemCanonicalShift = _canonicalShift(rawItemShift);
 
     final startI = int.tryParse(from);
     final endI = int.tryParse(to);
@@ -1516,14 +1608,14 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
     if (widget.mode == StockScanMode.voucher) {
       for (final v in _fastVouchers) {
-        final matchesDate = v.dateClean == itemDate || toMd(v.dateClean) == itemMd;
+        final normVDate = _normalizeDateToYmd(v.dateClean);
+        final vMd = _extractMonthDay(v.dateClean);
+        final matchesDate = normVDate == itemDate || vMd == itemMd || v.dateClean == rawItemDate;
         if (matchesDate && (v.seriesUpper == cleanSer || (serNumItem.isNotEmpty && v.seriesNum == serNumItem))) {
-          final cleanS1 = v.shiftLower.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
-          final matchesShift = itemShift == 'ALL' ||
-              v.shiftLower == shiftClean ||
-              cleanS1 == cleanS2 ||
-              v.shiftLower.contains(shiftClean.replaceAll('dear ', ''));
-          // 🔒 Only flag as duplicate if issued to the SAME party! Different parties CAN have the same series & ticket numbers!
+          final vCanonicalShift = _canonicalShift(v.shiftLower);
+          final matchesShift = itemCanonicalShift == 'all' ||
+              vCanonicalShift == 'all' ||
+              vCanonicalShift == itemCanonicalShift;
           final cleanP1 = v.partyLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
           final isSameParty = partyName.isNotEmpty &&
               partyName != 'Walk-in Party' &&
@@ -1540,19 +1632,20 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
       // Unsold Mode: strictly verify that ticket was actually issued in a voucher!
       bool wasIssuedToThisParty = false;
       String? issuedToOtherParty;
+      bool foundInAnyVoucher = false;
 
       for (final v in _fastVouchers) {
-        // 1. Date matching: exact date OR Month-Day match (e.g. 31/08)
-        final matchesDate = v.dateClean == itemDate || toMd(v.dateClean) == itemMd;
+        // 1. Date matching: exact date or MM-DD match
+        final normVDate = _normalizeDateToYmd(v.dateClean);
+        final vMd = _extractMonthDay(v.dateClean);
+        final matchesDate = normVDate == itemDate || vMd == itemMd || v.dateClean == rawItemDate;
         if (!matchesDate) continue;
 
-        // 2. Shift matching: exact or cleaned (e.g. "dear 1 pm" vs "1 pm")
-        final cleanS1 = v.shiftLower.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
-        final matchesShift = itemShift == 'ALL' ||
-            v.shiftLower == shiftClean ||
-            cleanS1 == cleanS2 ||
-            v.shiftLower.contains(shiftClean.replaceAll('dear ', '')) ||
-            shiftClean.contains(v.shiftLower.replaceAll('dear ', ''));
+        // 2. Shift matching: canonical 1, 6, 8 or 'all'
+        final vCanonicalShift = _canonicalShift(v.shiftLower);
+        final matchesShift = itemCanonicalShift == 'all' ||
+            vCanonicalShift == 'all' ||
+            vCanonicalShift == itemCanonicalShift;
         if (!matchesShift) continue;
 
         // 3. Series matching:
@@ -1561,6 +1654,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
         // 4. Ticket Range matching:
         if (startI >= v.start && endI <= v.end) {
+          foundInAnyVoucher = true;
           final cleanP1 = v.partyLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
           final cleanD1 = v.dealerLower.replaceAll(RegExp(r'[^a-z0-9]'), '');
           final isThisParty = partyName.isNotEmpty &&
@@ -1594,35 +1688,37 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
           return 'Not in Voucher ($partyName)';
         }
       } else {
-        if (!wasIssuedToThisParty && issuedToOtherParty == null) {
+        if (!foundInAnyVoucher) {
           return 'Not in Voucher';
         }
       }
 
-      // Check if already returned in Unsold across the database for the SAME party
+      // 5. 🚫 BLOCK ALL DUPLICATE UNSOLD RETURNS (Regardless of party variations)
       final unsoldSource = _allUnsold.isNotEmpty
           ? _allUnsold
           : ref.read(unsoldViewModelProvider).unsoldList;
       for (final u in unsoldSource) {
-        final uDateClean = u.date.replaceAll('/', '-').trim();
-        final matchesDate = uDateClean == itemDate || toMd(uDateClean) == itemMd;
-        final uShiftClean = u.drawShift.toLowerCase().trim();
-        final cleanUS = uShiftClean.replaceAll('dear', '').replaceAll(RegExp(r'[^0-9apm]'), '');
-        final matchesShift = itemShift == 'ALL' ||
-            uShiftClean == shiftClean ||
-            cleanUS == cleanS2 ||
-            uShiftClean.contains(shiftClean.replaceAll('dear ', ''));
-        
-        final uPartyClean = u.partyName.trim().toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-        final isSameParty = cleanP2.isNotEmpty && (uPartyClean == cleanP2 || uPartyClean.contains(cleanP2) || cleanP2.contains(uPartyClean));
+        final normUDate = _normalizeDateToYmd(u.date);
+        final uMd = _extractMonthDay(u.date);
+        final matchesDate = normUDate == itemDate || uMd == itemMd || u.date == rawItemDate;
+        if (!matchesDate) continue;
 
-        if (matchesShift && matchesDate && isSameParty && u.series.trim().toUpperCase() == cleanSer) {
-          final startU = int.tryParse(u.fromTicket);
-          final endU = int.tryParse(u.toTicket);
-          if (startU != null && endU != null) {
-            if (startI <= endU && endI >= startU) {
-              return 'Already Returned';
-            }
+        final uCanonicalShift = _canonicalShift(u.drawShift);
+        final matchesShift = itemCanonicalShift == 'all' ||
+            uCanonicalShift == 'all' ||
+            uCanonicalShift == itemCanonicalShift;
+        if (!matchesShift) continue;
+
+        final uSer = u.series.trim().toUpperCase();
+        final uSerNum = uSer.replaceAll(RegExp(r'\D'), '');
+        final matchesSeries = uSer == cleanSer || (serNumItem.isNotEmpty && uSerNum == serNumItem);
+        if (!matchesSeries) continue;
+
+        final startU = int.tryParse(u.fromTicket);
+        final endU = int.tryParse(u.toTicket);
+        if (startU != null && endU != null) {
+          if (startI <= endU && endI >= startU) {
+            return 'Already Returned (${u.partyName})';
           }
         }
       }
@@ -1703,6 +1799,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
         amount: amt,
         quantity: qty,
         sellerName: _partyCtrl.text.trim(),
+        photoIndex: _currentImageIndex,
       );
       _items.add(newItem);
       _refreshValidationCache();
@@ -1754,7 +1851,12 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
     for (final it in _items) {
       final itemDate = _sanitizeTargetDate(it.targetDate, dateStr);
-      final key = '${it.series.toUpperCase()}_${it.ticketNo}_$itemDate';
+      final normDate = _normalizeDateToYmd(itemDate);
+      final canShift = _canonicalShift(it.drawShift ?? _selectedShift);
+      final key = widget.mode == StockScanMode.unsold
+          ? '${normDate}_${canShift}_${it.series.toUpperCase()}_${it.ticketNo}'
+          : '${partyName.trim().toLowerCase()}_${normDate}_${canShift}_${it.series.toUpperCase()}_${it.ticketNo}';
+
       if (seen.contains(key)) {
         invalidErrors.add('Duplicate in scan: Ser ${it.series} #${it.ticketNo} ($itemDate)');
         duplicateSkippedCount++;
@@ -1764,8 +1866,8 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
       // Check against existing unsold tickets in SQLite to block duplicate unsold returns
       if (widget.mode == StockScanMode.unsold) {
-        final status = _computeItemValidationStatus(it);
-        if (status != null && (status.contains('Already Returned') || status.contains('Already in Voucher'))) {
+        final status = _validationCache[it] ?? _computeItemValidationStatus(it);
+        if (status != null && (status.contains('Already Returned') || status.contains('Already in Voucher') || status.contains('Duplicate'))) {
           invalidErrors.add('Already in database: Ser ${it.series} #${it.ticketNo} ($status)');
           duplicateSkippedCount++;
           continue;
@@ -1960,6 +2062,11 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(sellerCustomerViewModelProvider);
+    ref.listen<SellerCustomerState>(sellerCustomerViewModelProvider, (prev, next) {
+      _loadDealersAndSellers();
+    });
+
     final isVoucher = widget.mode == StockScanMode.voucher;
     final primaryColor = isVoucher ? const Color(0xFF3B82F6) : const Color(0xFFEF4444);
     final primaryGlow = isVoucher ? const Color(0xFF1D4ED8) : const Color(0xFFDC2626);
@@ -2174,41 +2281,41 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
                         width: 1.2,
                       ),
                     ),
-                    child: DropdownButtonHideUnderline(
-                      child: DropdownButton<String>(
-                        value: _availableDealers.contains(_selectedDealer) ? _selectedDealer : null,
-                        hint: const Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(Icons.workspace_premium_rounded, size: 14, color: Color(0xFFF59E0B)),
-                            SizedBox(width: 5),
-                            Text('Main Dealer *', style: TextStyle(color: Color(0xFFF59E0B), fontSize: 11, fontWeight: FontWeight.bold)),
-                          ],
-                        ),
-                        dropdownColor: const Color(0xFF1E293B),
-                        items: _availableDealers.map((d) => DropdownMenuItem<String>(
-                              value: d,
-                              child: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(Icons.workspace_premium_rounded, size: 13, color: Color(0xFFF59E0B)),
-                                  const SizedBox(width: 6),
-                                  Text(d, style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 11.5, fontWeight: FontWeight.bold)),
-                                ],
-                              ),
-                            )).toList(),
-                        onChanged: (val) {
+                    child: InkWell(
+                      onTap: () async {
+                        final chosen = await SearchableDealerPickerDialog.show(
+                          context: context,
+                          dealers: _availableDealers,
+                          dealerToSellersMap: _dealerToSellersMap,
+                          selectedDealer: _selectedDealer,
+                          title: 'Select Dealer (${_availableDealers.length})',
+                          allowAllOption: false,
+                        );
+                        if (chosen != null) {
                           setState(() {
-                            _selectedDealer = val;
+                            _selectedDealer = chosen;
                             _selectedSubSeller = null;
-                            if (_selectedDealer != null) {
-                              _partyCtrl.text = _selectedDealer!;
-                            }
+                            _partyCtrl.text = _selectedDealer!;
                             _refreshValidationCache();
                           });
-                        },
+                        }
+                      },
+                      borderRadius: BorderRadius.circular(8),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.workspace_premium_rounded, size: 14, color: Color(0xFFF59E0B)),
+                          const SizedBox(width: 6),
+                          Text(
+                            _selectedDealer ?? 'Main Dealer * (${_availableDealers.length})',
+                            style: const TextStyle(color: Color(0xFFF59E0B), fontSize: 11.5, fontWeight: FontWeight.bold),
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.search_rounded, size: 14, color: Color(0xFFF59E0B)),
+                        ],
                       ),
                     ),
+
                   ),
                   const SizedBox(width: 8),
 
@@ -2466,6 +2573,43 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
                                           Icons.chevron_right_rounded,
                                           size: 14,
                                           color: _currentImageIndex < _imagesList.length - 1 ? primaryColor : Colors.grey.shade700,
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    InkWell(
+                                      onTap: () => setState(() => _filterByCurrentPhoto = !_filterByCurrentPhoto),
+                                      borderRadius: BorderRadius.circular(4),
+                                      child: Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                        decoration: BoxDecoration(
+                                          color: _filterByCurrentPhoto ? primaryColor.withAlpha(40) : const Color(0xFF1E293B),
+                                          borderRadius: BorderRadius.circular(4),
+                                          border: Border.all(
+                                            color: _filterByCurrentPhoto ? primaryColor : Colors.white24,
+                                            width: 1,
+                                          ),
+                                        ),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            Icon(
+                                              _filterByCurrentPhoto ? Icons.filter_alt_rounded : Icons.all_inclusive_rounded,
+                                              size: 11,
+                                              color: _filterByCurrentPhoto ? primaryColor : Colors.grey,
+                                            ),
+                                            const SizedBox(width: 3),
+                                            Text(
+                                              _filterByCurrentPhoto
+                                                  ? 'Slip ${_currentImageIndex + 1} (${_items.where((it) => it.photoIndex == _currentImageIndex).length})'
+                                                  : 'All Slips (${_items.length})',
+                                              style: TextStyle(
+                                                color: _filterByCurrentPhoto ? primaryColor : Colors.grey,
+                                                fontWeight: FontWeight.bold,
+                                                fontSize: 9.5,
+                                              ),
+                                            ),
+                                          ],
                                         ),
                                       ),
                                     ),
@@ -2997,7 +3141,7 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
                             child: Row(
                               children: [
                                 SizedBox(
-                                  width: 48,
+                                  width: _imagesList.length > 1 ? 66 : 48,
                                   child: Row(
                                     children: [
                                       InkWell(
@@ -3076,6 +3220,9 @@ class _AiStockScanReviewDialogState extends ConsumerState<AiStockScanReviewDialo
                                         primaryColor: primaryColor,
                                         activeDate: _activeDate,
                                         getRateForSeries: _getPriceForSeries,
+                                        hasMultipleSlips: _imagesList.length > 1,
+                                        currentImageIndex: _currentImageIndex,
+                                        onSlipSelected: (slipIdx) => setState(() => _currentImageIndex = slipIdx),
                                         onFocusGained: () {
                                           _activeEditingItem = item;
                                         },
@@ -3298,6 +3445,9 @@ class _ReviewItemRowWidget extends StatefulWidget {
   final int cursorOffsetFromEnd;
   final ValueChanged<int>? onCursorOffsetChanged;
   final void Function(String oldVal, String newVal, String field)? onMultiCursorSync;
+  final bool hasMultipleSlips;
+  final int currentImageIndex;
+  final ValueChanged<int>? onSlipSelected;
 
   const _ReviewItemRowWidget({
     super.key,
@@ -3320,6 +3470,9 @@ class _ReviewItemRowWidget extends StatefulWidget {
     this.cursorOffsetFromEnd = 3,
     this.onCursorOffsetChanged,
     this.onMultiCursorSync,
+    this.hasMultipleSlips = false,
+    this.currentImageIndex = 0,
+    this.onSlipSelected,
   });
 
   @override
@@ -3462,9 +3615,9 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
           child: Row(
             children: [
-              // Checkbox & Row Number
+              // Checkbox & Row Number & Slip Badge
               SizedBox(
-                width: 48,
+                width: widget.hasMultipleSlips ? 66 : 48,
                 child: Row(
                   children: [
                     Icon(
@@ -3473,17 +3626,45 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
                       color: widget.isSelected ? Colors.indigoAccent : Colors.grey.shade700,
                     ),
                     const SizedBox(width: 3),
-                    Expanded(
-                      child: Text(
-                        '${widget.idx + 1}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          color: widget.isSelected ? Colors.white : Colors.grey.shade700,
-                          fontSize: 9.5,
-                        ),
+                    Text(
+                      '${widget.idx + 1}',
+                      style: TextStyle(
+                        color: widget.isSelected ? Colors.white : Colors.grey.shade700,
+                        fontSize: 9.5,
                       ),
                     ),
+                    if (widget.hasMultipleSlips) ...[
+                      const SizedBox(width: 3),
+                      InkWell(
+                        onTap: () => widget.onSlipSelected?.call(widget.item.photoIndex),
+                        borderRadius: BorderRadius.circular(3),
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 1),
+                          decoration: BoxDecoration(
+                            color: widget.item.photoIndex == widget.currentImageIndex
+                                ? widget.primaryColor.withAlpha(40)
+                                : const Color(0xFF1E293B),
+                            borderRadius: BorderRadius.circular(3),
+                            border: Border.all(
+                              color: widget.item.photoIndex == widget.currentImageIndex
+                                  ? widget.primaryColor
+                                  : Colors.transparent,
+                              width: 0.8,
+                            ),
+                          ),
+                          child: Text(
+                            'P${widget.item.photoIndex + 1}',
+                            style: TextStyle(
+                              fontSize: 8.5,
+                              fontWeight: FontWeight.bold,
+                              color: widget.item.photoIndex == widget.currentImageIndex
+                                  ? widget.primaryColor
+                                  : Colors.white70,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
                   ],
                 ),
               ),
@@ -3499,8 +3680,8 @@ class _ReviewItemRowWidgetState extends State<_ReviewItemRowWidget> {
                     final picked = await showDatePicker(
                       context: context,
                       initialDate: currentDate,
-                      firstDate: DateTime(2020),
-                      lastDate: DateTime(2035),
+                      firstDate: DateTime(1970),
+                      lastDate: DateTime(2999),
                       builder: (context, child) => Theme(
                         data: Theme.of(context).copyWith(
                           colorScheme: ColorScheme.dark(
